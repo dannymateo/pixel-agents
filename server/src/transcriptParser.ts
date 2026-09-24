@@ -598,17 +598,14 @@ export function processTranscriptLine(
         clearAgentActivity(agent, agentId, agents, permissionTimers);
         agent.hadToolsInTurn = false;
       }
-    } else if (record.type === 'queue-operation' && record.operation === 'enqueue') {
-      // Background agent completed — parse tool-use-id from XML content
-      const content = record.content as string | undefined;
+    } else if (isTaskNotice(record) !== undefined) {
+      // Background agent completed. Only a CLI task notification completes a
+      // spawn (isTaskNotice): a queued user prompt is written as the same
+      // record and merely quoting the tag must not end a live background
+      // agent or workflow.
+      const content = isTaskNotice(record);
       if (content) {
-        // Only a CLI task notification completes a spawn: a queued user prompt
-        // is written as the same record and merely quoting the tag must not
-        // end a live background agent or workflow.
-        const completedToolId =
-          typeof content === 'string' && content.startsWith('<task-notification>')
-            ? completedSpawnToolId(agent, agentId, content, agents)
-            : undefined;
+        const completedToolId = completedSpawnToolId(agent, agentId, content, agents);
         if (completedToolId !== undefined && agent.backgroundAgentToolIds.has(completedToolId)) {
           // Finishing is not leaving (docs/adr/0003): a completed (or failed)
           // agent stays, available — its parent may resume it and the same
@@ -714,7 +711,12 @@ export function processTranscriptLine(
       // Log first occurrence of unrecognized record types to help diagnose issues
       // where Claude Code changes JSONL format. Known types we intentionally skip:
       // file-history-snapshot, queue-operation (non-enqueue), etc.
-      const knownSkippableTypes = new Set(['file-history-snapshot', 'system', 'queue-operation']);
+      const knownSkippableTypes = new Set([
+        'file-history-snapshot',
+        'system',
+        'queue-operation',
+        'attachment',
+      ]);
       if (!knownSkippableTypes.has(record.type)) {
         agent.seenUnknownRecordTypes.add(record.type);
         if (debug) {
@@ -1270,9 +1272,22 @@ const SEED_HANDOFF_INPUTS_MAX = 16;
 /** Tool ids as the API writes them; anything else is never seeded or logged. */
 const SEED_TOOL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
+/** The `<task-notification>` a record carries, when the CLI wrote it. Two
+ *  shapes exist: a session's own transcript gets a `queue-operation` enqueue;
+ *  a SUB-AGENT's transcript gets none, only an `attachment` of the queued
+ *  command with `commandMode: 'task-notification'` (seen live 2026-09-24 — a
+ *  lead that is itself a sub-agent never learned its children finished).
+ *  Anything else — a user prompt merely quoting the tag — is not a notice. */
 function isTaskNotice(record: Record<string, unknown>): string | undefined {
-  if (record.type !== 'queue-operation' || record.operation !== 'enqueue') return undefined;
-  const content = record.content;
+  let content: unknown;
+  if (record.type === 'queue-operation' && record.operation === 'enqueue') {
+    content = record.content;
+  } else if (record.type === 'attachment') {
+    const att = record.attachment as Record<string, unknown> | null | undefined;
+    if (att && att.type === 'queued_command' && att.commandMode === 'task-notification') {
+      content = att.prompt;
+    }
+  }
   return typeof content === 'string' && content.startsWith('<task-notification>')
     ? content
     : undefined;

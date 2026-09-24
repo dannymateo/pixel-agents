@@ -434,6 +434,23 @@ function notice(opts: { taskId?: string; toolUseId?: string; status?: string }):
   });
 }
 
+/** How a completion notice lands in a SUB-AGENT's own transcript (seen live
+ *  2026-09-24): no queue-operation, an `attachment` of the queued command. */
+function attachmentNotice(
+  opts: { taskId: string; status: string },
+  commandMode = 'task-notification',
+): string {
+  return JSON.stringify({
+    type: 'attachment',
+    isSidechain: true,
+    attachment: {
+      type: 'queued_command',
+      commandMode,
+      prompt: `<task-notification>\n<task-id>${opts.taskId}</task-id>\n<status>${opts.status}</status>\n<summary>Agent "x" finished</summary>\n</task-notification>`,
+    },
+  });
+}
+
 function userPrompt(text: string): string {
   return JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
 }
@@ -562,6 +579,52 @@ describe('living office lifecycle (runtime)', () => {
     leadLine(asyncLaunchResult('toolu_L', 'aaa'));
     leadLine(asyncLaunchResult('toolu_S', 'sib'));
   }
+
+  /** aaa (under the lead) spawns bbb in the background. */
+  function nestedBackgroundChild(): void {
+    leadLine(spawnToolUse('toolu_L'));
+    writeSidecar('aaa', { agentType: 'lider-fase', toolUseId: 'toolu_L', spawnDepth: 1 });
+    scan();
+    leadLine(asyncLaunchResult('toolu_L', 'aaa'));
+    appendLine('aaa', spawnToolUse('toolu_A'));
+    writeSidecar('bbb', {
+      agentType: 'desarrollador',
+      toolUseId: 'toolu_A',
+      parentAgentId: 'aaa',
+      spawnDepth: 2,
+    });
+    scan();
+    appendLine('aaa', asyncLaunchResult('toolu_A', 'bbb'));
+  }
+
+  it("a child's completion inside a sub-agent transcript (attachment) makes it available", () => {
+    nestedBackgroundChild();
+    const bbb = byKey('bbb');
+    expect(bbb.presence).toBe('working');
+    appendLine('aaa', attachmentNotice({ taskId: 'bbb', status: 'completed' }));
+    expect(bbb.presence).toBe('available');
+    expect(byKey('aaa').backgroundAgentToolIds.has('toolu_A')).toBe(true);
+  });
+
+  it('a killed notice inside a sub-agent transcript walks the child out', () => {
+    nestedBackgroundChild();
+    const bbb = byKey('bbb');
+    appendLine('aaa', attachmentNotice({ taskId: 'bbb', status: 'killed' }));
+    expect(bbb.presence).toBe('leaving');
+  });
+
+  it('only a CLI task-notification attachment counts, never a quoted tag', () => {
+    nestedBackgroundChild();
+    const bbb = byKey('bbb');
+    appendLine('aaa', attachmentNotice({ taskId: 'bbb', status: 'killed' }, 'prompt'));
+    appendLine(
+      'aaa',
+      userPrompt(
+        '<task-notification>\n<task-id>bbb</task-id>\n<status>killed</status>\n</task-notification>',
+      ),
+    );
+    expect(bbb.presence).toBe('working');
+  });
 
   it('a derived agent is born working; the root has no presence', () => {
     twoBackgroundChildren();

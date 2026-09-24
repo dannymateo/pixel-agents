@@ -8,13 +8,17 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { StateAdapter } from '../../core/src/adapter.js';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import {
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+  LEAVE_ANIMATION_MAX_MS,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
   MAX_DERIVED_AGENTS_PER_TREE,
+  PRESENCE_TICK_MS,
   RESTORED_SPAWN_MAX_IDLE_MS,
   SPAWN_SEED_MAX_BYTES,
 } from '../src/constants.js';
@@ -862,5 +866,126 @@ describe('spawn seeding from history (T18)', () => {
     tick();
     expect(derived()).toEqual([]);
     expect(root.backgroundAgentToolIds.size).toBe(0);
+  });
+
+  // ── Reappearance window (T24, docs/adr/0003 "Unused rest ends too") ──
+
+  describe('reappearance window', () => {
+    const MIN = 60_000;
+
+    /** A root whose history holds one completed background spawn `key`,
+     *  whose own transcript was last written `agoMs` ago. */
+    function finishedSpawnAgo(key: string, toolId: string, agoMs: number): string {
+      writeRootHistory([
+        userPrompt('go'),
+        spawnToolUse(toolId),
+        asyncLaunchResult(toolId, key),
+        taskIdCompletion(key),
+      ]);
+      // Its own task prompt, written before it finished (records carry timestamps).
+      const at = new Date(Date.now() - agoMs);
+      const prompt = JSON.stringify({
+        ...JSON.parse(userPrompt('tarea')),
+        timestamp: new Date(at.getTime() - MIN).toISOString(),
+      });
+      const childJsonl = writeSidecar(
+        key,
+        { agentType: 'Explore', toolUseId: toolId, spawnDepth: 1 },
+        [prompt],
+      );
+      fs.utimesSync(childJsonl, at, at);
+      return childJsonl;
+    }
+
+    it('(c) finished 2 h ago (past both windows): it does not come back, and is not live', async () => {
+      finishedSpawnAgo('win1', 'toolu_W1', 120 * MIN);
+      const root = await adoptRoot();
+      tick();
+      expect(maybeByKey('win1')).toBeUndefined();
+      expect(root.backgroundAgentToolIds.has('toolu_W1')).toBe(false);
+    });
+
+    it('(c) finished 10 min ago: back at its desk, available since its real finish', async () => {
+      const child = finishedSpawnAgo('win2', 'toolu_W2', 10 * MIN);
+      const mtime = fs.statSync(child).mtimeMs;
+      await adoptRoot();
+      tick();
+      expect(maybeByKey('win2')).toMatchObject({ presence: 'available', availableSince: mtime });
+    });
+
+    it('(c) finished 45 min ago: born in the lounge (never walks there), leaves 90 min after its real finish', async () => {
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+      });
+      try {
+        vi.setSystemTime(Date.now());
+        finishedSpawnAgo('win3', 'toolu_W3', 45 * MIN);
+        const bornAs: unknown[] = [];
+        store.on('agentAdded', (_id, a) => {
+          if (a.parentAgentId !== undefined) bornAs.push(a.presence);
+        });
+        const root = await adoptRoot();
+        tick();
+        const child = maybeByKey('win3')!;
+        expect(bornAs).toEqual(['lounge']);
+        expect(child.presence).toBe('lounge');
+        // Never announced as available / lounge: it was born there.
+        expect(messages.filter((m) => m.type === 'agentPresence')).toEqual([]);
+        // Leaves when 30 + 60 min have passed since it finished (45 from now).
+        const leftAt = IDLE_TO_LOUNGE_MS_DEFAULT + LOUNGE_TO_LEAVE_MS_DEFAULT - 45 * MIN;
+        vi.advanceTimersByTime(leftAt - PRESENCE_TICK_MS);
+        expect(child.presence).toBe('lounge');
+        vi.advanceTimersByTime(PRESENCE_TICK_MS);
+        expect(child.presence).toBe('leaving');
+        expect(root.backgroundAgentToolIds.has('toolu_W3')).toBe(false);
+        vi.advanceTimersByTime(LEAVE_ANIMATION_MAX_MS);
+        expect(maybeByKey('win3')).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 30_000);
+
+    it('a future mtime buys no extra stay: it comes back available, as if it finished now', async () => {
+      const child = finishedSpawnAgo('win4', 'toolu_W4', 0);
+      const future = new Date(Date.now() + 365 * 24 * 3600_000);
+      fs.utimesSync(child, future, future);
+      const before = Date.now();
+      await adoptRoot();
+      tick();
+      const agent = maybeByKey('win4')!;
+      expect(agent.presence).toBe('available');
+      expect(agent.availableSince).toBeGreaterThanOrEqual(before);
+      expect(agent.availableSince).toBeLessThanOrEqual(Date.now());
+    });
+
+    it('a restored persisted spawn that finished past the window is dropped, not revived working', async () => {
+      finishedSpawnAgo('win5', 'toolu_W5', 120 * MIN);
+      const restoredStore = new AgentStateStore();
+      restoredStore.setAdapter(
+        fakeAdapter(() => [
+          {
+            id: 5,
+            sessionId: SESSION,
+            terminalName: '',
+            isExternal: true,
+            jsonlFile: rootJsonl,
+            projectDir: tmpRoot,
+            backgroundAgentToolIds: ['toolu_W5'],
+          },
+        ]),
+      );
+      const restoredRuntime = new AgentRuntime(restoredStore, claudeProvider);
+      try {
+        restoredRuntime.restoreExternalAgents();
+        await flush();
+        restoredRuntime.scanTree(5);
+        expect(restoredStore.get(5)!.backgroundAgentToolIds.has('toolu_W5')).toBe(false);
+        expect([...restoredStore.values()].filter((a) => a.parentAgentId !== undefined)).toEqual(
+          [],
+        );
+      } finally {
+        restoredRuntime.dispose();
+      }
+    });
   });
 });

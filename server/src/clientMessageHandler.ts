@@ -8,15 +8,21 @@ import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import {
   clampIdleToLoungeMinutes,
+  clampLoungeToLeaveMinutes,
   getHooksConsent,
   getHooksEnabled,
   readConfig,
   setHooksEnabled,
   writeConfig,
 } from './configPersistence.js';
-import { HUE_SHIFT_MAX_DEG, IDLE_TO_LOUNGE_MS_DEFAULT, PALETTE_COUNT } from './constants.js';
+import {
+  HUE_SHIFT_MAX_DEG,
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
+  PALETTE_COUNT,
+} from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
-import { IDLE_TO_LOUNGE_SETTING_KEY } from './presence.js';
+import { IDLE_TO_LOUNGE_SETTING_KEY, LOUNGE_TO_LEAVE_SETTING_KEY } from './presence.js';
 import type { ConsentEffects } from './providers/hook/consentExecutor.js';
 import { applyConsentChoice } from './providers/hook/consentExecutor.js';
 import { hooksConsentRequest } from './providers/hook/consentGate.js';
@@ -286,8 +292,32 @@ export function handleClientMessage(
       }
       const minutes = clampIdleToLoungeMinutes(msg.minutes);
       if (minutes === undefined) break;
+      // The runtime persists and broadcasts the effective timings to every
+      // client; without one, persist and broadcast here.
       if (runtime) runtime.setIdleToLoungeMinutes(minutes);
-      else adapter?.setSetting(IDLE_TO_LOUNGE_SETTING_KEY, minutes);
+      else {
+        adapter?.setSetting(IDLE_TO_LOUNGE_SETTING_KEY, minutes);
+        store.broadcast(livingOfficeSettings(ctx));
+      }
+      break;
+    }
+
+    case 'setLoungeToLeaveMinutes': {
+      // Same reach as the idle-to-lounge delay (it decides who leaves every
+      // viewer's office): the operator's tokened connection only.
+      if (!ctx.privileged) {
+        console.warn(
+          '[Pixel Agents] Ignoring setLoungeToLeaveMinutes from an untokened client (open the tokened URL the CLI printed).',
+        );
+        break;
+      }
+      const minutes = clampLoungeToLeaveMinutes(msg.minutes);
+      if (minutes === undefined) break;
+      if (runtime) runtime.setLoungeToLeaveMinutes(minutes);
+      else {
+        adapter?.setSetting(LOUNGE_TO_LEAVE_SETTING_KEY, minutes);
+        store.broadcast(livingOfficeSettings(ctx));
+      }
       break;
     }
 
@@ -376,6 +406,22 @@ function standaloneConsentEffects(
   };
 }
 
+/** The effective living-office timings (`livingOfficeSettings`): the
+ *  runtime's when there is one, else the persisted settings, clamped. */
+function livingOfficeSettings(ctx: ClientMessageContext): Record<string, unknown> {
+  if (ctx.runtime) return ctx.runtime.livingOfficeSettings();
+  const adapter = ctx.store.getAdapter();
+  const idle = IDLE_TO_LOUNGE_MS_DEFAULT / 60_000;
+  const leave = LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000;
+  return {
+    type: 'livingOfficeSettings',
+    idleToLoungeMinutes:
+      clampIdleToLoungeMinutes(adapter?.getSetting(IDLE_TO_LOUNGE_SETTING_KEY, idle)) ?? idle,
+    loungeToLeaveMinutes:
+      clampLoungeToLeaveMinutes(adapter?.getSetting(LOUNGE_TO_LEAVE_SETTING_KEY, leave)) ?? leave,
+  };
+}
+
 function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const { store, runtime, cache } = ctx;
   const adapter = store.getAdapter();
@@ -431,6 +477,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // its sole webview reader is the hooks tooltip gate.
   const hooksEnabled = getHooksEnabled(claudeProvider.id);
   const showAreas = adapter?.getSetting(KEY_SHOW_AREAS, false) ?? false;
+  const timings = livingOfficeSettings(ctx);
   send({
     type: 'settingsLoaded',
     soundEnabled: adapter?.getSetting(KEY_SOUND_ENABLED, true) ?? true,
@@ -443,12 +490,11 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     hooksInfoShown: adapter?.getSetting(KEY_HOOKS_INFO_SHOWN, false) ?? false,
     externalAssetDirectories: cfg.externalAssetDirectories,
     showAreas,
-    idleToLoungeMinutes: runtime
-      ? runtime.idleToLoungeMs() / 60_000
-      : (clampIdleToLoungeMinutes(
-          adapter?.getSetting(IDLE_TO_LOUNGE_SETTING_KEY, IDLE_TO_LOUNGE_MS_DEFAULT / 60_000),
-        ) ?? IDLE_TO_LOUNGE_MS_DEFAULT / 60_000),
+    idleToLoungeMinutes: timings.idleToLoungeMinutes,
+    loungeToLeaveMinutes: timings.loungeToLeaveMinutes,
   });
+  // 4b. The effective living-office timings (the server's clamped values).
+  send(timings);
 
   // 4a. Actual install state, distinct from the hooksEnabled preference —
   // hooksEnabled defaults true while first-run consent is still pending. The

@@ -106,6 +106,10 @@ export interface AgentState {
   presence?: 'working' | 'available' | 'lounge' | 'leaving';
   /** When the agent last became available (ms since epoch); drives the lounge timer. */
   availableSince?: number;
+  /** Born finished only: when its completion notice was written. A prompt it
+   *  gets after that is its parent resuming it (its transcript's last write,
+   *  `availableSince`, would already include the resumption). Not persisted. */
+  finishedNoticeAt?: number;
 
   // -- Avatar customization --
   /** Preferred character palette (0-5). If undefined, auto-assigned for diversity. */

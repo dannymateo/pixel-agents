@@ -22,12 +22,15 @@ import {
   LEAVE_ANIMATION_MAX_MS,
   LEAVE_QUEUE_MAX_MS,
   LEAVE_STAGGER_MS,
+  LOUNGE_TO_LEAVE_MINUTES_MAX,
+  LOUNGE_TO_LEAVE_MINUTES_MIN,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
   MAX_DERIVED_AGENTS_PER_TREE,
   PRESENCE_TICK_MS,
   TEXT_IDLE_DELAY_MS,
 } from '../src/constants.js';
 import { readNewLines, scanAllTeammateFiles, scanSpawnTree } from '../src/fileWatcher.js';
-import { PresenceTracker } from '../src/presence.js';
+import { finishedPresence, PresenceTracker } from '../src/presence.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
 import { claudeTeamProvider } from '../src/providers/hook/claude/claudeTeamProvider.js';
 import {
@@ -232,15 +235,162 @@ describe('PresenceTracker', () => {
     expect(removed).toEqual([]);
   });
 
-  it('ticks by itself only while someone is available', () => {
+  it('ticks by itself only while someone is available or resting', () => {
     expect(vi.getTimerCount()).toBe(0);
-    tracker.markAvailable(2);
+    tracker.markAvailable(4);
     expect(vi.getTimerCount()).toBe(1);
     now += idleMs;
     vi.advanceTimersByTime(PRESENCE_TICK_MS);
-    expect(store.get(2)!.presence).toBe('lounge');
-    // Nobody left to send to the lounge: the clock stops.
+    expect(store.get(4)!.presence).toBe('lounge');
+    // Still resting: the clock keeps running for its exit.
+    expect(vi.getTimerCount()).toBe(1);
+    tracker.markActivity(4);
+    vi.advanceTimersByTime(PRESENCE_TICK_MS);
+    // Nobody left to send to the lounge or out: the clock stops.
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // ── Unused rest ends too (T24) ──
+
+  function trackerWithLeave(leaveMs: number): PresenceTracker {
+    tracker.dispose();
+    tracker = new PresenceTracker(store, {
+      idleToLoungeMs: () => idleMs,
+      loungeToLeaveMs: () => leaveMs,
+      now: () => now,
+      remove: (id) => {
+        removed.push(id);
+        store.delete(id);
+      },
+    });
+    return tracker;
+  }
+
+  it('(a) resting LOUNGE_TO_LEAVE_MS unused: it says goodbye, walks out and is removed', () => {
+    const leaveMs = 120_000;
+    trackerWithLeave(leaveMs);
+    tracker.markAvailable(4);
+    now += idleMs;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('lounge');
+    now += leaveMs - 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('lounge');
+    now += 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('leaving');
+    expect(presenceMessages(messages, 4)).toEqual(['4:available', '4:lounge', '4:leaving']);
+    vi.advanceTimersByTime(LEAVE_ANIMATION_MAX_MS);
+    expect(removed).toEqual([4]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('(b) resumed in the lounge before the limit it works again, with both clocks restarted', () => {
+    const leaveMs = 120_000;
+    trackerWithLeave(leaveMs);
+    tracker.markAvailable(4);
+    now += idleMs;
+    tracker.tick();
+    now += leaveMs - 1000;
+    tracker.markActivity(4);
+    expect(store.get(4)).toMatchObject({ presence: 'working', availableSince: undefined });
+    // Finishes again: a full idle period at the desk, then a full rest.
+    tracker.markAvailable(4);
+    now += idleMs - 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('available');
+    now += 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('lounge');
+    now += leaveMs - 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('lounge');
+    now += 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('leaving');
+  });
+
+  it('a rester leaves with its subtree, leaves first', () => {
+    const leaveMs = 120_000;
+    trackerWithLeave(leaveMs);
+    for (const id of [4, 3, 2]) tracker.markAvailable(id);
+    now += idleMs + leaveMs;
+    tracker.tick();
+    expect([2, 3, 4].map((id) => store.get(id)!.presence)).toEqual([
+      'leaving',
+      'leaving',
+      'leaving',
+    ]);
+    vi.advanceTimersByTime(2 * LEAVE_STAGGER_MS + LEAVE_ANIMATION_MAX_MS);
+    expect(removed).toEqual([4, 3, 2]);
+  });
+
+  it('a rester whose subtree still works waits for it (nobody leaves mid-task)', () => {
+    const leaveMs = 120_000;
+    trackerWithLeave(leaveMs);
+    tracker.markAvailable(3);
+    now += idleMs + leaveMs;
+    tracker.tick();
+    // 4 (below 3) is still working: 3 keeps resting, 4 keeps working.
+    expect(store.get(3)!.presence).toBe('lounge');
+    expect(store.get(4)!.presence).toBe('working');
+    tracker.markAvailable(4);
+    now += idleMs + leaveMs;
+    tracker.tick();
+    expect(store.get(3)!.presence).toBe('leaving');
+    expect(store.get(4)!.presence).toBe('leaving');
+  });
+
+  it('born resting (finished long ago): its exit counts from its real finish time', () => {
+    const leaveMs = 120_000;
+    trackerWithLeave(leaveMs);
+    const finishedAt = now - idleMs - 30_000;
+    store.set(
+      9,
+      agentShell(9, { parentAgentId: 1, presence: 'lounge', availableSince: finishedAt }),
+    );
+    expect(vi.getTimerCount()).toBe(1);
+    now = finishedAt + idleMs + leaveMs - 1;
+    tracker.tick();
+    expect(store.get(9)!.presence).toBe('lounge');
+    now += 1;
+    tracker.tick();
+    expect(store.get(9)!.presence).toBe('leaving');
+    // Old replayed activity does not wake it (it is finished)…
+    store.set(
+      10,
+      agentShell(10, { parentAgentId: 1, presence: 'lounge', availableSince: finishedAt }),
+    );
+    store.broadcast({ type: 'agentStatus', id: 10, status: 'active' });
+    expect(store.get(10)!.presence).toBe('lounge');
+    // …a prompt written after its finish does.
+    expect(tracker.markPrompted(10, finishedAt + 1)).toBe(true);
+    expect(store.get(10)!.presence).toBe('working');
+  });
+
+  it('the lounge-to-leave delay defaults to LOUNGE_TO_LEAVE_MS_DEFAULT', () => {
+    tracker.markAvailable(4);
+    now += idleMs + LOUNGE_TO_LEAVE_MS_DEFAULT - 1;
+    tracker.tick();
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('lounge');
+    now += 1;
+    tracker.tick();
+    expect(store.get(4)!.presence).toBe('leaving');
+  });
+});
+
+describe('finishedPresence (reappearance window)', () => {
+  const timings = { idleToLoungeMs: 30 * 60_000, loungeToLeaveMs: 60 * 60_000 };
+  const now = 10_000_000_000;
+  it('desk inside the idle window, lounge after it, gone past both', () => {
+    expect(finishedPresence(now - 10 * 60_000, now, timings)).toBe('available');
+    expect(finishedPresence(now - 45 * 60_000, now, timings)).toBe('lounge');
+    expect(finishedPresence(now - 90 * 60_000, now, timings)).toBeUndefined();
+    expect(finishedPresence(now - 120 * 60_000, now, timings)).toBeUndefined();
+  });
+  it('a finish time in the future counts as now (a skewed or forged mtime buys no extra stay)', () => {
+    expect(finishedPresence(now + 365 * 24 * 3600_000, now, timings)).toBe('available');
   });
 });
 
@@ -618,6 +768,97 @@ describe('living office lifecycle (runtime)', () => {
     expect(runtime.idleToLoungeMs()).toBe(IDLE_TO_LOUNGE_MINUTES_MIN * 60_000);
   });
 
+  // T24: unused rest ends too
+  it('the lounge-to-leave delay defaults, clamps, and every change broadcasts the effective timings', () => {
+    expect(runtime.loungeToLeaveMs()).toBe(LOUNGE_TO_LEAVE_MS_DEFAULT);
+    expect(runtime.setLoungeToLeaveMinutes(LOUNGE_TO_LEAVE_MINUTES_MAX + 50)).toBe(
+      LOUNGE_TO_LEAVE_MINUTES_MAX,
+    );
+    expect(runtime.loungeToLeaveMs()).toBe(LOUNGE_TO_LEAVE_MINUTES_MAX * 60_000);
+    runtime.setLoungeToLeaveMinutes(0);
+    expect(runtime.loungeToLeaveMs()).toBe(LOUNGE_TO_LEAVE_MINUTES_MIN * 60_000);
+    runtime.setLoungeToLeaveMinutes(Number.NaN); // junk changes nothing
+    expect(runtime.loungeToLeaveMs()).toBe(LOUNGE_TO_LEAVE_MINUTES_MIN * 60_000);
+    runtime.setIdleToLoungeMinutes(12);
+    expect(messages.filter((m) => m.type === 'livingOfficeSettings')).toEqual([
+      {
+        type: 'livingOfficeSettings',
+        idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MINUTES_MAX,
+      },
+      {
+        type: 'livingOfficeSettings',
+        idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MINUTES_MIN,
+      },
+      {
+        type: 'livingOfficeSettings',
+        idleToLoungeMinutes: 12,
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MINUTES_MIN,
+      },
+    ]);
+  });
+
+  it('(f) a parent resting unused leaves with its finished children, leaves first, and its spawn ends', () => {
+    runtime.setIdleToLoungeMinutes(1);
+    runtime.setLoungeToLeaveMinutes(2);
+    leadLine(spawnToolUse('toolu_L'));
+    writeSidecar('aaa', { agentType: 'lider-fase', toolUseId: 'toolu_L', spawnDepth: 1 });
+    scan();
+    leadLine(asyncLaunchResult('toolu_L', 'aaa'));
+    appendLine('aaa', spawnToolUse('toolu_A'));
+    writeSidecar('bbb', {
+      agentType: 'desarrollador',
+      toolUseId: 'toolu_A',
+      parentAgentId: 'aaa',
+      spawnDepth: 2,
+    });
+    scan();
+    appendLine('aaa', asyncLaunchResult('toolu_A', 'bbb'));
+    const [aaa, bbb] = ['aaa', 'bbb'].map(byKey);
+    expect(bbb.parentAgentId).toBe(aaa.id);
+    appendLine('aaa', notice({ taskId: 'bbb', status: 'completed' }));
+    leadLine(notice({ taskId: 'aaa', status: 'completed' }));
+    expect([aaa.presence, bbb.presence]).toEqual(['available', 'available']);
+    vi.advanceTimersByTime(60_000);
+    expect([aaa.presence, bbb.presence]).toEqual(['lounge', 'lounge']);
+    vi.advanceTimersByTime(2 * 60_000 - PRESENCE_TICK_MS);
+    expect([aaa.presence, bbb.presence]).toEqual(['lounge', 'lounge']);
+    vi.advanceTimersByTime(PRESENCE_TICK_MS);
+    expect([aaa.presence, bbb.presence]).toEqual(['leaving', 'leaving']);
+    expect(presenceMessages(messages).filter((m) => m.endsWith('leaving'))).toEqual([
+      `${bbb.id}:leaving`,
+    ]);
+    vi.advanceTimersByTime(LEAVE_STAGGER_MS);
+    expect(presenceMessages(messages).filter((m) => m.endsWith('leaving'))).toEqual([
+      `${bbb.id}:leaving`,
+      `${aaa.id}:leaving`,
+    ]);
+    // Its spawn is over: nothing re-materializes it.
+    expect(lead.backgroundAgentToolIds.has('toolu_L')).toBe(false);
+    vi.advanceTimersByTime(LEAVE_ANIMATION_MAX_MS);
+    scan();
+    expect(maybeByKey('aaa')).toBeUndefined();
+    expect(maybeByKey('bbb')).toBeUndefined();
+  });
+
+  it('a spawn that finished longer ago than both windows is not materialized (and stops being live)', () => {
+    leadLine(spawnToolUse('toolu_L'));
+    leadLine(asyncLaunchResult('toolu_L', 'aaa'));
+    leadLine(notice({ taskId: 'aaa', status: 'completed' }));
+    writeSidecar('aaa', { agentType: 'dev', toolUseId: 'toolu_L', spawnDepth: 1 });
+    const old = new Date(
+      Date.now() - IDLE_TO_LOUNGE_MS_DEFAULT - LOUNGE_TO_LEAVE_MS_DEFAULT - 1000,
+    );
+    fs.utimesSync(path.join(subagentsDir, 'agent-aaa.jsonl'), old, old);
+    scan();
+    expect(maybeByKey('aaa')).toBeUndefined();
+    expect(lead.backgroundAgentToolIds.has('toolu_L')).toBe(false);
+    const before = discoverCalls;
+    scan();
+    expect(discoverCalls).toBe(before);
+  });
+
   // (g)
   it('(g) the root session ending walks every derived agent out, then removes them', () => {
     backgroundTree();
@@ -766,6 +1007,81 @@ describe('living office lifecycle (runtime)', () => {
     vi.advanceTimersByTime(LEAVE_ANIMATION_MAX_MS);
     expect([...store.values()].filter((a) => a.parentAgentId !== undefined)).toEqual([]);
     expect(lead.backgroundAgentToolIds.has('toolu_W')).toBe(false);
+  });
+
+  it('a workflow run agent resting unused stays until its run ends (never re-adopted in a loop)', () => {
+    runtime.setIdleToLoungeMinutes(1);
+    runtime.setLoungeToLeaveMinutes(1);
+    const runDir = path.join(subagentsDir, 'workflows', 'wf_run-2');
+    fs.mkdirSync(runDir, { recursive: true });
+    leadLine(
+      toolUse('toolu_W2', 'Workflow', {
+        script: "export const meta = { name: 'fase-2' };\nexport default async function run() {}\n",
+      }),
+    );
+    leadLine(
+      toolResult(
+        'toolu_W2',
+        `Workflow launched in background. Task ID: wtask2\nSummary: s\nTranscript dir: ${runDir}\n`,
+      ),
+    );
+    for (const key of ['b0939d8552f9f51b5', 'b125d7b36e0d1d5ea']) {
+      fs.writeFileSync(
+        path.join(runDir, `agent-${key}.jsonl`),
+        JSON.stringify({ type: 'user', message: { role: 'user', content: `Tarea ${key}` } }) + '\n',
+      );
+      fs.writeFileSync(
+        path.join(runDir, `agent-${key}.meta.json`),
+        JSON.stringify({ agentType: 'dev', spawnDepth: 1 }),
+      );
+    }
+    const tick = (): void =>
+      scanAllTeammateFiles(
+        store.nextAgentId,
+        store,
+        runtime.fileWatchers,
+        runtime.pollingTimers,
+        runtime.waitingTimers,
+        runtime.permissionTimers,
+        () => store.persist(),
+      );
+    tick();
+    const node = [...store.values()].find((a) => a.nodeKind === 'workflow')!;
+    const [done, busy] = [...store.values()].filter((a) => a.parentAgentId === node.id);
+    store.broadcast({ type: 'agentStatus', id: done.id, status: 'waiting', awaitingInput: false });
+    expect(done.presence).toBe('available');
+    vi.advanceTimersByTime(10 * 60_000);
+    tick();
+    // Resting far past the limit, but its run is still going: it stays.
+    expect(done.presence).toBe('lounge');
+    expect(store.get(done.id)).toBe(done);
+    expect(busy.presence).toBe('working');
+    expect([...store.values()].filter((a) => a.parentAgentId === node.id)).toHaveLength(2);
+  });
+
+  it('a finished spawn resumed before it materialized is born, then works, and never leaves mid-task', () => {
+    runtime.setIdleToLoungeMinutes(1);
+    runtime.setLoungeToLeaveMinutes(1);
+    const t0 = Date.now();
+    leadLine(spawnToolUse('toolu_L'));
+    leadLine(asyncLaunchResult('toolu_L', 'aaa'));
+    // Its task ended long ago (the notice carries its time)…
+    leadLine(stamped(notice({ taskId: 'aaa', status: 'completed' }), t0 - 3 * 3600_000));
+    // …and its parent resumed it since: its transcript is being written now.
+    writeSidecar('aaa', { agentType: 'dev', toolUseId: 'toolu_L', spawnDepth: 1 }, [
+      stamped(userPrompt('la tarea original'), t0 - 3 * 3600_000 - 60_000),
+      stamped(userPrompt('una cosa más'), t0 - 1000),
+      stamped(toolUse('toolu_b', 'Bash', { command: 'make' }), t0 - 500),
+    ]);
+    scan();
+    const aaa = byKey('aaa');
+    expect(aaa.presence).toBe('working');
+    for (let i = 0; i < 30; i++) {
+      vi.advanceTimersByTime(5000);
+      appendLine('aaa', stamped(toolUse(`toolu_x${i}`, 'Bash', { command: 'ls' }), Date.now()));
+    }
+    expect(store.get(aaa.id)).toBe(aaa);
+    expect(aaa.presence).toBe('working');
   });
 
   it('nothing about presence is persisted; derived agents still never are', () => {

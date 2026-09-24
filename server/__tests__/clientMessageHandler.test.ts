@@ -15,6 +15,9 @@ import {
   IDLE_TO_LOUNGE_MINUTES_MAX,
   IDLE_TO_LOUNGE_MINUTES_MIN,
   IDLE_TO_LOUNGE_MS_DEFAULT,
+  LOUNGE_TO_LEAVE_MINUTES_MAX,
+  LOUNGE_TO_LEAVE_MINUTES_MIN,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
 } from '../src/constants.js';
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
@@ -232,6 +235,142 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
       );
       expect(minutesOf()).toBe(IDLE_TO_LOUNGE_MINUTES_MAX);
       expect(settingsLoaded().idleToLoungeMinutes).toBe(IDLE_TO_LOUNGE_MINUTES_MAX);
+    });
+  });
+
+  // ── setLoungeToLeaveMinutes + livingOfficeSettings (T24) ──────
+
+  describe('setLoungeToLeaveMinutes and the effective timings', () => {
+    const minutesOf = (): unknown => readConfig().standalone.loungeToLeaveMinutes;
+    let broadcasts: Array<Record<string, unknown>>;
+    const timingsBroadcasts = (): Array<Record<string, unknown>> =>
+      broadcasts.filter((m) => m.type === 'livingOfficeSettings');
+    const handshake = (): Array<Record<string, unknown>> => {
+      sent = [];
+      handleClientMessage({ type: 'webviewReady' }, (m) => sent.push(m), ctx);
+      return sent;
+    };
+
+    beforeEach(() => {
+      broadcasts = [];
+      store.on('broadcast', (m) => broadcasts.push(m as Record<string, unknown>));
+    });
+
+    it('(e) the handshake sends the effective timings (livingOfficeSettings + settingsLoaded)', () => {
+      const msgs = handshake();
+      expect(msgs.find((m) => m.type === 'livingOfficeSettings')).toEqual({
+        type: 'livingOfficeSettings',
+        idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000,
+      });
+      expect(msgs.find((m) => m.type === 'settingsLoaded')).toMatchObject({
+        idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000,
+      });
+      // Point-to-point: connecting tells nobody else.
+      expect(timingsBroadcasts()).toEqual([]);
+    });
+
+    it('(d) persists per namespace, clamped and rounded, and broadcasts the effective value to every client', () => {
+      ctx.privileged = true;
+      const set = (minutes: unknown): void =>
+        handleClientMessage({ type: 'setLoungeToLeaveMinutes', minutes }, (m) => sent.push(m), ctx);
+      set(90);
+      expect(minutesOf()).toBe(90);
+      set(100_000);
+      expect(minutesOf()).toBe(LOUNGE_TO_LEAVE_MINUTES_MAX);
+      set(0);
+      expect(minutesOf()).toBe(LOUNGE_TO_LEAVE_MINUTES_MIN);
+      set(2.6);
+      expect(minutesOf()).toBe(3);
+      expect(timingsBroadcasts().map((m) => m.loungeToLeaveMinutes)).toEqual([
+        90,
+        LOUNGE_TO_LEAVE_MINUTES_MAX,
+        LOUNGE_TO_LEAVE_MINUTES_MIN,
+        3,
+      ]);
+      // Junk changes (and announces) nothing.
+      for (const junk of ['10', null, undefined, Number.NaN, Infinity, { n: 1 }]) set(junk);
+      expect(minutesOf()).toBe(3);
+      expect(timingsBroadcasts()).toHaveLength(4);
+      // Only this namespace; the next handshake reports it.
+      expect(readConfig().vscode.loungeToLeaveMinutes).toBe(LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000);
+      expect(handshake().find((m) => m.type === 'livingOfficeSettings')).toMatchObject({
+        loungeToLeaveMinutes: 3,
+      });
+    });
+
+    it('(d) is ignored from a connection without the server token', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      ctx.privileged = false;
+      handleClientMessage(
+        { type: 'setLoungeToLeaveMinutes', minutes: 5 },
+        (m) => sent.push(m),
+        ctx,
+      );
+      handleClientMessage({ type: 'setIdleToLoungeMinutes', minutes: 5 }, (m) => sent.push(m), ctx);
+      warn.mockRestore();
+      expect(minutesOf()).toBe(LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000);
+      expect(timingsBroadcasts()).toEqual([]);
+      expect(fs.existsSync(path.join(tempHome, '.pixel-agents', 'config.json'))).toBe(false);
+    });
+
+    it('(d) setIdleToLoungeMinutes echoes the effective timings to every client too', () => {
+      ctx.privileged = true;
+      handleClientMessage(
+        { type: 'setIdleToLoungeMinutes', minutes: 9999 },
+        (m) => sent.push(m),
+        ctx,
+      );
+      expect(timingsBroadcasts()).toEqual([
+        {
+          type: 'livingOfficeSettings',
+          idleToLoungeMinutes: IDLE_TO_LOUNGE_MINUTES_MAX,
+          loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000,
+        },
+      ]);
+    });
+
+    it('with a running runtime: updates it, persists, and the runtime broadcasts once', () => {
+      const runtime = new AgentRuntime(store, claudeProvider);
+      try {
+        ctx = { store, cache: null, runtime, privileged: true };
+        handleClientMessage(
+          { type: 'setLoungeToLeaveMinutes', minutes: 45 },
+          (m) => sent.push(m),
+          ctx,
+        );
+        handleClientMessage(
+          { type: 'setIdleToLoungeMinutes', minutes: 7 },
+          (m) => sent.push(m),
+          ctx,
+        );
+        expect(runtime.loungeToLeaveMs()).toBe(45 * 60_000);
+        expect(minutesOf()).toBe(45);
+        expect(timingsBroadcasts()).toEqual([
+          { type: 'livingOfficeSettings', idleToLoungeMinutes: 30, loungeToLeaveMinutes: 45 },
+          { type: 'livingOfficeSettings', idleToLoungeMinutes: 7, loungeToLeaveMinutes: 45 },
+        ]);
+        expect(handshake().find((m) => m.type === 'livingOfficeSettings')).toEqual({
+          type: 'livingOfficeSettings',
+          idleToLoungeMinutes: 7,
+          loungeToLeaveMinutes: 45,
+        });
+      } finally {
+        runtime.dispose();
+      }
+    });
+
+    it('a hand-edited config out of range is clamped on read', () => {
+      fs.mkdirSync(path.join(tempHome, '.pixel-agents'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempHome, '.pixel-agents', 'config.json'),
+        JSON.stringify({ standalone: { loungeToLeaveMinutes: -40 }, vscode: {} }),
+      );
+      expect(minutesOf()).toBe(LOUNGE_TO_LEAVE_MINUTES_MIN);
+      expect(handshake().find((m) => m.type === 'livingOfficeSettings')).toMatchObject({
+        loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MINUTES_MIN,
+      });
     });
   });
 

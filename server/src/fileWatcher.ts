@@ -40,6 +40,8 @@ import {
   FILE_WATCHER_POLL_INTERVAL_MS,
   GLOBAL_SCAN_ACTIVE_MAX_AGE_MS,
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
   MAX_DERIVED_AGENTS_PER_TREE,
   MAX_PENDING_WORKFLOW_LAUNCHES,
   MAX_SPAWN_DEPTH,
@@ -53,6 +55,8 @@ import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
+import type { PresenceTimings } from './presence.js';
+import { finishedPresence } from './presence.js';
 // The one Claude-specific import of the runtime: the run-directory ↔ session
 // binding the workflow launch gate needs (TeamProvider exposes no such check).
 import type { SpawnEntry, SpawnTreeNode } from './spawnTree.js';
@@ -60,10 +64,13 @@ import { planSpawnTree } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
 import type { SeededSpawnCandidate } from './transcriptParser.js';
 import {
+  clearSpawnFinished,
+  forgetFinishedSpawn,
   getHookProvider,
   isSpawnFinished,
   processTranscriptLine,
   seedSpawnsFromHistory,
+  spawnFinishedAt,
 } from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
@@ -325,7 +332,10 @@ function writtenRecently(file: string, now: number): boolean {
  *   for a workflow, one of its run's transcripts written recently. The newest
  *   MAX_PENDING_WORKFLOW_LAUNCHES launches are checked, one discovery per run;
  * - a background agent that already FINISHED (available, docs/adr/0003) writes
- *   nothing more, so a fresh spawner vouches for it too (the restore rule).
+ *   nothing more, so a fresh spawner vouches for it too (the restore rule) —
+ *   but only inside the reappearance window: its own transcript last written
+ *   less than idle-to-lounge + lounge-to-leave ago. Past that it would have
+ *   left the office by now, so it stays gone.
  */
 function freshSeededSpawns(
   agent: AgentState,
@@ -337,23 +347,35 @@ function freshSeededSpawns(
   const now = Date.now();
   const foreground: string[] = [];
   const background = new Set<string>();
+  const finished = new Set<string>();
   const workflows: SeededSpawnCandidate[] = [];
   for (const c of candidates) {
     if (c.workflowRunDir !== undefined) workflows.push(c);
     else if (c.background && !c.finished) background.add(c.toolUseId);
-    else foreground.push(c.toolUseId);
+    else {
+      foreground.push(c.toolUseId);
+      if (c.finished) finished.add(c.toolUseId);
+    }
   }
   const kept = restorableSpawnToolIds(
     { jsonlFile: agent.jsonlFile, projectDir: root.projectDir, sessionId: root.sessionId },
     foreground,
     now,
   );
-  if (background.size > 0 && teamProvider) {
+  const finishedKept = [...finished].filter((id) => kept.has(id));
+  if ((background.size > 0 || finishedKept.length > 0) && teamProvider) {
+    const timings = presenceTimings();
+    const inWindow = new Set<string>();
     for (const t of teamProvider.discoverTeammates(root.projectDir, root.sessionId)) {
-      if (t.toolUseId && background.has(t.toolUseId) && writtenRecently(t.jsonlPath, now)) {
+      if (!t.toolUseId) continue;
+      if (background.has(t.toolUseId) && writtenRecently(t.jsonlPath, now)) {
         kept.add(t.toolUseId);
+      } else if (finished.has(t.toolUseId)) {
+        const at = finishedAtOf(t.jsonlPath, now);
+        if (at !== undefined && finishedPresence(at, now, timings)) inWindow.add(t.toolUseId);
       }
     }
+    for (const id of finishedKept) if (!inWindow.has(id)) kept.delete(id);
   }
   const runFresh = new PathSet();
   const runChecked = new PathSet();
@@ -786,6 +808,9 @@ export interface SpawnTreeCallbacks {
   /** `rootId`'s tree is at MAX_DERIVED_AGENTS_PER_TREE and `deferred` spawns
    *  wait for room. */
   onTreeFull?(rootId: number, deferred: number): void;
+  /** The living-office delays in force: they decide whether (and where) a
+   *  spawn that finished before its agent materialized comes back. */
+  presenceTimings?(): PresenceTimings;
 }
 
 let spawnTreeCallbacks: SpawnTreeCallbacks | null = null;
@@ -793,6 +818,32 @@ let spawnTreeCallbacks: SpawnTreeCallbacks | null = null;
 /** Register the derived-agent lifecycle callbacks (null to clear). */
 export function setSpawnTreeCallbacks(cbs: SpawnTreeCallbacks | null): void {
   spawnTreeCallbacks = cbs;
+}
+
+/** The living-office delays in force (the defaults with no runtime). */
+function presenceTimings(): PresenceTimings {
+  return (
+    spawnTreeCallbacks?.presenceTimings?.() ?? {
+      idleToLoungeMs: IDLE_TO_LOUNGE_MS_DEFAULT,
+      loungeToLeaveMs: LOUNGE_TO_LEAVE_MS_DEFAULT,
+    }
+  );
+}
+
+/**
+ * When the agent of a finished spawn really finished: the last write of its
+ * own transcript (it writes nothing once done, and a later resumption moves it
+ * forward), never later than `now`. Undefined when it cannot be read. The
+ * completion notice's timestamp is not used: it only exists while the notice
+ * is inside the seeded window, and it would date a resumed agent by its FIRST
+ * finish.
+ */
+function finishedAtOf(jsonlPath: string, now: number): number | undefined {
+  try {
+    return Math.min(Math.floor(fs.statSync(jsonlPath).mtimeMs), now);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Tell the registered callbacks a derived agent left the store. Called by the
@@ -1323,9 +1374,28 @@ function scanSpawnTreeOnce(
   let derivedCount = nodes.size - 1;
   let capped = false;
   let deferredByCount = 0;
+  const now = Date.now();
+  const timings = presenceTimings();
+  /** Finished spawns past the reappearance window: gone, never created. */
+  const gone: Array<{ parentId: number; toolUseId: string }> = [];
   for (const { entry, parentId } of plan.create) {
     const parent = agents.get(parentId);
     if (!parent) continue;
+    // Its task finished before it materialized (a completed notice already
+    // read, or seeded from history): it comes back where its real finish time
+    // puts it — its desk, the lounge — or not at all (docs/adr/0003).
+    let born:
+      { presence: 'available' | 'lounge'; finishedAt: number; noticeAt?: number } | undefined;
+    if (isSpawnFinished(parent, entry.toolUseId)) {
+      const finishedAt = finishedAtOf(entry.jsonlPath, now);
+      const presence =
+        finishedAt === undefined ? undefined : finishedPresence(finishedAt, now, timings);
+      if (presence === undefined || finishedAt === undefined) {
+        gone.push({ parentId, toolUseId: entry.toolUseId });
+        continue;
+      }
+      born = { presence, finishedAt, noticeAt: spawnFinishedAt(parent, entry.toolUseId) };
+    }
     // Guards against a runaway (or hostile) transcript: past the caps the
     // entry is deferred — re-offered every scan, created once room frees up.
     const depth = (parent.parentAgentId === undefined ? 0 : (parent.depth ?? 0)) + 1;
@@ -1349,11 +1419,10 @@ function scanSpawnTreeOnce(
       // team-config polling stays away.
       ...(entry.name ? { agentName: entry.name, leadAgentId: parentId } : {}),
     };
-    // Its task finished before it materialized (a completed notice already
-    // read, or seeded from history): it is born available, not working.
-    if (isSpawnFinished(parent, entry.toolUseId)) {
-      agent.presence = 'available';
-      agent.availableSince = Date.now();
+    if (born) {
+      agent.presence = born.presence;
+      agent.availableSince = born.finishedAt;
+      agent.finishedNoticeAt = born.noticeAt;
     }
     if (parent.palette !== undefined) {
       agent.palette = parent.palette;
@@ -1392,6 +1461,19 @@ function scanSpawnTreeOnce(
     onAgentCreated?.(agent);
   }
 
+  if (gone.length > 0) {
+    for (const { parentId, toolUseId } of gone) {
+      // Unmarked either way, so a spawn still live some other way is never
+      // judged gone again on the next scan.
+      forgetFinishedSpawn(parentId, toolUseId, agents);
+      const parent = agents.get(parentId);
+      if (parent) clearSpawnFinished(parent, toolUseId);
+    }
+    console.log(
+      `[Pixel Agents] Spawn tree of Agent ${rootId}: ${gone.length} finished spawn(s) past the reappearance window not shown`,
+    );
+    agents.persist();
+  }
   if (capped) warnSpawnCap(root, rootId);
   // Working spawns wait while finished (resting) agents fill the tree: the
   // host lets some of those go to make room (docs/adr/0003).

@@ -14,8 +14,12 @@ import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
-import { clampIdleToLoungeMinutes } from './configPersistence.js';
-import { DEFAULT_MAX_CONTEXT_TOKENS, IDLE_TO_LOUNGE_MS_DEFAULT } from './constants.js';
+import { clampIdleToLoungeMinutes, clampLoungeToLeaveMinutes } from './configPersistence.js';
+import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
+} from './constants.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -43,7 +47,11 @@ import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
-import { IDLE_TO_LOUNGE_SETTING_KEY, PresenceTracker } from './presence.js';
+import {
+  IDLE_TO_LOUNGE_SETTING_KEY,
+  LOUNGE_TO_LEAVE_SETTING_KEY,
+  PresenceTracker,
+} from './presence.js';
 import { SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -118,6 +126,8 @@ export class AgentRuntime {
   readonly presence: PresenceTracker;
   /** The user's idle-to-lounge setting, read from the adapter on first use. */
   private idleToLoungeMinutes: number | undefined;
+  /** The user's lounge-to-leave setting, read from the adapter on first use. */
+  private loungeToLeaveMinutes: number | undefined;
 
   constructor(
     private readonly store: AgentStateStore,
@@ -132,6 +142,13 @@ export class AgentRuntime {
     }
     this.presence = new PresenceTracker(store, {
       idleToLoungeMs: () => this.idleToLoungeMs(),
+      loungeToLeaveMs: () => this.loungeToLeaveMs(),
+      // Rested unused too long: its spawn ends (nothing re-materializes it)
+      // and it walks out with its subtree, like any other exit.
+      leave: (id) => this.leaveUnused(id),
+      canLeaveUnused: (a) =>
+        a.nodeKind !== 'workflow' &&
+        (a.parentAgentId === undefined || store.get(a.parentAgentId)?.nodeKind !== 'workflow'),
       // A departed agent goes for good once its walk out is over.
       remove: (id) => this.removeAgent(id),
     });
@@ -183,6 +200,10 @@ export class AgentRuntime {
         if (a.spawnAgentKey) this.hookEventHandler.unregisterSpawn(a.sessionId, a.spawnAgentKey);
       },
       onTreeFull: (rootId, deferred) => this.makeRoomInTree(rootId, deferred),
+      presenceTimings: () => ({
+        idleToLoungeMs: this.idleToLoungeMs(),
+        loungeToLeaveMs: this.loungeToLeaveMs(),
+      }),
     });
     // A resumed lead that spawns again belongs to a freshly minted implicit
     // team; its previous team's teammates are defunct. Promoted anonymous
@@ -475,6 +496,23 @@ export class AgentRuntime {
     this.leaveSubtree(id, true);
   }
 
+  /** A derived agent rested in the lounge, unused, for the whole
+   *  lounge-to-leave delay: its background spawn ends (so its parent stops
+   *  holding it live) and it walks out with its subtree. */
+  private leaveUnused(id: number): void {
+    const agent = this.store.get(id);
+    if (!agent || agent.parentAgentId === undefined) return;
+    if (
+      agent.spawnToolUseId !== undefined &&
+      releaseBackgroundSpawn(agent.parentAgentId, agent.spawnToolUseId, this.store)
+    ) {
+      return;
+    }
+    // No spawn of its own to end: its transcript must not be adopted again.
+    if (agent.jsonlFile) this.dismissalTracker.dismiss(agent.jsonlFile);
+    this.leaveSubtree(id, true);
+  }
+
   /** The derived agent a spawn tool call of `parentId` started, if any. */
   private spawnChild(parentId: number, toolUseId: string): AgentState | undefined {
     for (const a of this.store.values()) {
@@ -580,13 +618,53 @@ export class AgentRuntime {
   }
 
   /** Set (clamped) and persist, per adapter namespace, the idle-to-lounge
-   *  minutes. Returns the value kept; a non-number changes nothing. */
+   *  minutes, and tell every client the effective timings. Returns the value
+   *  kept; a non-number changes nothing (and broadcasts nothing). */
   setIdleToLoungeMinutes(minutes: number): number {
     const clamped = clampIdleToLoungeMinutes(minutes);
     if (clamped === undefined) return this.idleToLoungeMs() / 60_000;
     this.idleToLoungeMinutes = clamped;
     this.store.getAdapter()?.setSetting(IDLE_TO_LOUNGE_SETTING_KEY, clamped);
+    this.store.broadcast(this.livingOfficeSettings());
     return clamped;
+  }
+
+  /** How long an unused agent rests in the lounge before it leaves, in ms. */
+  loungeToLeaveMs(): number {
+    if (this.loungeToLeaveMinutes === undefined) {
+      const fallback = LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000;
+      this.loungeToLeaveMinutes =
+        clampLoungeToLeaveMinutes(
+          this.store.getAdapter()?.getSetting(LOUNGE_TO_LEAVE_SETTING_KEY, fallback),
+        ) ?? fallback;
+    }
+    return this.loungeToLeaveMinutes * 60_000;
+  }
+
+  /** Set (clamped) and persist, per adapter namespace, the lounge-to-leave
+   *  minutes, and tell every client the effective timings. Returns the value
+   *  kept; a non-number changes nothing (and broadcasts nothing). */
+  setLoungeToLeaveMinutes(minutes: number): number {
+    const clamped = clampLoungeToLeaveMinutes(minutes);
+    if (clamped === undefined) return this.loungeToLeaveMs() / 60_000;
+    this.loungeToLeaveMinutes = clamped;
+    this.store.getAdapter()?.setSetting(LOUNGE_TO_LEAVE_SETTING_KEY, clamped);
+    this.store.broadcast(this.livingOfficeSettings());
+    return clamped;
+  }
+
+  /** The effective living-office timings, as sent to clients on connect and
+   *  on every change (`livingOfficeSettings`). */
+  livingOfficeSettings(): {
+    type: 'livingOfficeSettings';
+    idleToLoungeMinutes: number;
+    loungeToLeaveMinutes: number;
+  } {
+    return {
+      type: 'livingOfficeSettings',
+      idleToLoungeMinutes: Math.round(this.idleToLoungeMs() / 60_000),
+      loungeToLeaveMinutes: Math.round(this.loungeToLeaveMs() / 60_000),
+    };
   }
 
   /** The session ended: none of its spawns is live any more. Forget them on
@@ -603,6 +681,9 @@ export class AgentRuntime {
     }
     if (dropped.size === 0) return;
     for (const toolId of dropped) {
+      // Its finished mark goes too: a spawn made live again must not be
+      // judged by a finish it no longer has.
+      clearSpawnFinished(agent, toolId);
       agent.activeToolIds.delete(toolId);
       agent.activeToolStatuses.delete(toolId);
       agent.activeToolNames.delete(toolId);

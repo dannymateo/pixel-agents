@@ -8,6 +8,9 @@ import {
   IDLE_TO_LOUNGE_MINUTES_MIN,
   IDLE_TO_LOUNGE_MS_DEFAULT,
   LAYOUT_FILE_DIR,
+  LOUNGE_TO_LEAVE_MINUTES_MAX,
+  LOUNGE_TO_LEAVE_MINUTES_MIN,
+  LOUNGE_TO_LEAVE_MS_DEFAULT,
 } from './constants.js';
 
 export interface AdapterSettings {
@@ -21,6 +24,8 @@ export interface AdapterSettings {
   areaMappings: Record<string, string[]>;
   /** Minutes an available agent waits at its desk before the lounge (docs/adr/0003). */
   idleToLoungeMinutes: number;
+  /** Minutes an unused agent rests in the lounge before it leaves (docs/adr/0003). */
+  loungeToLeaveMinutes: number;
 }
 
 /** All keys in AdapterSettings. Used by adapters to map `pixel-agents.foo` → `foo`.
@@ -37,6 +42,7 @@ export const ADAPTER_SETTING_KEYS = [
   'showAreas',
   'areaMappings',
   'idleToLoungeMinutes',
+  'loungeToLeaveMinutes',
 ] as const;
 
 export type AdapterSettingKey = (typeof ADAPTER_SETTING_KEYS)[number];
@@ -74,6 +80,7 @@ const DEFAULT_ADAPTER_SETTINGS: AdapterSettings = {
   showAreas: false,
   areaMappings: {},
   idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
+  loungeToLeaveMinutes: LOUNGE_TO_LEAVE_MS_DEFAULT / 60_000,
 };
 
 /** The idle-to-lounge setting as the server accepts it: a finite number,
@@ -84,6 +91,17 @@ export function clampIdleToLoungeMinutes(value: unknown): number | undefined {
   return Math.min(
     IDLE_TO_LOUNGE_MINUTES_MAX,
     Math.max(IDLE_TO_LOUNGE_MINUTES_MIN, Math.round(value)),
+  );
+}
+
+/** The lounge-to-leave setting as the server accepts it: a finite number,
+ *  rounded and clamped to [LOUNGE_TO_LEAVE_MINUTES_MIN, LOUNGE_TO_LEAVE_MINUTES_MAX].
+ *  Undefined for anything that is not a number (the caller keeps what it had). */
+export function clampLoungeToLeaveMinutes(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(
+    LOUNGE_TO_LEAVE_MINUTES_MAX,
+    Math.max(LOUNGE_TO_LEAVE_MINUTES_MIN, Math.round(value)),
   );
 }
 
@@ -169,6 +187,9 @@ function parseAdapterSettings(raw: unknown): AdapterSettings {
     idleToLoungeMinutes:
       clampIdleToLoungeMinutes(obj.idleToLoungeMinutes) ??
       DEFAULT_ADAPTER_SETTINGS.idleToLoungeMinutes,
+    loungeToLeaveMinutes:
+      clampLoungeToLeaveMinutes(obj.loungeToLeaveMinutes) ??
+      DEFAULT_ADAPTER_SETTINGS.loungeToLeaveMinutes,
   };
 }
 

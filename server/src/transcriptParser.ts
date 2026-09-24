@@ -633,7 +633,7 @@ export function processTranscriptLine(
             // gate keeps its agent.
             const wasRunning = agent.activeToolIds.has(completedToolId);
             finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
-            markSpawnFinished(agent, completedToolId);
+            markSpawnFinished(agent, completedToolId, recordTime(record));
             spawnFinishedCallback?.(agentId, completedToolId);
             releaseOldestFinished(agent, agentId, agents);
           }
@@ -1017,6 +1017,10 @@ function spawnOfTaskId(
  *  still alive — a derived agent materialized for one later is born available.
  *  Bounded like the task ids (oldest dropped). */
 const finishedSpawns = new WeakMap<AgentState, Set<string>>();
+/** Per agent: when each finished spawn's completion notice was written (its
+ *  record timestamp), when the notice carried one. A prompt the spawned agent
+ *  gets after that moment is its parent resuming it. */
+const finishedSpawnTimes = new WeakMap<AgentState, Map<string, number>>();
 /** Per agent: its live spawns that are workflow launches (their notice ends
  *  the whole run, whatever its status). */
 const workflowSpawns = new WeakMap<AgentState, Set<string>>();
@@ -1069,8 +1073,24 @@ function takePendingStop(agent: AgentState, stopToolId: string): string | undefi
  *  (its agent walks out): what an agent keeps alive stays bounded. */
 const FINISHED_SPAWNS_PER_AGENT_MAX = TASK_IDS_PER_AGENT_MAX;
 
-function markSpawnFinished(agent: AgentState, toolUseId: string): void {
+function markSpawnFinished(agent: AgentState, toolUseId: string, at?: number): void {
   addBounded(finishedSpawns, agent, toolUseId, FINISHED_SPAWNS_PER_AGENT_MAX + 1);
+  let times = finishedSpawnTimes.get(agent);
+  if (!times) {
+    times = new Map();
+    finishedSpawnTimes.set(agent, times);
+  }
+  if (at === undefined) times.delete(toolUseId);
+  else times.set(toolUseId, at);
+  // Bounded with the finished set: a time outlives no mark.
+  const marks = finishedSpawns.get(agent);
+  for (const id of times.keys()) if (!marks?.has(id)) times.delete(id);
+}
+
+/** When `parent`'s finished spawn `toolUseId` notified its completion, if the
+ *  notice carried a timestamp. */
+export function spawnFinishedAt(parent: AgentState, toolUseId: string): number | undefined {
+  return finishedSpawnTimes.get(parent)?.get(toolUseId);
 }
 
 /** End a background spawn of `parentId` for good (its agent walks out):
@@ -1087,9 +1107,24 @@ export function releaseBackgroundSpawn(
   return true;
 }
 
+/** `parentId`'s finished spawn `toolUseId` is past the reappearance window
+ *  (docs/adr/0003) before its agent ever materialized: it is gone. Forget it
+ *  silently so nothing keeps looking for it. Returns whether it was live. */
+export function forgetFinishedSpawn(
+  parentId: number,
+  toolUseId: string,
+  agents: AgentStateStore,
+): boolean {
+  const parent = agents.get(parentId);
+  if (!parent || !parent.backgroundAgentToolIds.has(toolUseId)) return false;
+  endBackgroundSpawn(parent, parentId, toolUseId, agents, true);
+  return true;
+}
+
 /** `parent`'s spawn `toolUseId` was resumed: its agent is working again. */
 export function clearSpawnFinished(parent: AgentState, toolUseId: string): void {
   finishedSpawns.get(parent)?.delete(toolUseId);
+  finishedSpawnTimes.get(parent)?.delete(toolUseId);
 }
 
 /** Let go of the oldest finished spawns past FINISHED_SPAWNS_PER_AGENT_MAX. */
@@ -1099,6 +1134,7 @@ function releaseOldestFinished(agent: AgentState, agentId: number, agents: Agent
     const oldest = finished.values().next().value;
     if (oldest === undefined) break;
     finished.delete(oldest);
+    finishedSpawnTimes.get(agent)?.delete(oldest);
     if (agent.backgroundAgentToolIds.has(oldest)) {
       console.log(
         `[Pixel Agents] Agent ${agentId} keeps too many finished spawns, letting go of ${oldest}`,
@@ -1161,22 +1197,24 @@ function finishSpawnTool(
 }
 
 /** A background spawn of `agent` is over for good: no longer live, and its
- *  derived agent (with its subtree) walks out. */
+ *  derived agent (with its subtree) walks out. `quiet`: a spawn that never had
+ *  an agent nor a sprite on screen — nothing to announce, nobody to walk out. */
 function endBackgroundSpawn(
   agent: AgentState,
   agentId: number,
   toolUseId: string,
   agents: AgentStateStore,
+  quiet = false,
 ): void {
   agent.backgroundAgentToolIds.delete(toolUseId);
-  finishedSpawns.get(agent)?.delete(toolUseId);
+  clearSpawnFinished(agent, toolUseId);
   workflowSpawns.get(agent)?.delete(toolUseId);
   const taskIds = spawnTaskIds.get(agent);
   if (taskIds) {
     for (const [taskId, id] of taskIds) if (id === toolUseId) taskIds.delete(taskId);
   }
-  finishSpawnTool(agent, agentId, toolUseId, agents, true);
-  backgroundAgentCompletedCallback?.(agentId, toolUseId);
+  finishSpawnTool(agent, agentId, toolUseId, agents, !quiet);
+  if (!quiet) backgroundAgentCompletedCallback?.(agentId, toolUseId);
 }
 
 // ── Seeding live spawns from history (plan T18) ──────────────
@@ -1209,6 +1247,8 @@ type HistorySpawn =
       status: string;
       named: boolean;
       finished?: boolean;
+      /** When its (latest) completion notice was written, if known. */
+      finishedAt?: number;
     }
   | { kind: 'workflow'; launch: { runDir: string; name?: string } };
 
@@ -1266,8 +1306,9 @@ export function seedSpawnsFromHistory(
   const endedPersisted = new Set<string>();
   /** Stop calls still awaiting their result → the spawn each stops. */
   const seedStops = new Map<string, string>();
-  /** Persisted live spawns launched before the window that finished in it. */
-  const finishedPersisted = new Set<string>();
+  /** Persisted live spawns launched before the window that finished in it,
+   *  with when their notice was written (if known). */
+  const finishedPersisted = new Map<string, number | undefined>();
   const ended = (id: string): void => {
     live.delete(id);
     finishedPersisted.delete(id);
@@ -1413,15 +1454,16 @@ export function seedSpawnsFromHistory(
         ended(id);
       } else if (spawn?.kind === 'background') {
         spawn.finished = true;
+        spawn.finishedAt = recordTime(record);
       } else if (!spawn && persisted.has(id)) {
         // Launched before the window: still live, and finished.
-        finishedPersisted.add(id);
+        finishedPersisted.set(id, recordTime(record));
       }
     }
   }
 
   for (const id of endedPersisted) agent.backgroundAgentToolIds.delete(id);
-  for (const id of finishedPersisted) markSpawnFinished(agent, id);
+  for (const [id, at] of finishedPersisted) markSpawnFinished(agent, id, at);
 
   const candidates: SeededSpawnCandidate[] = [];
   for (const [toolUseId, s] of live) {
@@ -1436,6 +1478,11 @@ export function seedSpawnsFromHistory(
     );
   }
   const kept = candidates.length > 0 ? keep(candidates) : new Set<string>();
+  // A finished spawn the host did not keep is gone (stale, or past the
+  // reappearance window): a persisted copy must not bring it back working.
+  for (const c of candidates) {
+    if (c.finished && !kept.has(c.toolUseId)) agent.backgroundAgentToolIds.delete(c.toolUseId);
+  }
 
   let seeded = 0;
   let seededAgentSpawn = false;
@@ -1461,7 +1508,7 @@ export function seedSpawnsFromHistory(
       // Live but no longer run as a tool: exactly as a finished notice read
       // live leaves it. Its agent is born available.
       agent.backgroundAgentToolIds.add(toolUseId);
-      markSpawnFinished(agent, toolUseId);
+      markSpawnFinished(agent, toolUseId, s.finishedAt);
       if (s.named) (agent.teammateSpawnToolIds ??= new Set()).add(toolUseId);
       seededAgentSpawn = true;
     } else {

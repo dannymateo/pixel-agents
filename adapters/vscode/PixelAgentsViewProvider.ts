@@ -485,8 +485,11 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       } else if (message.type === 'setHooksInfoShown') {
         this.adapter.setSetting(GLOBAL_KEY_HOOKS_INFO_SHOWN, true);
       } else if (message.type === 'setIdleToLoungeMinutes') {
-        // The embedded webview is privileged; the runtime clamps and persists.
+        // The embedded webview is privileged; the runtime clamps, persists and
+        // echoes the effective timings (livingOfficeSettings).
         this.runtime.setIdleToLoungeMinutes(message.minutes as number);
+      } else if (message.type === 'setLoungeToLeaveMinutes') {
+        this.runtime.setLoungeToLeaveMinutes(message.minutes as number);
       } else if (message.type === 'setShowAreas') {
         const enabled = message.enabled as boolean;
         this.adapter.setSetting(GLOBAL_KEY_SHOW_AREAS, enabled);
@@ -592,7 +595,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           externalAssetDirectories: config.externalAssetDirectories,
           showAreas,
           idleToLoungeMinutes: Math.round(this.runtime.idleToLoungeMs() / 60_000),
+          loungeToLeaveMinutes: Math.round(this.runtime.loungeToLeaveMs() / 60_000),
         });
+        // The effective living-office timings (the server's clamped values).
+        this.webview?.postMessage(this.runtime.livingOfficeSettings());
 
         // One status + at most one consent ask PER PROVIDER. Install state is distinct from the hooksEnabled
         // preference, which defaults true while consent is pending. Opening the office is the moment the user can be

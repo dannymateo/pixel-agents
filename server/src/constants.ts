@@ -83,6 +83,11 @@ export const WS_CLOSE_UNAUTHORIZED = 4001;
 export const WS_CLOSE_FORBIDDEN_ORIGIN = 4003;
 
 export const HOOK_EVENT_BUFFER_MS = 5_000;
+/** Cap on hook events waiting for their agent, across all sessions. The
+ *  oldest is dropped past it, so a burst can't grow memory without bound. */
+export const MAX_BUFFERED_HOOK_EVENTS = 500;
+/** Cap per (session, spawned-agent key) pair, oldest dropped first. */
+export const MAX_BUFFERED_HOOK_EVENTS_PER_SPAWN = 50;
 /** Grace period after SessionEnd(reason=clear/resume) before triggering onSessionEnd.
  *  /clear and /resume fire SessionEnd then SessionStart within ms. This timeout is a
  *  safety net: if SessionStart never arrives (e.g. the CLI crashes mid-transition),

@@ -1,5 +1,6 @@
 import {
   DEFAULT_MAX_CONTEXT_TOKENS,
+  DESK_RETRY_SEC,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
   TYPE_FRAME_DURATION_SEC,
@@ -89,6 +90,31 @@ export function createCharacter(
   };
 }
 
+/**
+ * An available derived agent (docs/adr/0003, spec §3.3: "in its seat,
+ * waiting") that is not working: it waits at its desk. The idle FSM walks it
+ * back there and never stands it up to wander — wandering the composed office
+ * left a finished team's module empty. Roots (no presence) and working agents
+ * between turns keep the inherited wander.
+ */
+function waitsAtDesk(ch: Character): boolean {
+  return !ch.isActive && ch.presence === 'available' && ch.seatId !== null;
+}
+
+/** Path to its desk for an agent waiting there. A failed search (boxed in) is
+ *  retried after DESK_RETRY_SEC, never every frame. */
+function pathToDesk(
+  ch: Character,
+  seat: Seat,
+  tileMap: TileTypeVal[][],
+  blockedTiles: Set<string>,
+): Array<{ col: number; row: number }> {
+  if ((ch.deskRetryTimer ?? 0) > 0) return [];
+  const path = findPath(ch.tileCol, ch.tileRow, seat.seatCol, seat.seatRow, tileMap, blockedTiles);
+  if (path.length === 0) ch.deskRetryTimer = DESK_RETRY_SEC;
+  return path;
+}
+
 /** Advance one frame along `ch.path` (the path must be non-empty). */
 function stepAlongPath(ch: Character, dt: number): void {
   const nextTile = ch.path[0];
@@ -160,6 +186,7 @@ export function updateCharacter(
   blockedTiles: Set<string>,
 ): void {
   ch.frameTimer += dt;
+  if (ch.deskRetryTimer !== undefined && ch.deskRetryTimer > 0) ch.deskRetryTimer -= dt;
 
   if (ch.scripted) {
     updateScriptedCharacter(ch, dt);
@@ -168,6 +195,16 @@ export function updateCharacter(
 
   switch (ch.state) {
     case CharacterState.TYPE: {
+      const seat = ch.seatId ? seats.get(ch.seatId) : undefined;
+      if (waitsAtDesk(ch) && seat && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
+        // Waiting at its desk: seated and still (not typing, never wandering).
+        // No rest countdown either: once it stops waiting (working again, or
+        // its desk taken away) it behaves like any idle agent right away.
+        ch.frame = 0;
+        ch.frameTimer = 0;
+        ch.seatTimer = 0;
+        break;
+      }
       if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC) {
         ch.frameTimer -= TYPE_FRAME_DURATION_SEC;
         ch.frame = (ch.frame + 1) % 2;
@@ -227,6 +264,27 @@ export function updateCharacter(
           }
         }
         break;
+      }
+      // Available and idle: back to its desk to wait there (no wandering).
+      if (waitsAtDesk(ch)) {
+        const seat = seats.get(ch.seatId!);
+        if (seat && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
+          ch.state = CharacterState.TYPE;
+          ch.dir = seat.facingDir;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+          break;
+        }
+        const path = seat ? pathToDesk(ch, seat, tileMap, blockedTiles) : [];
+        if (path.length > 0) {
+          ch.path = path;
+          ch.moveProgress = 0;
+          ch.state = CharacterState.WALK;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+          break;
+        }
+        // No way to its desk (boxed in): the ordinary idle behavior below.
       }
       // Countdown wander timer
       ch.wanderTimer -= dt;
@@ -337,20 +395,18 @@ export function updateCharacter(
 
       stepAlongPath(ch, dt);
 
-      // If became active while wandering, repath to seat
-      if (ch.isActive && ch.seatId) {
+      // If became active (or available) while wandering, repath to seat
+      if ((ch.isActive || waitsAtDesk(ch)) && ch.seatId) {
         const seat = seats.get(ch.seatId);
         if (seat) {
           const lastStep = ch.path[ch.path.length - 1];
           if (!lastStep || lastStep.col !== seat.seatCol || lastStep.row !== seat.seatRow) {
-            const newPath = findPath(
-              ch.tileCol,
-              ch.tileRow,
-              seat.seatCol,
-              seat.seatRow,
-              tileMap,
-              blockedTiles,
-            );
+            const atDesk = ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+            const newPath = ch.isActive
+              ? findPath(ch.tileCol, ch.tileRow, seat.seatCol, seat.seatRow, tileMap, blockedTiles)
+              : atDesk
+                ? []
+                : pathToDesk(ch, seat, tileMap, blockedTiles);
             if (newPath.length > 0) {
               ch.path = newPath;
               ch.moveProgress = 0;

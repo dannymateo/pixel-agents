@@ -249,6 +249,9 @@ export interface Character {
   /** Render opacity while fading in at, or out through, the door (0..1).
    *  undefined = fully opaque. */
   sceneAlpha?: number;
+  /** Seconds before an available agent with no way to its desk searches for
+   *  one again (a failed search is not repeated every frame). */
+  deskRetryTimer?: number;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */

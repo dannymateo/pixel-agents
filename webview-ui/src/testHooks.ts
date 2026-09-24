@@ -2,6 +2,7 @@ import type { ColorValue } from './components/ui/types.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { isGhostHeadlessAgentsEnabled } from './office/engine/renderer.js';
 import { carpetJunctionCase } from './office/sprites/carpetTiles.js';
+import { CharacterState } from './office/types.js';
 
 declare global {
   interface Window {
@@ -42,12 +43,16 @@ declare global {
       /** Count of placed furniture instances — lets a spec assert furniture
        *  placed onto a carpet tile (surface placement) without it being blocked. */
       getFurnitureCount?: () => number;
-      /** Seated top-level agents with the area their seat falls in (or null). */
+      /** Seated top-level agents with the area their seat falls in (or null).
+       *  `seated`: sitting on that seat right now (on its tile, in the seated pose). */
       getAgentSeats?: () => Array<{
         id: number;
         seatId: string | null;
         areaLabel: string | null;
         folderName?: string;
+        seated: boolean;
+        /** FSM state (type / idle / walk) — says why an agent is not seated. */
+        state: string;
       }>;
       /** All seats with grid coords + the area their tile falls in — lets a spec
        *  paint an Area over a known seat without hardcoding layout coordinates. */
@@ -254,6 +259,16 @@ export function installTestHooks(officeStateRef: { current: OfficeState | null }
         seatId: ch.seatId,
         areaLabel: ch.seatId ? os.seatZone(ch.seatId) : null,
         folderName: ch.folderName,
+        state: ch.state,
+        seated: (() => {
+          const seat = ch.seatId ? os.seats.get(ch.seatId) : undefined;
+          return (
+            !!seat &&
+            ch.tileCol === seat.seatCol &&
+            ch.tileRow === seat.seatRow &&
+            ch.state === CharacterState.TYPE
+          );
+        })(),
       }));
   };
 

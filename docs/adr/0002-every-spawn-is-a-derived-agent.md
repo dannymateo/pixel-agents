@@ -63,6 +63,14 @@ sit in their spawner's **scope office** (the spawner plus its direct children).
   existing `subagentClear`.
 - Every derived agent gets permission bubbles, waiting state and a context gauge from
   the shared pipeline, at the cost of one transcript watcher per live node.
+- Workflow runs (Claude's `Workflow` tool) join the tree as a `nodeKind: 'workflow'`
+  node with no transcript, parent of the run's agents. Being derived, it is not
+  recreated after a server restart mid-run — accepted, since persisting runs would
+  break "derived state is never persisted".
+- A derived agent's `label` is transcript content: only privileged connections
+  receive it; everyone sees the tree shape and the animation.
+- Hostile or runaway transcripts are bounded: at most `MAX_DERIVED_AGENTS_PER_TREE`
+  derived agents per tree and `MAX_SPAWN_DEPTH` levels; the rest waits, deferred.
 - The sidecar format is Claude Code internals and may change; parsing it stays inside
   the Claude provider (`TeamProvider.discoverTeammates` exposes `agentKey`,
   `parentAgentKey`, `depth`, `agentType`).

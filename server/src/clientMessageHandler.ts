@@ -98,13 +98,14 @@ export function handleClientMessage(
     case 'closeAgent': {
       // Standalone agents are always external (no terminal), so mirror the VS
       // Code external-agent branch: dismiss the file (so the external scanner
-      // doesn't re-adopt it) then remove. removeAgent fires the agentRemoved
-      // store event, which httpServer maps to an agentClosed broadcast.
+      // doesn't re-adopt it), then close. A derived agent walks out through
+      // the entrance with its subtree (docs/adr/0003); a session root is
+      // removed now. Removal fires agentRemoved → agentClosed.
       const id = msg.id as number;
       const agent = store.get(id);
       if (agent && runtime) {
-        runtime.dismissalTracker.dismiss(agent.jsonlFile);
-        runtime.removeAgent(id);
+        if (agent.jsonlFile) runtime.dismissalTracker.dismiss(agent.jsonlFile);
+        runtime.closeAgent(id);
       }
       break;
     }

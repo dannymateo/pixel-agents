@@ -449,10 +449,11 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           if (agent.terminalRef) {
             agent.terminalRef.dispose();
           } else {
-            // External agent -- remove from tracking and dismiss the file
-            // so the external scanner doesn't re-adopt it
-            this.runtime.dismissalTracker.dismiss(agent.jsonlFile);
-            this.runtime.removeAgent(message.id);
+            // External agent -- dismiss the file so the external scanner
+            // doesn't re-adopt it, then close it: a derived agent walks out
+            // through the entrance with its subtree (docs/adr/0003).
+            if (agent.jsonlFile) this.runtime.dismissalTracker.dismiss(agent.jsonlFile);
+            this.runtime.closeAgent(message.id);
           }
         }
       } else if (message.type === 'saveAgentSeats') {
@@ -483,6 +484,9 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         }
       } else if (message.type === 'setHooksInfoShown') {
         this.adapter.setSetting(GLOBAL_KEY_HOOKS_INFO_SHOWN, true);
+      } else if (message.type === 'setIdleToLoungeMinutes') {
+        // The embedded webview is privileged; the runtime clamps and persists.
+        this.runtime.setIdleToLoungeMinutes(message.minutes as number);
       } else if (message.type === 'setShowAreas') {
         const enabled = message.enabled as boolean;
         this.adapter.setSetting(GLOBAL_KEY_SHOW_AREAS, enabled);
@@ -587,6 +591,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           hooksInfoShown,
           externalAssetDirectories: config.externalAssetDirectories,
           showAreas,
+          idleToLoungeMinutes: Math.round(this.runtime.idleToLoungeMs() / 60_000),
         });
 
         // One status + at most one consent ask PER PROVIDER. Install state is distinct from the hooksEnabled

@@ -14,6 +14,7 @@ import type { TeamProvider } from '../../core/src/teamProvider.js';
 import { agentCreatedMessage, agentTreeMeta } from '../src/agentMessages.js';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
+import { handleClientMessage } from '../src/clientMessageHandler.js';
 import {
   IDLE_TO_LOUNGE_MINUTES_MAX,
   IDLE_TO_LOUNGE_MINUTES_MIN,
@@ -660,6 +661,20 @@ describe('living office lifecycle (runtime)', () => {
     vi.advanceTimersByTime(LEAVE_STAGGER_MS + LEAVE_ANIMATION_MAX_MS);
     expect(maybeByKey('bbb')).toBeUndefined();
     expect(maybeByKey('ccc')).toBeUndefined();
+  });
+
+  it('(g) closeAgent from the office UI walks a derived agent out instead of removing it', () => {
+    // The wire path (clientMessageHandler), not just the runtime method.
+    backgroundTree();
+    const bbb = byKey('bbb');
+    handleClientMessage({ type: 'closeAgent', id: bbb.id }, () => {}, {
+      store,
+      runtime,
+      cache: null,
+    });
+    expect(store.get(bbb.id)?.presence).toBe('leaving');
+    vi.advanceTimersByTime(2 * LEAVE_STAGGER_MS + LEAVE_ANIMATION_MAX_MS);
+    expect(maybeByKey('bbb')).toBeUndefined();
   });
 
   it('(g) the user closing a root removes it now and walks its tree out', () => {

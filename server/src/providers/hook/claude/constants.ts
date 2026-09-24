@@ -85,3 +85,21 @@ export const CLAUDE_SMALL_CONTEXT_WINDOW = 200_000;
  *  guessing small for a large model pins every gauge in the red, while the
  *  reverse is a quiet under-read that the runtime's widening still corrects. */
 export const CLAUDE_SMALL_CONTEXT_MODEL_PATTERN = /haiku|claude-[123]|-4-[01]\b/i;
+
+// ── Spawn tree + agent screen feed ──
+/** Real sidecars are well under 1 KB; anything past this is not one of ours. */
+export const SIDECAR_MAX_BYTES = 64 * 1024;
+/** Shape of a Claude spawn key (`<key>` of `agent-<key>.jsonl`, the hook
+ *  `agent_id`). Every key -- from a hook payload, a sidecar filename or a
+ *  sidecar's `parentAgentId` -- must match it before it may identify an agent:
+ *  keys are routing identity, so blank, oversized or odd-charactered values are
+ *  refused rather than carried downstream. */
+export const CLAUDE_AGENT_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/** One-line summaries (tool calls, result headlines) are clipped to this many UTF-16 units. */
+export const SUMMARY_MAX_CHARS = 200;
+/** Raw characters scanned for a one-line summary's first line. */
+export const SUMMARY_SCAN_CHARS = 4096;
+/** Tool names and ids longer than this are not real ones: clipped / dropped. */
+export const IDENTIFIER_MAX_CHARS = 128;
+/** Longer "timestamps" are not ISO-8601 ones and are dropped. */
+export const TIMESTAMP_MAX_CHARS = 64;

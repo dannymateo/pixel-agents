@@ -13,7 +13,7 @@ import {
   installHooks as installerInstallHooks,
   uninstallHooks as installerUninstallHooks,
 } from './claudeHookInstaller.js';
-import { claudeTeamProvider } from './claudeTeamProvider.js';
+import { claudeTeamProvider, normalizeClaudeAgentKey } from './claudeTeamProvider.js';
 import { CONSENT_DISCLOSURE, CONSENT_INSTALL_HEADLINE } from './consentCopy.js';
 import {
   CLAUDE_LARGE_CONTEXT_WINDOW,
@@ -126,12 +126,40 @@ function getAllSessionRoots(): string[] {
 // currentHookToolId state. Synthetic hook-* ids are returned for PreToolUse because
 // the real tool id arrives later via JSONL polling.
 
+let warnedInvalidAgentId = false;
+
 function normalizeHookEvent(
   raw: Record<string, unknown>,
-): { sessionId: string; event: AgentEvent } | null {
+): { sessionId: string; agentKey?: string; event: AgentEvent } | null {
   const eventName = raw.hook_event_name;
   const sessionId = raw.session_id;
   if (typeof eventName !== 'string' || typeof sessionId !== 'string') return null;
+
+  // Claude stamps `agent_id` (the `<key>` of the spawn's `agent-<key>.jsonl`) on
+  // events fired INSIDE a spawned agent; `session_id` stays the root session's.
+  // Kept on every normalized event -- SubagentStart/SubagentStop included, where
+  // it names the child -- and routing on it is the handler's call (docs/adr/0002).
+  // An agent_id that is PRESENT but unusable (not a string, blank, oversized,
+  // odd characters) drops the event: it fired inside some spawned agent, so
+  // falling back to the session's root would animate the wrong character.
+  let agentKey: string | undefined;
+  if (raw.agent_id !== undefined) {
+    agentKey = normalizeClaudeAgentKey(raw.agent_id);
+    if (agentKey === undefined) {
+      // Once per process: a CLI release that changes the agent_id format would
+      // otherwise lose every spawned agent's events without a trace. The value
+      // and event name are not logged (untrusted, possibly huge).
+      if (!warnedInvalidAgentId) {
+        warnedInvalidAgentId = true;
+        console.warn(
+          '[Pixel Agents] Dropping hook event: agent_id is not a valid spawn key (further drops are silent)',
+        );
+      }
+      return null;
+    }
+  }
+  const out = (event: AgentEvent) =>
+    agentKey !== undefined ? { sessionId, agentKey, event } : { sessionId, event };
 
   switch (eventName) {
     case 'PreToolUse': {
@@ -140,24 +168,21 @@ function normalizeHookEvent(
         typeof raw.tool_input === 'object' && raw.tool_input !== null
           ? (raw.tool_input as Record<string, unknown>)
           : {};
-      return {
-        sessionId,
-        event: {
-          kind: 'toolStart',
-          toolId: `hook-${Date.now()}`,
-          toolName,
-          input: toolInput,
-          runInBackground: toolInput.run_in_background === true,
-        },
-      };
+      return out({
+        kind: 'toolStart',
+        toolId: `hook-${Date.now()}`,
+        toolName,
+        input: toolInput,
+        runInBackground: toolInput.run_in_background === true,
+      });
     }
 
     case 'PostToolUse':
     case 'PostToolUseFailure':
-      return { sessionId, event: { kind: 'toolEnd', toolId: 'current' } };
+      return out({ kind: 'toolEnd', toolId: 'current' });
 
     case 'Stop':
-      return { sessionId, event: { kind: 'turnEnd' } };
+      return out({ kind: 'turnEnd' });
 
     case 'UserPromptSubmit':
       // No normalized kind for user prompts yet; silently ignore. No longer
@@ -168,75 +193,57 @@ function normalizeHookEvent(
 
     case 'SubagentStart': {
       const agentType = typeof raw.agent_type === 'string' ? raw.agent_type : 'unknown';
-      return {
-        sessionId,
-        event: {
-          kind: 'subagentStart',
-          parentToolId: 'current',
-          toolId: `hook-sub-${agentType}-${Date.now()}`,
-          toolName: agentType,
-          input: raw,
-          runInBackground: raw.run_in_background === true,
-        },
-      };
+      return out({
+        kind: 'subagentStart',
+        parentToolId: 'current',
+        toolId: `hook-sub-${agentType}-${Date.now()}`,
+        toolName: agentType,
+        input: raw,
+        runInBackground: raw.run_in_background === true,
+      });
     }
 
     case 'SubagentStop':
-      return {
-        sessionId,
-        event: { kind: 'subagentEnd', parentToolId: 'current', toolId: 'current' },
-      };
+      return out({ kind: 'subagentEnd', parentToolId: 'current', toolId: 'current' });
 
     case 'PermissionRequest':
-      return { sessionId, event: { kind: 'permissionRequest' } };
+      return out({ kind: 'permissionRequest' });
 
     case 'Notification': {
       const notificationType =
         typeof raw.notification_type === 'string' ? raw.notification_type : '';
       if (notificationType === 'permission_prompt') {
-        return { sessionId, event: { kind: 'permissionRequest' } };
+        return out({ kind: 'permissionRequest' });
       }
       if (notificationType === 'idle_prompt') {
         // idle_prompt = Claude went idle waiting on the user, not just a finished
         // turn. awaitingInput drives the "Waiting for input" label (vs "Done" for Stop).
-        return { sessionId, event: { kind: 'turnEnd', awaitingInput: true } };
+        return out({ kind: 'turnEnd', awaitingInput: true });
       }
       return null;
     }
 
     case 'SessionStart':
-      return {
-        sessionId,
-        event: {
-          kind: 'sessionStart',
-          source: typeof raw.source === 'string' ? raw.source : undefined,
-          transcriptPath: typeof raw.transcript_path === 'string' ? raw.transcript_path : undefined,
-          cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
-        },
-      };
+      return out({
+        kind: 'sessionStart',
+        source: typeof raw.source === 'string' ? raw.source : undefined,
+        transcriptPath: typeof raw.transcript_path === 'string' ? raw.transcript_path : undefined,
+        cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
+      });
 
     case 'SessionEnd':
-      return {
-        sessionId,
-        event: {
-          kind: 'sessionEnd',
-          reason: typeof raw.reason === 'string' ? raw.reason : undefined,
-        },
-      };
+      return out({
+        kind: 'sessionEnd',
+        reason: typeof raw.reason === 'string' ? raw.reason : undefined,
+      });
 
     // Agent Teams: a teammate went idle / marked a task complete. Normalize as
     // `subagentTurnEnd` so the team handler can route by the provider's event-specific identity.
     // `reason` discriminates the two so handlers don't read raw eventName.
     case 'TeammateIdle':
-      return {
-        sessionId,
-        event: { kind: 'subagentTurnEnd', parentToolId: 'current', reason: 'idle' },
-      };
+      return out({ kind: 'subagentTurnEnd', parentToolId: 'current', reason: 'idle' });
     case 'TaskCompleted':
-      return {
-        sessionId,
-        event: { kind: 'subagentTurnEnd', parentToolId: 'current', reason: 'completed' },
-      };
+      return out({ kind: 'subagentTurnEnd', parentToolId: 'current', reason: 'completed' });
 
     // TaskCreated is informational; no AgentEvent shape fits it. Drop. No
     // longer installed for that reason, but stale installs still POST it —

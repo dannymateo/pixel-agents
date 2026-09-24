@@ -84,7 +84,9 @@ export interface HookProvider {
      *  inside one (Claude: hook `agent_id`, equal to the `<key>` of the
      *  sidecar-backed `agent-<key>.jsonl`). Absent for the session's own
      *  events. A keyed event must never be applied to the session's root
-     *  agent (docs/adr/0002). */
+     *  agent (docs/adr/0002). Exception by design: on `subagentStart` /
+     *  `subagentEnd` the key names the CHILD being started/stopped, and the
+     *  event is routed to the agent that spawned it. */
     agentKey?: string;
     event: AgentEvent;
   } | null;

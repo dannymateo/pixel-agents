@@ -32,6 +32,133 @@ describe('claudeProvider', () => {
     });
   });
 
+  describe('normalizeHookEvent agentKey (spawned-agent events)', () => {
+    it('carries agent_id as agentKey for events fired inside a subagent', () => {
+      const r = claudeProvider.normalizeHookEvent({
+        hook_event_name: 'PreToolUse',
+        session_id: 's1',
+        agent_id: 'bbb222',
+        agent_type: 'desarrollador',
+        tool_name: 'Read',
+        tool_input: { file_path: '/x.ts' },
+      });
+      expect(r?.sessionId).toBe('s1');
+      expect(r?.agentKey).toBe('bbb222');
+      expect(r?.event.kind).toBe('toolStart');
+    });
+
+    it('omits agentKey for the session own events', () => {
+      const r = claudeProvider.normalizeHookEvent({ hook_event_name: 'Stop', session_id: 's1' });
+      expect(r).not.toBeNull();
+      expect(r?.agentKey).toBeUndefined();
+      expect(r && 'agentKey' in r).toBe(false);
+    });
+
+    it.each([
+      ['empty string', ''],
+      ['whitespace only', '   '],
+      ['number', 42],
+      ['null', null],
+      ['object', { id: 'bbb222' }],
+      ['array', ['bbb222']],
+      ['boolean', true],
+      ['oversized (129 chars)', 'a'.repeat(129)],
+      ['path traversal', '../bbb222'],
+      ['path separator', 'a/b'],
+      ['backslash', 'a\\b'],
+      ['inner space', 'a b'],
+      ['team-style id', 'dev@session-1234abcd'],
+      ['dot', 'a.b'],
+      ['non-ASCII', 'agénte'],
+      ['control char', 'a\u0000b'],
+    ])('drops the event when agent_id is present but unusable (%s)', (_label, id) => {
+      // It fired inside SOME spawned agent: falling back to the session's root
+      // would animate the wrong character, so the event is discarded.
+      for (const hook_event_name of ['Stop', 'PreToolUse', 'SessionEnd']) {
+        expect(
+          claudeProvider.normalizeHookEvent({
+            hook_event_name,
+            session_id: 's1',
+            agent_id: id,
+          }),
+        ).toBeNull();
+      }
+    });
+
+    it('treats an explicitly undefined agent_id as absent', () => {
+      const r = claudeProvider.normalizeHookEvent({
+        hook_event_name: 'Stop',
+        session_id: 's1',
+        agent_id: undefined,
+      });
+      expect(r?.event.kind).toBe('turnEnd');
+      expect(r && 'agentKey' in r).toBe(false);
+    });
+
+    it.each([
+      ['surrounding whitespace is trimmed', '  bbb222\n', 'bbb222'],
+      ['128 chars is the limit', 'a'.repeat(128), 'a'.repeat(128)],
+      ['underscore and dash', 'aside_question-9f3e', 'aside_question-9f3e'],
+      ['mixed case hex', 'A1b2C3', 'A1b2C3'],
+    ])('accepts a well-formed agent_id (%s)', (_label, id, expected) => {
+      const r = claudeProvider.normalizeHookEvent({
+        hook_event_name: 'Stop',
+        session_id: 's1',
+        agent_id: id,
+      });
+      expect(r?.agentKey).toBe(expected);
+    });
+
+    it.each([
+      [{ hook_event_name: 'PreToolUse', tool_name: 'Read' }, 'toolStart'],
+      [{ hook_event_name: 'PostToolUse' }, 'toolEnd'],
+      [{ hook_event_name: 'PostToolUseFailure' }, 'toolEnd'],
+      [{ hook_event_name: 'Stop' }, 'turnEnd'],
+      [{ hook_event_name: 'SubagentStart', agent_type: 'Explore' }, 'subagentStart'],
+      [{ hook_event_name: 'SubagentStop' }, 'subagentEnd'],
+      [{ hook_event_name: 'PermissionRequest' }, 'permissionRequest'],
+      [
+        { hook_event_name: 'Notification', notification_type: 'permission_prompt' },
+        'permissionRequest',
+      ],
+      [{ hook_event_name: 'Notification', notification_type: 'idle_prompt' }, 'turnEnd'],
+      [{ hook_event_name: 'SessionStart' }, 'sessionStart'],
+      [{ hook_event_name: 'SessionEnd' }, 'sessionEnd'],
+      [{ hook_event_name: 'TeammateIdle' }, 'subagentTurnEnd'],
+      [{ hook_event_name: 'TaskCompleted' }, 'subagentTurnEnd'],
+    ])('keeps agentKey on every normalized event (%o)', (payload, kind) => {
+      const r = claudeProvider.normalizeHookEvent({
+        ...payload,
+        session_id: 's1',
+        agent_id: 'k9',
+      });
+      expect(r?.event.kind).toBe(kind);
+      expect(r?.agentKey).toBe('k9');
+      expect(r?.sessionId).toBe('s1');
+    });
+
+    it('still drops ignored events even when keyed', () => {
+      for (const name of ['UserPromptSubmit', 'TaskCreated', 'SomethingWeird']) {
+        expect(
+          claudeProvider.normalizeHookEvent({
+            hook_event_name: name,
+            session_id: 's1',
+            agent_id: 'k9',
+          }),
+        ).toBeNull();
+      }
+    });
+
+    it('agent_id never replaces the session id (routing stays on session_id)', () => {
+      const r = claudeProvider.normalizeHookEvent({
+        hook_event_name: 'Stop',
+        session_id: 's1',
+        agent_id: 's2',
+      });
+      expect(r?.sessionId).toBe('s1');
+    });
+  });
+
   describe('normalizeHookEvent', () => {
     it('returns null when hook_event_name is missing', () => {
       expect(claudeProvider.normalizeHookEvent({ session_id: 'x' })).toBeNull();

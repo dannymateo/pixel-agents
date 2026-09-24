@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import type { TeamProvider } from '../../../../../core/src/teamProvider.js';
+import { CLAUDE_AGENT_KEY_PATTERN, SIDECAR_MAX_BYTES } from './constants.js';
 
 /**
  * Claude Code implementation of the TeamProvider interface.
@@ -19,31 +20,136 @@ function sidecarPath(jsonlPath: string): string {
   return jsonlPath.replace(/\.jsonl$/, '.meta.json');
 }
 
+/** Parsed sidecar metadata. `parentAgentKey` / `depth` place the spawn in the
+ *  spawn tree (docs/adr/0002): the CLI records `spawnDepth` on every sidecar and
+ *  `parentAgentId` (the `<key>` of the spawning agent) from depth 2 on. */
+interface SidecarMeta {
+  agentType: string;
+  toolUseId?: string;
+  description?: string;
+  name?: string;
+  parentAgentKey?: string;
+  depth?: number;
+}
+
+/** Sidecars are written once and never change, and a long session accumulates
+ *  hundreds of them (342 in one real session) -- re-parsing all of them on every
+ *  1 s scan is pure waste. Keyed by sidecar path, invalidated when mtime OR size
+ *  changes (a sidecar caught mid-write parses as null; the completed write grows
+ *  it even if the filesystem's mtime granularity hides the second write). */
+const sidecarCache = new Map<string, { mtimeMs: number; size: number; meta: SidecarMeta | null }>();
+
+/** Forget cached sidecars of `dir` that its latest listing no longer holds, so
+ *  the cache tracks what is on disk instead of every sidecar ever seen. */
+function evictStaleSidecars(dir: string, liveMetaPaths: ReadonlySet<string>): void {
+  const prefix = dir + path.sep;
+  for (const metaPath of sidecarCache.keys()) {
+    if (
+      metaPath.startsWith(prefix) &&
+      !metaPath.slice(prefix.length).includes(path.sep) &&
+      !liveMetaPaths.has(metaPath)
+    ) {
+      sidecarCache.delete(metaPath);
+    }
+  }
+}
+
+/** Normalize an untrusted spawn key: trimmed, then accepted only when it matches
+ *  CLAUDE_AGENT_KEY_PATTERN. Returns undefined for anything else (non-strings
+ *  included). Shared with `normalizeHookEvent` so both ends of the
+ *  hook `agent_id` ↔ sidecar key join apply the same rule. */
+export function normalizeClaudeAgentKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const key = value.trim();
+  return CLAUDE_AGENT_KEY_PATTERN.test(key) ? key : undefined;
+}
+
 /** Parse a sidecar's metadata: `agentType` (required), plus `toolUseId`,
  *  `description`, and `name` when present (background agents record the first
- *  three; a NAMED teamless spawn additionally records `name`). */
-function parseSidecarMeta(
-  jsonlPath: string,
-): { agentType: string; toolUseId?: string; description?: string; name?: string } | null {
+ *  three; a NAMED teamless spawn additionally records `name`), and the spawn-tree
+ *  fields `parentAgentId` / `spawnDepth`. Sidecar content is untrusted: a field
+ *  of the wrong type is dropped, never coerced. */
+function parseSidecarMeta(jsonlPath: string): SidecarMeta | null {
   const metaPath = sidecarPath(jsonlPath);
+  let stat: fs.Stats;
   try {
-    const raw = fs.readFileSync(metaPath, 'utf-8');
-    const data = JSON.parse(raw) as {
-      agentType?: unknown;
-      toolUseId?: unknown;
-      description?: unknown;
-      name?: unknown;
-    };
-    if (typeof data.agentType !== 'string') return null;
-    return {
-      agentType: data.agentType,
-      toolUseId: typeof data.toolUseId === 'string' ? data.toolUseId : undefined,
-      description: typeof data.description === 'string' ? data.description : undefined,
-      name: typeof data.name === 'string' ? data.name : undefined,
-    };
+    stat = fs.statSync(metaPath);
   } catch {
+    sidecarCache.delete(metaPath);
     return null;
   }
+  const cached = sidecarCache.get(metaPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.meta;
+  }
+  let meta: SidecarMeta | null = null;
+  // The scan is synchronous on the server's event loop: a FIFO or device (e.g. a
+  // symlink to /dev/zero) would block or never end, and a huge file would stall
+  // every hook and socket while it parses. Refused -- and cached as refused, so
+  // the next scan does not retry it -- without being opened.
+  if (!stat.isFile() || stat.size > SIDECAR_MAX_BYTES) {
+    console.warn(
+      `[Pixel Agents] Ignoring sidecar ${metaPath}: ${stat.isFile() ? `larger than ${SIDECAR_MAX_BYTES} bytes` : 'not a regular file'}`,
+    );
+    sidecarCache.set(metaPath, { mtimeMs: stat.mtimeMs, size: stat.size, meta: null });
+    return null;
+  }
+  // A failed READ is transient (EBUSY/EPERM while antivirus or the indexer holds
+  // the file on Windows, EMFILE under load) and must not be cached: sidecars never
+  // change after being written, so a cached null would hide the spawn forever.
+  // Only deterministic outcomes of the CONTENT (parsed, invalid JSON, wrong
+  // shape) are cached below.
+  let text: string;
+  try {
+    text = fs.readFileSync(metaPath, 'utf-8');
+  } catch {
+    sidecarCache.delete(metaPath);
+    return null;
+  }
+  try {
+    const data: unknown = JSON.parse(text);
+    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+      const d = data as Record<string, unknown>;
+      // Only an ABSENT parentAgentId means "spawned by the session root". A
+      // present-but-invalid one must not be read as absent -- that would hang
+      // the spawn off the root -- so the whole sidecar is refused instead.
+      const parentAgentKey = normalizeClaudeAgentKey(d.parentAgentId);
+      const parentInvalid = d.parentAgentId !== undefined && parentAgentKey === undefined;
+      if (typeof d.agentType === 'string' && !parentInvalid) {
+        const depth = d.spawnDepth;
+        meta = {
+          agentType: d.agentType,
+          toolUseId: typeof d.toolUseId === 'string' ? d.toolUseId : undefined,
+          description: typeof d.description === 'string' ? d.description : undefined,
+          name: typeof d.name === 'string' ? d.name : undefined,
+          parentAgentKey,
+          depth:
+            typeof depth === 'number' && Number.isSafeInteger(depth) && depth >= 1
+              ? depth
+              : undefined,
+        };
+      }
+    }
+  } catch {
+    meta = null;
+  }
+  sidecarCache.set(metaPath, { mtimeMs: stat.mtimeMs, size: stat.size, meta });
+  return meta;
+}
+
+/** Spawn key of a sidecar-backed transcript: `<key>` of `agent-<key>.jsonl`
+ *  (equal to the hook `agent_id` of events fired inside that agent). Taken
+ *  verbatim, never trimmed: a file named `agent- x.jsonl` gets NO key rather
+ *  than aliasing the file `agent-x.jsonl` (a hook's `agent_id` IS trimmed, but
+ *  the result must still be a valid key, so it can only name a valid file). */
+const SPAWN_TRANSCRIPT_PREFIX = 'agent-';
+const TRANSCRIPT_SUFFIX = '.jsonl';
+function spawnKeyFromFileName(fileName: string): string | undefined {
+  if (!fileName.startsWith(SPAWN_TRANSCRIPT_PREFIX) || !fileName.endsWith(TRANSCRIPT_SUFFIX)) {
+    return undefined;
+  }
+  const key = fileName.slice(SPAWN_TRANSCRIPT_PREFIX.length, -TRANSCRIPT_SUFFIX.length);
+  return CLAUDE_AGENT_KEY_PATTERN.test(key) ? key : undefined;
 }
 
 /** Claude stores teammate JSONL files at `<projectDir>/<leadSessionId>/subagents/`. */
@@ -165,14 +271,7 @@ export const claudeTeamProvider: TeamProvider = {
   },
 
   discoverTeammates(projectDir, leadSessionId, teamName) {
-    const result: Array<{
-      jsonlPath: string;
-      teammateName: string;
-      sessionId?: string;
-      toolUseId?: string;
-      description?: string;
-      name?: string;
-    }> = [];
+    const result: ReturnType<TeamProvider['discoverTeammates']> = [];
 
     // Old-style: sidecar-tagged transcripts under <projectDir>/<leadSessionId>/subagents/.
     const dir = teammateDir(projectDir, leadSessionId);
@@ -182,9 +281,11 @@ export const claudeTeamProvider: TeamProvider = {
     } catch {
       // directory missing -> no old-style teammates
     }
+    const liveMetaPaths = new Set<string>();
     for (const entry of entries) {
-      if (!entry.endsWith('.jsonl')) continue;
+      if (!entry.endsWith(TRANSCRIPT_SUFFIX)) continue;
       const jsonlPath = path.join(dir, entry);
+      liveMetaPaths.add(sidecarPath(jsonlPath));
       const meta = parseSidecarMeta(jsonlPath);
       if (meta) {
         result.push({
@@ -193,9 +294,14 @@ export const claudeTeamProvider: TeamProvider = {
           toolUseId: meta.toolUseId,
           description: meta.description,
           name: meta.name,
+          agentKey: spawnKeyFromFileName(entry),
+          parentAgentKey: meta.parentAgentKey,
+          depth: meta.depth,
+          agentType: meta.agentType,
         });
       }
     }
+    evictStaleSidecars(dir, liveMetaPaths);
 
     // New-style (implicit teams): teammates are independent TOP-LEVEL sessions in the
     // same project dir, every user/assistant record tagged teamName/agentName. Only

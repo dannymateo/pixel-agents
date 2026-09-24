@@ -62,6 +62,16 @@ export interface TeamProvider {
     toolUseId?: string;
     description?: string;
     name?: string;
+    /** Sidecar-backed spawns: the provider key of this spawned agent
+     *  (Claude: `<key>` of `agent-<key>.jsonl`, equal to the hook `agent_id`). */
+    agentKey?: string;
+    /** Key of the spawned agent that spawned this one; absent when the
+     *  session root spawned it. */
+    parentAgentKey?: string;
+    /** Spawn depth: 1 = spawned by the session root. */
+    depth?: number;
+    /** Spawn type (Claude sidecar `agentType`). */
+    agentType?: string;
   }>;
 
   /** Detect a teammate spawn from a completed spawn-tool result on the LEAD's

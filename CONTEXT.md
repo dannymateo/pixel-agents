@@ -19,7 +19,7 @@ _Avoid_: CLI (that's the entry command, not the adapter), browser mode
 ## Agents & Teams
 
 **Agent**:
-An AI coding session tracked by Pixel Agents, whether spawned from the office or adopted from an external terminal.
+An AI coding session tracked by Pixel Agents, whether launched from the office or adopted from an external terminal — or an agent derived from one by a spawn (see Sub-agent, Teammate).
 _Avoid_: bot, terminal (as a synonym), session (as a synonym)
 
 **Headless agent**:
@@ -34,19 +34,26 @@ A character drawn translucent because its agent is headless — the visual short
 _Avoid_: faded, dimmed, transparent, inactive (that's a status)
 
 **Sub-agent**:
-An unnamed piece of delegated work spawned by an agent, visualized with its own character near its parent — around it, not in a seat. Not an Agent (no session of its own) and not a Teammate (no name). It exists only for the duration of its task, which may outlive the parent's turn. Having no name is what makes it a sub-agent.
-_Avoid_: subtask (UI label prefix only)
+An unnamed agent spawned by another agent. A derived agent: no session of its own, never persisted, alive for the duration of its task (which may outlive the parent's turn). It can spawn sub-agents and teammates of its own, to any depth. Having no name is what makes it a sub-agent rather than a teammate; both sit in their spawner's scope office (see docs/adr/0002).
+_Avoid_: subtask (UI label prefix only, for legacy transcripts without spawn metadata)
 
 **Team**:
 A Lead plus the Teammates it spawned. A team exists because a teammate was spawned — whether or not the CLI recorded one. A CLI's team registry is evidence of a team, never its definition.
 
 **Lead**:
 The agent that spawned a Team's teammates. An agent becomes a lead the moment it spawns its first teammate.
-_Avoid_: parent (that's the sub-agent relationship), orchestrator
+_Avoid_: parent (that's the spawn-tree relationship, which every spawned agent has; lead is the team role), orchestrator
 
 **Teammate**:
 A named agent spawned by another agent — the name is what makes it a teammate. Its spawner is its Lead, and together they form a Team. Every teammate has its own transcript and sits in a seat; it may or may not have its own session or terminal — how it runs never changes what it is.
 _Avoid_: inline teammate, tmux teammate, session teammate (former run-style distinctions; a teammate's run style is a property, not an identity)
+
+**Scope**:
+An agent together with the agents it spawned directly. Every agent with children owns one scope; a scope's children may own scopes of their own, to any depth.
+
+**Scope office**:
+The office that shows one scope: its owner and its direct children, in a generated room. The root office is the user's editable office and shows top-level agents; the scopes below it are entered from there.
+_Avoid_: room, sub-office
 
 ## Agent Lifecycle
 
@@ -120,7 +127,7 @@ The indicator above a character announcing a form of inactivity: "…" for a per
 _Avoid_: bubble alone when ambiguous, notification
 
 **Context gauge**:
-The small bar under an agent's activity label showing how full its context window is. Every agent has one once it has taken a turn; sub-agents never do, having no session of their own. It reads the newest turn, so it falls when a session compacts or clears — it is a level, not a total.
+The small bar under an agent's activity label showing how full its context window is. Every agent has one once it has taken a turn, derived agents included; only legacy Subtask sub-characters (transcripts without spawn metadata) have none. It reads the newest turn, so it falls when a session compacts or clears — it is a level, not a total.
 _Avoid_: fuel gauge, health bar, token gauge (tokens are the unit, context is the thing)
 
 ## Office & Layout

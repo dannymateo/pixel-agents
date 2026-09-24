@@ -118,6 +118,10 @@ components:
         - $ref: '#/components/schemas/WorkspaceFolders'
         # Diagnostics
         - $ref: '#/components/schemas/AgentDiagnostics'
+        # Agent screen feed (point-to-point, privileged connections only)
+        - $ref: '#/components/schemas/AgentFeedSnapshot'
+        - $ref: '#/components/schemas/AgentFeedAppend'
+        - $ref: '#/components/schemas/AgentFeedDenied'
       discriminator: type
 
     ClientMessage:
@@ -144,6 +148,8 @@ components:
         - $ref: '#/components/schemas/SaveAreaMappings'
         - $ref: '#/components/schemas/SetShowAreas'
         - $ref: '#/components/schemas/RequestDiagnostics'
+        - $ref: '#/components/schemas/SubscribeAgentFeed'
+        - $ref: '#/components/schemas/UnsubscribeAgentFeed'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -190,6 +196,29 @@ components:
         hueShift:
           type: integer
           description: Server-assigned hue shift in degrees (0-360).
+        isTeammate:
+          type: boolean
+          description: True for a named agent spawned by a lead (Teammate).
+        teammateName:
+          type: string
+          description: The teammate's name, when it has one.
+        teamName:
+          type: string
+        hooksOnly:
+          type: boolean
+          description: True when the agent has no transcript and is driven by hooks alone.
+        parentAgentId:
+          type: integer
+          description: Tree parent (the agent that spawned this one). Absent for top-level sessions.
+        role:
+          type: string
+          description: Spawn type label (Claude agentType, e.g. "Explore", "desarrollador"). Display only.
+        label:
+          type: string
+          description: Spawn task description. Display only.
+        depth:
+          type: integer
+          description: Spawn depth (1 = spawned by a top-level session).
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -786,6 +815,55 @@ components:
           items:
             type: object
 
+    AgentFeedSnapshot:
+      description: >-
+        Point-to-point reply to subscribeAgentFeed with the newest entries of one
+        agent's activity feed. Never broadcast: the feed carries code and command
+        output, so only privileged connections receive it.
+      type: object
+      additionalProperties: false
+      required: [type, id, entries, truncated]
+      properties:
+        type:
+          const: agentFeedSnapshot
+        id:
+          type: integer
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedEntry'
+        truncated:
+          type: boolean
+          description: True when older entries exist beyond the snapshot limit.
+
+    AgentFeedAppend:
+      description: New feed entries for a subscribed agent (point-to-point).
+      type: object
+      additionalProperties: false
+      required: [type, id, entries]
+      properties:
+        type:
+          const: agentFeedAppend
+        id:
+          type: integer
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedEntry'
+
+    AgentFeedDenied:
+      description: subscribeAgentFeed refused (unprivileged connection or unknown agent).
+      type: object
+      additionalProperties: false
+      required: [type, id, reason]
+      properties:
+        type:
+          const: agentFeedDenied
+        id:
+          type: integer
+        reason:
+          $ref: '#/components/schemas/AgentFeedDeniedReason'
+
     # ── Client message variants ────────────────────────────────────
 
     WebviewReady:
@@ -1064,13 +1142,112 @@ components:
         type:
           const: requestDiagnostics
 
+    SubscribeAgentFeed:
+      description: >-
+        Ask for the live activity feed of one agent. Privileged connections only;
+        an unprivileged one gets agentFeedDenied.
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          const: subscribeAgentFeed
+        id:
+          type: integer
+
+    UnsubscribeAgentFeed:
+      description: Stop receiving an agent's feed.
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          const: unsubscribeAgentFeed
+        id:
+          type: integer
+
     # ── Supporting schemas ─────────────────────────────────────────
+
+    FeedEntry:
+      description: One line of an agent's activity feed (assistant text, a tool call, or a tool result).
+      type: object
+      additionalProperties: false
+      required: [seq, ts, kind, summary]
+      properties:
+        seq:
+          type: integer
+          description: Per-agent, strictly increasing across snapshot and appends.
+        ts:
+          type: string
+          description: ISO timestamp from the transcript record (empty when absent).
+        kind:
+          $ref: '#/components/schemas/FeedEntryKind'
+        toolId:
+          type: string
+        toolName:
+          type: string
+        summary:
+          type: string
+        isError:
+          type: boolean
+        detail:
+          $ref: '#/components/schemas/FeedDetail'
+
+    FeedDetail:
+      description: Expandable body of a feed entry — a diff for file edits, the output for results.
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/FeedDetailType'
+        lines:
+          type: array
+          description: For diff — one entry per line.
+          items:
+            $ref: '#/components/schemas/FeedDiffLine'
+        text:
+          type: string
+          description: For output — the ANSI-stripped text.
+        truncated:
+          type: boolean
+
+    FeedDiffLine:
+      type: object
+      additionalProperties: false
+      required: [op, text]
+      properties:
+        op:
+          $ref: '#/components/schemas/FeedDiffOp'
+        text:
+          type: string
+
+    FeedEntryKind:
+      description: What a feed entry records.
+      type: string
+      enum: [text, tool, toolResult]
+
+    FeedDetailType:
+      description: Shape of a feed entry's detail body.
+      type: string
+      enum: [diff, output]
+
+    FeedDiffOp:
+      description: Role of one diff line.
+      type: string
+      enum: [context, add, remove]
+
+    AgentFeedDeniedReason:
+      description: Why a feed subscription was refused.
+      type: string
+      enum: [unprivileged, unknownAgent]
 
     AgentSeatMeta:
       description: |
-        Seat metadata associated with an agent (palette index, hue shift, seat ID).
-        Used in `existingAgents.agentMeta`. All fields optional because some agents
-        may not have a seat assignment yet.
+        Per-agent metadata in `existingAgents.agentMeta`: seat (palette index, hue
+        shift, seat ID) plus spawn-tree metadata (parent, role, label, depth,
+        teammate name) so a reconnecting client can rebuild the agent tree. All
+        fields optional because some agents may not have a seat assignment yet.
       type: object
       additionalProperties: false
       properties:
@@ -1079,6 +1256,17 @@ components:
         hueShift:
           type: integer
         seatId:
+          type: string
+        parentAgentId:
+          type: integer
+          description: Tree parent (see AgentCreated.parentAgentId).
+        role:
+          type: string
+        label:
+          type: string
+        depth:
+          type: integer
+        teammateName:
           type: string
 
     SeatAssignment:

@@ -7,6 +7,7 @@
  * speculation.
  */
 
+import type { FeedEntry } from './messages.js';
 import type { TeamProvider } from './teamProvider.js';
 
 // ── Normalized Events (all provider types produce these) ──────
@@ -79,6 +80,12 @@ export interface HookProvider {
    *  Return null for events we should ignore. */
   normalizeHookEvent(raw: Record<string, unknown>): {
     sessionId: string;
+    /** Provider key of the spawned agent the event came from, when it fired
+     *  inside one (Claude: hook `agent_id`, equal to the `<key>` of the
+     *  sidecar-backed `agent-<key>.jsonl`). Absent for the session's own
+     *  events. A keyed event must never be applied to the session's root
+     *  agent (docs/adr/0002). */
+    agentKey?: string;
     event: AgentEvent;
   } | null;
 
@@ -139,6 +146,12 @@ export interface HookProvider {
     args: string[];
     env?: Record<string, string>;
   };
+
+  // ── Optional agent screen feed ──
+
+  /** Turn one parsed transcript record into entries for the agent screen feed.
+   *  `seq` is assigned by the host. Undefined = this provider has no feed. */
+  parseFeedEntries?(record: Record<string, unknown>): Array<Omit<FeedEntry, 'seq'>>;
 
   // ── Optional team/subagent extension (Agent Teams on Claude; empty for single-agent CLIs) ──
 

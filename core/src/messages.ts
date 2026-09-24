@@ -38,7 +38,10 @@ export type ServerMessage =
   | ExternalAssetDirectoriesUpdated
   | AreaMappingsLoaded
   | WorkspaceFolders
-  | AgentDiagnostics;
+  | AgentDiagnostics
+  | AgentFeedSnapshot
+  | AgentFeedAppend
+  | AgentFeedDenied;
 
 export type ClientMessage =
   | WebviewReady
@@ -62,7 +65,9 @@ export type ClientMessage =
   | RemoveExternalAssetDirectory
   | SaveAreaMappings
   | SetShowAreas
-  | RequestDiagnostics;
+  | RequestDiagnostics
+  | SubscribeAgentFeed
+  | UnsubscribeAgentFeed;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -77,6 +82,14 @@ export interface AgentCreated {
   isExternal?: boolean;
   palette?: number;
   hueShift?: number;
+  isTeammate?: boolean;
+  teammateName?: string;
+  teamName?: string;
+  hooksOnly?: boolean;
+  parentAgentId?: number;
+  role?: string;
+  label?: string;
+  depth?: number;
 }
 
 export interface AgentClosed {
@@ -101,6 +114,11 @@ export interface AgentSeatMeta {
   palette?: number;
   hueShift?: number;
   seatId?: string;
+  parentAgentId?: number;
+  role?: string;
+  label?: string;
+  depth?: number;
+  teammateName?: string;
 }
 
 export interface AgentStatus {
@@ -315,6 +333,56 @@ export interface AgentDiagnostics {
   agents: Record<string, any>[];
 }
 
+export interface AgentFeedSnapshot {
+  type: 'agentFeedSnapshot';
+  id: number;
+  entries: FeedEntry[];
+  truncated: boolean;
+}
+
+export interface FeedEntry {
+  seq: number;
+  ts: string;
+  kind: FeedEntryKind;
+  toolId?: string;
+  toolName?: string;
+  summary: string;
+  isError?: boolean;
+  detail?: FeedDetail;
+}
+
+export type FeedEntryKind = 'text' | 'tool' | 'toolResult';
+
+export interface FeedDetail {
+  type: FeedDetailType;
+  lines?: FeedDiffLine[];
+  text?: string;
+  truncated?: boolean;
+}
+
+export type FeedDetailType = 'diff' | 'output';
+
+export interface FeedDiffLine {
+  op: FeedDiffOp;
+  text: string;
+}
+
+export type FeedDiffOp = 'context' | 'add' | 'remove';
+
+export interface AgentFeedAppend {
+  type: 'agentFeedAppend';
+  id: number;
+  entries: FeedEntry[];
+}
+
+export interface AgentFeedDenied {
+  type: 'agentFeedDenied';
+  id: number;
+  reason: AgentFeedDeniedReason;
+}
+
+export type AgentFeedDeniedReason = 'unprivileged' | 'unknownAgent';
+
 export interface WebviewReady {
   type: 'webviewReady';
 }
@@ -428,4 +496,14 @@ export interface SetShowAreas {
 
 export interface RequestDiagnostics {
   type: 'requestDiagnostics';
+}
+
+export interface SubscribeAgentFeed {
+  type: 'subscribeAgentFeed';
+  id: number;
+}
+
+export interface UnsubscribeAgentFeed {
+  type: 'unsubscribeAgentFeed';
+  id: number;
 }

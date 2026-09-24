@@ -107,3 +107,15 @@ export const PALETTE_COUNT = 6;
  *  clientMessageHandler to guard saveAgentSeats payloads from a remote or
  *  hand-edited source corrupting the stored values with out-of-range values. */
 export const HUE_SHIFT_MAX_DEG = 360;
+/** Derived agents inherit their parent's palette; each sibling rotates the
+ *  hue by this step so a scope office tells them apart. */
+export const SPAWN_SIBLING_HUE_STEP_DEG = 40;
+
+// ── Agent screen feed ───────────────────────────────────────
+/** Newest feed entries sent on subscribe (mirrored by FEED_MAX_ENTRIES in
+ *  webview-ui/src/constants.ts; the two values must stay in sync). */
+export const FEED_SNAPSHOT_MAX_ENTRIES = 200;
+/** Per-entry detail cap (diff lines / command output), in bytes. */
+export const FEED_ENTRY_DETAIL_MAX_BYTES = 65536;
+/** Bytes read from the end of a transcript to build a feed snapshot. */
+export const FEED_TAIL_READ_BYTES = 1_048_576;

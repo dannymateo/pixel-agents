@@ -312,3 +312,23 @@ export const PET_THUMB_SCALE_MARGIN = 0.85;
 export const EMPTY_SPRITE_THUMBNAIL_BG = '#333';
 /** Maximum string length for a PlacedPet.id (defends against pathologically-long layout entries). */
 export const MAX_PET_ID_LENGTH = 128;
+
+// ── Scope offices ─────────────────────────────────────────────
+/** Tiles per workstation slot in a generated scope office (desk 3×2 + chair row + aisle). */
+export const SCOPE_SLOT_W = 4;
+export const SCOPE_SLOT_H = 4;
+/** Workstations per row in a generated scope office. */
+export const SCOPE_SLOTS_PER_ROW = 4;
+/** Delay before leaving a scope office whose owner finished. */
+export const SCOPE_OWNER_GONE_BOUNCE_MS = 2000;
+/** Scope badge background (child count). */
+export const SCOPE_BADGE_BG = '#2a2a44';
+/** Scope badge background when a descendant is waiting on permission. */
+export const SCOPE_BADGE_ALERT_BG = '#c98a1a';
+
+// ── Agent screen feed ─────────────────────────────────────────
+/** Entries kept in the agent screen. Mirrors FEED_SNAPSHOT_MAX_ENTRIES in server/src/constants.ts. */
+export const FEED_MAX_ENTRIES = 200;
+/** Diff line colors in the agent screen. */
+export const FEED_DIFF_ADD_COLOR = '#4ec96b';
+export const FEED_DIFF_REMOVE_COLOR = '#e05a5a';

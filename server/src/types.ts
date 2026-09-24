@@ -80,6 +80,20 @@ export interface AgentState {
    *  created, never persisted. */
   teammateSpawnToolIds?: Set<string>;
 
+  // -- Spawn tree (docs/adr/0002) --
+  /** Derived agents only: the provider key of this spawn (Claude sidecar
+   *  `<key>` = hook `agent_id`). Hook events carrying it route here. */
+  spawnAgentKey?: string;
+  /** Derived agents only: the agent that spawned this one (root session or
+   *  another derived agent). Removing a parent removes its whole subtree. */
+  parentAgentId?: number;
+  /** Spawn type label (display only). */
+  role?: string;
+  /** Spawn task description (display only). */
+  label?: string;
+  /** Spawn depth, 1 = spawned by the root session. */
+  depth?: number;
+
   // -- Avatar customization --
   /** Preferred character palette (0-5). If undefined, auto-assigned for diversity. */
   palette?: number;

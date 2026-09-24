@@ -1223,9 +1223,10 @@ export class OfficeState {
       const ch = this.characters.get(id);
       if (ch) this.routeToDoor(ch, scene);
     }
-    // A lounge presence that arrived before the targets did.
+    // A lounge presence that arrived before the targets did: it has been
+    // resting all along, so it is there already (no walk from its desk).
     for (const ch of [...this.characters.values()]) {
-      if (ch.presence === 'lounge' && !this.scenes.has(ch.id)) this.goToLounge(ch.id);
+      if (ch.presence === 'lounge' && !this.scenes.has(ch.id)) this.goToLounge(ch.id, true);
     }
     this.rebuildFurnitureInstances();
   }
@@ -1355,8 +1356,9 @@ export class OfficeState {
 
   /** Stand up and walk to a free rest seat (or beside the lounge when all are
    *  taken), then rest there. Keeps the desk. No-op without a lounge, while
-   *  leaving, or when already resting / on the way. */
-  goToLounge(id: number): void {
+   *  leaving, or when already resting / on the way. `instant`: be there
+   *  already (an agent that has been resting since before the office opened). */
+  goToLounge(id: number, instant = false): void {
     const ch = this.characters.get(id);
     if (!ch || !this.livingTargets) return;
     const current = this.scenes.get(id);
@@ -1396,14 +1398,15 @@ export class OfficeState {
     if (!target) return;
 
     const scene: LifecycleScene = { kind: 'lounge', phase: 'walk', timer: 0, loungeSeat: restSeat };
-    const path = this.scenePath(ch, target.col, target.row, scene);
-    const already = ch.tileCol === target.col && ch.tileRow === target.row;
+    const path = instant ? [] : this.scenePath(ch, target.col, target.row, scene);
+    const already = instant || (ch.tileCol === target.col && ch.tileRow === target.row);
     if (path.length === 0 && !already) return; // unreachable: stay at the desk
 
     if (current) this.dropScene(ch);
     if (restSeat) this.seats.get(restSeat)!.assigned = true;
     this.scenes.set(id, scene);
     ch.scripted = true;
+    if (instant) this.placeAt(ch, target.col, target.row);
     if (path.length > 0) this.startWalk(ch, path);
     else this.arrive(ch, scene);
   }
@@ -1478,8 +1481,10 @@ export class OfficeState {
     }
   }
 
-  /** Animate a presence change broadcast by the server. Leaving is final. */
-  setPresence(id: number, presence: LivingPresence): void {
+  /** Animate a presence change broadcast by the server. Leaving is final.
+   *  `instant`: a lounge presence the agent already had before the office
+   *  showed it — it appears resting instead of walking there. */
+  setPresence(id: number, presence: LivingPresence, instant = false): void {
     const ch = this.characters.get(id);
     if (!ch || this.isLeaving(id)) return;
     ch.presence = presence;
@@ -1489,7 +1494,7 @@ export class OfficeState {
         if (this.scenes.get(id)?.kind === 'lounge') this.returnToDesk(id);
         break;
       case 'lounge':
-        this.goToLounge(id);
+        this.goToLounge(id, instant);
         break;
       case 'leaving':
         this.leaveThroughDoor(id, () => {});

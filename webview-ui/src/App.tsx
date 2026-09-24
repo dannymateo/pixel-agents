@@ -102,7 +102,7 @@ function App() {
     showAreas,
     setShowAreas,
     idleToLoungeMinutes,
-    setIdleToLoungeMinutes,
+    loungeToLeaveMinutes,
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty, livingOffice);
 
   // Show migration notice once layout reset is detected
@@ -276,13 +276,15 @@ function App() {
     exportLayoutToFile(livingOffice.savableLayout(getOfficeState().getLayout()));
   }, []);
 
-  const handleIdleToLoungeMinutesChange = useCallback(
-    (minutes: number) => {
-      setIdleToLoungeMinutes(minutes);
-      transport.send({ type: 'setIdleToLoungeMinutes', minutes });
-    },
-    [setIdleToLoungeMinutes],
-  );
+  // The server clamps, persists and answers with livingOfficeSettings; the
+  // Settings fields show only that answer (an untokened client's change is
+  // refused, and must not look applied).
+  const handleIdleToLoungeMinutesChange = useCallback((minutes: number) => {
+    transport.send({ type: 'setIdleToLoungeMinutes', minutes });
+  }, []);
+  const handleLoungeToLeaveMinutesChange = useCallback((minutes: number) => {
+    transport.send({ type: 'setLoungeToLeaveMinutes', minutes });
+  }, []);
 
   const handleImportLayout = useCallback(
     (file: File) => {
@@ -560,6 +562,8 @@ function App() {
         onClose={() => setIsSettingsOpen(false)}
         idleToLoungeMinutes={idleToLoungeMinutes}
         onChangeIdleToLoungeMinutes={handleIdleToLoungeMinutesChange}
+        loungeToLeaveMinutes={loungeToLeaveMinutes}
+        onChangeLoungeToLeaveMinutes={handleLoungeToLeaveMinutesChange}
         isDebugMode={isDebugMode}
         onToggleDebugMode={handleToggleDebugMode}
         alwaysShowOverlay={alwaysShowOverlay}

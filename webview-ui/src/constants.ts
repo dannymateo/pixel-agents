@@ -361,6 +361,10 @@ export const LEAVE_WALK_MAX_MS = 60_000;
 export const IDLE_TO_LOUNGE_MINUTES_MIN = 1;
 export const IDLE_TO_LOUNGE_MINUTES_MAX = 240;
 export const IDLE_TO_LOUNGE_MINUTES_DEFAULT = 30;
+/** Mirror LOUNGE_TO_LEAVE_MINUTES_{MIN,MAX} and LOUNGE_TO_LEAVE_MS_DEFAULT in server/src/constants.ts. */
+export const LOUNGE_TO_LEAVE_MINUTES_MIN = 1;
+export const LOUNGE_TO_LEAVE_MINUTES_MAX = 480;
+export const LOUNGE_TO_LEAVE_MINUTES_DEFAULT = 60;
 /** Empty columns between the user's office and the first team module (and between modules). */
 export const MODULE_GAP_COLS = 1;
 /** Team module area colors, assigned deterministically per module owner. */

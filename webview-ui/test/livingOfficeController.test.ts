@@ -22,9 +22,11 @@ import { OfficeState } from '../src/office/engine/officeState.js';
 import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
 import {
   clampIdleToLoungeMinutes,
+  clampLoungeToLeaveMinutes,
   type DerivedAgentInit,
   isWireAgentId,
   LivingOfficeController,
+  parseLivingOfficeTimings,
   parsePresence,
 } from '../src/office/living/livingOfficeController.js';
 import { scopeLayoutCapacity } from '../src/office/scope/scopeLayoutGenerator.js';
@@ -276,6 +278,21 @@ describe('presence and leaving', () => {
     expect(living.directory.get(ROOT)).toBeUndefined();
   });
 
+  it('an agent restored resting (it finished long ago) appears in the lounge, never walking there', () => {
+    spawn(10, ROOT, 'restore', { presence: 'lounge' });
+    const ch = os.characters.get(10)!;
+    const rest = living.getLiving()!.loungeSeats.map((uid) => os.seats.get(uid)!);
+    expect(rest.some((s) => s.seatCol === ch.tileCol && s.seatRow === ch.tileRow)).toBe(true);
+    expect(ch.state).not.toBe(CharacterState.WALK);
+    expect(ch.path).toEqual([]);
+    expect(ch.seatId).not.toBeNull(); // it keeps a desk to come back to
+    // A live one entering resting still walks in from the door.
+    spawn(11, ROOT, 'enter', { presence: 'lounge' });
+    const door = living.getLiving()!.door;
+    const entering = os.characters.get(11)!;
+    expect([entering.tileCol, entering.tileRow]).toEqual([door.col, door.row]);
+  });
+
   it('a derived agent born leaving walks straight out', () => {
     spawn(10, ROOT, 'restore', { presence: 'leaving' });
     expect(os.isLeavingAgent(10)).toBe(true);
@@ -336,6 +353,33 @@ describe('wire guards', () => {
     }
     expect(clampIdleToLoungeMinutes('')).toBeNull();
     expect(clampIdleToLoungeMinutes('abc')).toBeNull();
+  });
+
+  it('clamps the lounge-to-leave minutes to the server range (1–480)', () => {
+    expect(clampLoungeToLeaveMinutes('0')).toBe(1);
+    expect(clampLoungeToLeaveMinutes('999')).toBe(480);
+    expect(clampLoungeToLeaveMinutes('300')).toBe(300);
+    for (const junk of ['12.6', '0x10', '1e3', '-5', '9999999', '', 'abc']) {
+      expect(clampLoungeToLeaveMinutes(junk)).toBeNull();
+    }
+  });
+
+  it('reads only well-formed effective timings off the wire', () => {
+    expect(
+      parseLivingOfficeTimings({
+        type: 'livingOfficeSettings',
+        idleToLoungeMinutes: 12,
+        loungeToLeaveMinutes: 90,
+      }),
+    ).toEqual({ idleToLoungeMinutes: 12, loungeToLeaveMinutes: 90 });
+    expect(
+      parseLivingOfficeTimings({ idleToLoungeMinutes: 241, loungeToLeaveMinutes: 481 }),
+    ).toEqual({ idleToLoungeMinutes: undefined, loungeToLeaveMinutes: undefined });
+    for (const junk of [0, -1, 1.5, NaN, Infinity, '30', null, undefined, 2 ** 60]) {
+      expect(
+        parseLivingOfficeTimings({ idleToLoungeMinutes: junk, loungeToLeaveMinutes: junk }),
+      ).toEqual({ idleToLoungeMinutes: undefined, loungeToLeaveMinutes: undefined });
+    }
   });
 });
 

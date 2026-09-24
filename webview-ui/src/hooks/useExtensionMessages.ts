@@ -13,6 +13,7 @@ import type { DerivedAgentInit } from '../office/living/livingOfficeController.j
 import {
   isWireAgentId,
   LivingOfficeController,
+  parseLivingOfficeTimings,
   parsePresence,
 } from '../office/living/livingOfficeController.js';
 import { treeDisplayName } from '../office/scope/treeDisplay.js';
@@ -118,9 +119,11 @@ interface ExtensionMessageState {
   setAreaMappings: (m: Record<string, string[]>) => void;
   showAreas: boolean;
   setShowAreas: (v: boolean) => void;
-  /** Minutes an available agent waits before walking to the lounge (settingsLoaded). */
+  /** Minutes an available agent waits before walking to the lounge, as the
+   *  server applies them (settingsLoaded / livingOfficeSettings; null until reported). */
   idleToLoungeMinutes: number | null;
-  setIdleToLoungeMinutes: (v: number) => void;
+  /** Minutes an unused agent rests in the lounge before it leaves (same source). */
+  loungeToLeaveMinutes: number | null;
 }
 
 /** A string off the wire, or undefined. */
@@ -194,7 +197,15 @@ export function useExtensionMessages(
   const consentRequest = consentQueue[0] ?? null;
   const [areaMappings, setAreaMappings] = useState<Record<string, string[]>>({});
   const [showAreas, setShowAreas] = useState(false);
+  // Living-office timings: only ever what the server reports (no optimistic
+  // local copy that could disagree with what it applies).
   const [idleToLoungeMinutes, setIdleToLoungeMinutes] = useState<number | null>(null);
+  const [loungeToLeaveMinutes, setLoungeToLeaveMinutes] = useState<number | null>(null);
+  const applyLivingOfficeTimings = useCallback((msg: Record<string, unknown>) => {
+    const t = parseLivingOfficeTimings(msg);
+    if (t.idleToLoungeMinutes !== undefined) setIdleToLoungeMinutes(t.idleToLoungeMinutes);
+    if (t.loungeToLeaveMinutes !== undefined) setLoungeToLeaveMinutes(t.loungeToLeaveMinutes);
+  }, []);
 
   // The renderer keeps its own module-level copy (read every rAF frame), so both
   // sources of truth move together — the persisted value on settingsLoaded and
@@ -736,6 +747,9 @@ export function useExtensionMessages(
       } else if (msg.type === 'workspaceFolders') {
         const folders = msg.folders as WorkspaceFolder[];
         setWorkspaceFolders(folders);
+      } else if (msg.type === 'livingOfficeSettings') {
+        // The effective timings, on connect and after anyone changes them.
+        applyLivingOfficeTimings(msg);
       } else if (msg.type === 'settingsLoaded') {
         const soundOn = msg.soundEnabled as boolean;
         setSoundEnabled(soundOn);
@@ -757,12 +771,7 @@ export function useExtensionMessages(
         if (typeof msg.showAreas === 'boolean') {
           setShowAreas(msg.showAreas as boolean);
         }
-        if (
-          typeof msg.idleToLoungeMinutes === 'number' &&
-          Number.isFinite(msg.idleToLoungeMinutes)
-        ) {
-          setIdleToLoungeMinutes(msg.idleToLoungeMinutes as number);
-        }
+        applyLivingOfficeTimings(msg);
         if (Array.isArray(msg.externalAssetDirectories)) {
           setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
         }
@@ -901,6 +910,6 @@ export function useExtensionMessages(
     showAreas,
     setShowAreas,
     idleToLoungeMinutes,
-    setIdleToLoungeMinutes,
+    loungeToLeaveMinutes,
   };
 }

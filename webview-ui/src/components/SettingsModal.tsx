@@ -4,9 +4,15 @@ import {
   IDLE_TO_LOUNGE_MINUTES_DEFAULT,
   IDLE_TO_LOUNGE_MINUTES_MAX,
   IDLE_TO_LOUNGE_MINUTES_MIN,
+  LOUNGE_TO_LEAVE_MINUTES_DEFAULT,
+  LOUNGE_TO_LEAVE_MINUTES_MAX,
+  LOUNGE_TO_LEAVE_MINUTES_MIN,
 } from '../constants.js';
 import { isSoundEnabled, setSoundEnabled } from '../notificationSound.js';
-import { clampIdleToLoungeMinutes } from '../office/living/livingOfficeController.js';
+import {
+  clampIdleToLoungeMinutes,
+  clampLoungeToLeaveMinutes,
+} from '../office/living/livingOfficeController.js';
 import { isBrowserRuntime } from '../runtime.js';
 import { transport } from '../transport/index.js';
 import { Button } from './ui/Button.js';
@@ -45,18 +51,36 @@ interface SettingsModalProps {
   /** Minutes an available agent waits before walking to the lounge (null = not reported yet). */
   idleToLoungeMinutes: number | null;
   onChangeIdleToLoungeMinutes: (minutes: number) => void;
+  /** Minutes an unused agent rests in the lounge before leaving (null = not reported yet). */
+  loungeToLeaveMinutes: number | null;
+  onChangeLoungeToLeaveMinutes: (minutes: number) => void;
 }
 
-/** "Minutos hasta el descanso": typed, committed on Enter or blur, clamped to
- *  the server's range; an invalid entry snaps back to the current value. */
-function IdleToLoungeField({
+/** A living-office delay in minutes: typed, committed on Enter or blur,
+ *  clamped to the server's range; an invalid entry snaps back. The field only
+ *  ever settles on what the server reports (`value`): a committed change shows
+ *  the current value until the server's answer arrives, so a refused change
+ *  never looks applied. */
+function MinutesField({
+  label,
+  testId,
   value,
+  fallback,
+  min,
+  max,
+  clamp,
   onCommit,
 }: {
+  label: string;
+  testId: string;
   value: number | null;
+  fallback: number;
+  min: number;
+  max: number;
+  clamp: (raw: string) => number | null;
   onCommit: (minutes: number) => void;
 }) {
-  const current = value ?? IDLE_TO_LOUNGE_MINUTES_DEFAULT;
+  const current = value ?? fallback;
   const [draft, setDraft] = useState(String(current));
   // Only a value the user typed is ever sent: focusing and leaving the field
   // (or the server not having reported its value yet) sends nothing.
@@ -68,22 +92,20 @@ function IdleToLoungeField({
   const commit = () => {
     if (!edited) return;
     setEdited(false);
-    const minutes = clampIdleToLoungeMinutes(draft);
-    if (minutes === null) {
-      setDraft(String(current));
-      return;
-    }
-    setDraft(String(minutes));
-    if (minutes !== current) onCommit(minutes);
+    const minutes = clamp(draft);
+    setDraft(String(current));
+    if (minutes !== null && minutes !== current) onCommit(minutes);
   };
   return (
     <label className="flex items-center justify-between gap-8 py-6 px-10">
-      <span>Minutos hasta el descanso</span>
+      <span>{label}</span>
       <input
         type="number"
-        data-testid="idle-to-lounge-minutes"
-        min={IDLE_TO_LOUNGE_MINUTES_MIN}
-        max={IDLE_TO_LOUNGE_MINUTES_MAX}
+        data-testid={testId}
+        // Nothing to change until the server has said what it applies.
+        disabled={value === null}
+        min={min}
+        max={max}
         step={1}
         value={draft}
         onChange={(e) => {
@@ -121,6 +143,8 @@ export function SettingsModal({
   onImportLayout,
   idleToLoungeMinutes,
   onChangeIdleToLoungeMinutes,
+  loungeToLeaveMinutes,
+  onChangeLoungeToLeaveMinutes,
 }: SettingsModalProps) {
   const [soundLocal, setSoundLocal] = useState(isSoundEnabled);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -270,7 +294,26 @@ export function SettingsModal({
       {showAreasAvailable && (
         <Checkbox label="Show Areas" checked={showAreas} onChange={onToggleShowAreas} />
       )}
-      <IdleToLoungeField value={idleToLoungeMinutes} onCommit={onChangeIdleToLoungeMinutes} />
+      <MinutesField
+        label="Minutos hasta el descanso"
+        testId="idle-to-lounge-minutes"
+        value={idleToLoungeMinutes}
+        fallback={IDLE_TO_LOUNGE_MINUTES_DEFAULT}
+        min={IDLE_TO_LOUNGE_MINUTES_MIN}
+        max={IDLE_TO_LOUNGE_MINUTES_MAX}
+        clamp={clampIdleToLoungeMinutes}
+        onCommit={onChangeIdleToLoungeMinutes}
+      />
+      <MinutesField
+        label="Minutos en descanso antes de irse"
+        testId="lounge-to-leave-minutes"
+        value={loungeToLeaveMinutes}
+        fallback={LOUNGE_TO_LEAVE_MINUTES_DEFAULT}
+        min={LOUNGE_TO_LEAVE_MINUTES_MIN}
+        max={LOUNGE_TO_LEAVE_MINUTES_MAX}
+        clamp={clampLoungeToLeaveMinutes}
+        onCommit={onChangeLoungeToLeaveMinutes}
+      />
       <Checkbox label="Debug View" checked={isDebugMode} onChange={onToggleDebugMode} />
     </Modal>
   );

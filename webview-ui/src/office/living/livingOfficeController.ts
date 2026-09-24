@@ -26,6 +26,8 @@ import {
   IDLE_TO_LOUNGE_MINUTES_MAX,
   IDLE_TO_LOUNGE_MINUTES_MIN,
   LEAVE_WALK_MAX_MS,
+  LOUNGE_TO_LEAVE_MINUTES_MAX,
+  LOUNGE_TO_LEAVE_MINUTES_MIN,
 } from '../../constants.js';
 import type { LivingPresence, OfficeState } from '../engine/officeState.js';
 import { AgentDirectory } from '../scope/agentDirectory.js';
@@ -66,12 +68,43 @@ export function isWireAgentId(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
-/** Typed minutes (plain decimal digits) clamped to the server's range, or null for anything else. */
-export function clampIdleToLoungeMinutes(raw: string): number | null {
+/** Typed minutes (plain decimal digits) clamped to [min, max], or null for anything else. */
+function clampTypedMinutes(raw: string, min: number, max: number): number | null {
   const text = raw.trim();
   if (!/^\d{1,6}$/.test(text)) return null;
-  const n = Number(text);
-  return Math.min(IDLE_TO_LOUNGE_MINUTES_MAX, Math.max(IDLE_TO_LOUNGE_MINUTES_MIN, n));
+  return Math.min(max, Math.max(min, Number(text)));
+}
+
+/** Typed idle-to-lounge minutes clamped to the server's range, or null for anything else. */
+export function clampIdleToLoungeMinutes(raw: string): number | null {
+  return clampTypedMinutes(raw, IDLE_TO_LOUNGE_MINUTES_MIN, IDLE_TO_LOUNGE_MINUTES_MAX);
+}
+
+/** Typed lounge-to-leave minutes clamped to the server's range, or null for anything else. */
+export function clampLoungeToLeaveMinutes(raw: string): number | null {
+  return clampTypedMinutes(raw, LOUNGE_TO_LEAVE_MINUTES_MIN, LOUNGE_TO_LEAVE_MINUTES_MAX);
+}
+
+/** The effective timings a `livingOfficeSettings` (or `settingsLoaded`)
+ *  message carries: each one only when it is an integer inside its range. */
+export function parseLivingOfficeTimings(msg: Record<string, unknown>): {
+  idleToLoungeMinutes?: number;
+  loungeToLeaveMinutes?: number;
+} {
+  const minutes = (v: unknown, min: number, max: number): number | undefined =>
+    typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max ? v : undefined;
+  return {
+    idleToLoungeMinutes: minutes(
+      msg.idleToLoungeMinutes,
+      IDLE_TO_LOUNGE_MINUTES_MIN,
+      IDLE_TO_LOUNGE_MINUTES_MAX,
+    ),
+    loungeToLeaveMinutes: minutes(
+      msg.loungeToLeaveMinutes,
+      LOUNGE_TO_LEAVE_MINUTES_MIN,
+      LOUNGE_TO_LEAVE_MINUTES_MAX,
+    ),
+  };
 }
 
 export interface LivingOfficeControllerOptions {
@@ -287,7 +320,9 @@ export class LivingOfficeController {
       if (init.agentName !== undefined) ch.agentName = init.agentName;
       if (init.teamName !== undefined) ch.teamName = init.teamName;
     }
-    this.animatePresence(id);
+    // A restored agent already resting appears in the lounge (no walk from
+    // its desk on opening the office); one entering live walks there.
+    this.animatePresence(id, how === 'restore');
   }
 
   /** The server says `id` is in a new stage of its office life. Roots have no
@@ -440,13 +475,13 @@ export class LivingOfficeController {
     }
   }
 
-  private animatePresence(id: number): void {
+  private animatePresence(id: number, instant = false): void {
     const presence = this.directory.get(id)?.presence;
     if (presence === undefined) return;
     const os = this.getOfficeState();
     if (!os.characters.has(id)) return;
     if (presence === 'leaving') this.startLeaving(id);
-    else os.setPresence(id, presence);
+    else os.setPresence(id, presence, instant);
   }
 
   private startLeaving(id: number): void {

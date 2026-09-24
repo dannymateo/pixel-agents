@@ -17,6 +17,7 @@ import {
   withSubagentTranscript,
   writeSpawnFiles,
 } from '../../../helpers/spawnTree';
+import { buildTurnDurationRecord } from '../../../helpers/team';
 import { getPixelAgentsFrame, openPixelAgentsPanel, setSettings } from '../../../helpers/webview';
 
 // The living office (docs/adr/0003): a team gets its own named module beside
@@ -46,10 +47,62 @@ async function idOf(frame: Parameters<typeof getDerivedAgentOverlay>[0], label: 
   return Number(raw);
 }
 
+/** The session spawns "Fase 1" in the background at +1 s; from +2.5 s it
+ *  spawns the two devs and the QA, 600 ms apart (all background). */
+function teamScenario(name: string) {
+  let scenario = claudeScenario(name);
+  for (const node of [LEAD, ...MEMBERS]) scenario = withSubagentTranscript(scenario, node.key);
+  scenario = scenario
+    .at(1_000)
+    .appendJsonl(
+      buildAgentSpawnRecord(ROOT_SPAWN, LEAD.label, LEAD.type, { run_in_background: true }),
+    )
+    .at(1_300)
+    .appendJsonl(buildAsyncSpawnResultRecord(ROOT_SPAWN, LEAD.key));
+  scenario = writeSpawnFiles(scenario, 1_500, {
+    agentKey: LEAD.key,
+    agentType: LEAD.type,
+    description: LEAD.label,
+    toolUseId: ROOT_SPAWN,
+    spawnDepth: 1,
+  });
+  let at = 2_500;
+  for (const member of MEMBERS) {
+    scenario = scenario
+      .at(at)
+      .appendJsonl(
+        inSubagent(
+          LEAD.key,
+          buildAgentSpawnRecord(member.spawn, member.label, member.type, {
+            run_in_background: true,
+          }),
+        ),
+        { session: subagentAlias(LEAD.key) },
+      )
+      .at(at + 200)
+      .appendJsonl(inSubagent(LEAD.key, buildAsyncSpawnResultRecord(member.spawn, member.key)), {
+        session: subagentAlias(LEAD.key),
+      });
+    scenario = writeSpawnFiles(scenario, at + 400, {
+      agentKey: member.key,
+      agentType: member.type,
+      description: member.label,
+      toolUseId: member.spawn,
+      spawnDepth: 2,
+      parentAgentId: LEAD.key,
+    });
+    at += 600;
+  }
+  return scenario;
+}
+
 test.describe('Hooks OFF / living office', () => {
   test('living office: a team gets a named module, completed stays, killed walks out and frees it @area:teams', async ({
     pixelAgents,
   }) => {
+    // The door→module walk is ~20 s each way; dev 2 walking out must be fully
+    // observed before the lead's kill sends everyone else out.
+    test.setTimeout(180_000);
     const { frame, window, tmpHome, mockLogFile, narrator } = pixelAgents;
 
     narrator.step('hooks OFF — the tree comes from sidecars and per-node transcripts only');
@@ -58,49 +111,7 @@ test.describe('Hooks OFF / living office', () => {
     narrator.step(
       'arranging: the session spawns "Fase 1" in the background; it spawns two devs and a QA',
     );
-    let scenario = claudeScenario('living office team module lifecycle');
-    for (const node of [LEAD, ...MEMBERS]) scenario = withSubagentTranscript(scenario, node.key);
-    scenario = scenario
-      .at(1_000)
-      .appendJsonl(
-        buildAgentSpawnRecord(ROOT_SPAWN, LEAD.label, LEAD.type, { run_in_background: true }),
-      )
-      .at(1_300)
-      .appendJsonl(buildAsyncSpawnResultRecord(ROOT_SPAWN, LEAD.key));
-    scenario = writeSpawnFiles(scenario, 1_500, {
-      agentKey: LEAD.key,
-      agentType: LEAD.type,
-      description: LEAD.label,
-      toolUseId: ROOT_SPAWN,
-      spawnDepth: 1,
-    });
-    let at = 2_500;
-    for (const member of MEMBERS) {
-      scenario = scenario
-        .at(at)
-        .appendJsonl(
-          inSubagent(
-            LEAD.key,
-            buildAgentSpawnRecord(member.spawn, member.label, member.type, {
-              run_in_background: true,
-            }),
-          ),
-          { session: subagentAlias(LEAD.key) },
-        )
-        .at(at + 200)
-        .appendJsonl(inSubagent(LEAD.key, buildAsyncSpawnResultRecord(member.spawn, member.key)), {
-          session: subagentAlias(LEAD.key),
-        });
-      scenario = writeSpawnFiles(scenario, at + 400, {
-        agentKey: member.key,
-        agentType: member.type,
-        description: member.label,
-        toolUseId: member.spawn,
-        spawnDepth: 2,
-        parentAgentId: LEAD.key,
-      });
-      at += 600;
-    }
+    let scenario = teamScenario('living office team module lifecycle');
     scenario = scenario
       // Dev 1 finishes: available, resumable — it must stay at its desk.
       .at(10_000)
@@ -113,7 +124,7 @@ test.describe('Hooks OFF / living office', () => {
         session: subagentAlias(LEAD.key),
       })
       // The session kills the whole phase: the team leaves, leaves first.
-      .at(58_000)
+      .at(75_000)
       .appendJsonl(buildTaskNotificationRecord(LEAD.key, ROOT_SPAWN, 'killed'))
       .holdOpenFor(30_000);
     await arrangeNextClaudeInvocation(tmpHome, scenario.build());
@@ -197,5 +208,76 @@ test.describe('Hooks OFF / living office', () => {
       })
       .not.toContain(LEAD.label);
     narrator.check('everyone left and the "Fase 1" module is freed');
+  });
+
+  test('living office: a team that finishes before reaching its desks ends seated in its module @area:teams', async ({
+    pixelAgents,
+  }) => {
+    const { frame, window, tmpHome, mockLogFile, narrator } = pixelAgents;
+
+    narrator.step('hooks OFF — the tree comes from sidecars and per-node transcripts only');
+    await setSettings(frame, { hooksEnabled: false });
+
+    // The walk from the door to the module takes ~20 s; every member ends its
+    // turn and completes a few seconds after it is born, so the office sees it
+    // go idle (agentStatus 'waiting') and `available` mid-walk. T25: the idle
+    // FSM then stood the team up and wandered it off, its module desks empty.
+    narrator.step('arranging: "Fase 1", two devs and a QA — all done within ~9 s');
+    let scenario = teamScenario('living office team finishes before its desks');
+    for (const [i, node] of [...MEMBERS, LEAD].entries()) {
+      scenario = scenario
+        .at(7_000 + i * 200)
+        .appendJsonl(inSubagent(node.key, buildTurnDurationRecord()), {
+          session: subagentAlias(node.key),
+        });
+    }
+    for (const [i, member] of MEMBERS.entries()) {
+      scenario = scenario
+        .at(8_000 + i * 200)
+        .appendJsonl(buildTaskNotificationRecord(member.key, member.spawn, 'completed'), {
+          session: subagentAlias(LEAD.key),
+        });
+    }
+    scenario = scenario
+      .at(9_000)
+      .appendJsonl(buildTaskNotificationRecord(LEAD.key, ROOT_SPAWN, 'completed'))
+      .holdOpenFor(120_000);
+    await arrangeNextClaudeInvocation(tmpHome, scenario.build());
+
+    await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
+    await openPixelAgentsPanel(window);
+    const panelFrame = await getPixelAgentsFrame(window);
+
+    narrator.step('waiting for "Fase 1" and its three members');
+    for (const node of [LEAD, ...MEMBERS]) {
+      await expectDerivedAgentVisible(panelFrame, node.label, LIVING_TIMEOUT_MS);
+    }
+    const teamIds = await Promise.all([LEAD, ...MEMBERS].map((n) => idOf(panelFrame, n.label)));
+    const moduleSeating = async () => {
+      const seats = await readAgentSeats(panelFrame);
+      return teamIds.map((id) => {
+        const s = seats.find((x) => x.id === id);
+        return s
+          ? `${s.areaLabel ?? 'no area'}${s.seated ? '' : ` (not seated: ${s.state})`}`
+          : 'missing';
+      });
+    };
+    const allSeated = [LEAD.label, LEAD.label, LEAD.label, LEAD.label];
+
+    narrator.step('everyone walks in and sits down at its desk in "Fase 1"');
+    await expect
+      .poll(moduleSeating, { timeout: WALK_TIMEOUT_MS, intervals: [250] })
+      .toEqual(allSeated);
+    narrator.check('the whole team sits in its module');
+
+    // Available is "at its desk, waiting" (spec §3.3). The old idle FSM stood
+    // an idle agent up 3–5 s after it sat down and wandered it off.
+    narrator.step('they wait there — nobody stands up to wander');
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      expect(await moduleSeating()).toEqual(allSeated);
+      await panelFrame.waitForTimeout(500);
+    }
+    narrator.check('15 s later every member is still seated in "Fase 1"');
   });
 });

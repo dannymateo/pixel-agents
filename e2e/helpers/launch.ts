@@ -373,6 +373,12 @@ export async function launchVSCode(
     // Disable GPU acceleration: prevents Electron GPU-sandbox stalls in headless
     // CI environments (required on macOS arm64 runners, harmless elsewhere).
     '--disable-gpu',
+    // Keep the webview's requestAnimationFrame loop at full rate when the test
+    // window is covered, unfocused or the screen is locked: Chromium otherwise
+    // throttles it to ~1 fps and characters walk ~12x slower than their budget.
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-background-timer-throttling',
     // On Linux, use the Ozone headless platform so Electron runs without a
     // display server (equivalent to what --disable-gpu achieves on macOS/Windows).
     ...(process.platform === 'linux' ? ['--ozone-platform=headless'] : []),

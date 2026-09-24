@@ -32,6 +32,8 @@ export interface TestHooksWindow extends Window {
       seatId: string | null;
       areaLabel: string | null;
       folderName?: string;
+      seated: boolean;
+      state: string;
     }>;
     getSeats?: () => Array<{
       uid: string;
@@ -183,11 +185,16 @@ export async function readSeats(
   );
 }
 
-/** Read seated agents with the area their seat falls in. */
-export async function readAgentSeats(
-  frame: Frame,
-): Promise<
-  Array<{ id: number; seatId: string | null; areaLabel: string | null; folderName?: string }>
+/** Read seated agents with the area their seat falls in (`seated`: sitting on it right now). */
+export async function readAgentSeats(frame: Frame): Promise<
+  Array<{
+    id: number;
+    seatId: string | null;
+    areaLabel: string | null;
+    folderName?: string;
+    seated: boolean;
+    state: string;
+  }>
 > {
   return frame.evaluate(
     () => (window as TestHooksWindow).__pixelAgentsTestHooks?.getAgentSeats?.() ?? [],

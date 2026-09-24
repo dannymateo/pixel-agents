@@ -1,4 +1,4 @@
-# Árbol de agentes, oficinas por scope y pantalla ampliada — Plan de implementación
+# Árbol de agentes, oficina viva y pantalla ampliada — Plan de implementación
 
 > **Para agentes ejecutores:** este plan se ejecuta con la orquestación `/equipo` (skill `orquestar-equipo`, modo multi-fase). Cada tarea `T<n>` es de UN `desarrollador`, dueño de su ciclo QA (`qa-revisor`) + `pentester`. Las tareas `S<n>` son del **super-líder** (archivos centrales compartidos, en serie). Los pasos usan checkboxes (`- [ ]`). **Commits**: solo el super-líder, en la rama `feature/agent-tree-scope-offices`, tras validar cada tarea (el usuario pidió commits en esta rama; nada de push ni PR sin su visto bueno). Los desarrolladores NO commitean.
 
@@ -47,8 +47,8 @@ Ola 2b T17 nodos workflow en el runtime (usa T6, T16; mismos archivos que T6 ⇒
           │
        S2 integración entrega 1 → revisión del usuario (probar en navegador, standalone)
           │
-Ola 3  T9 directorio + OfficeRegistry (usa T4) │ T10 UI navegación (usa T4)
-       S3 integración entrega 2 (App.tsx) + e2e navegación → revisión del usuario
+Ola 3  S7 contrato presence → T19 servidor ciclo de vida │ T20 assets │ T21 composición oficina viva │ T22 motor puerta/descanso
+       S8 integración entrega 2 (oficina viva) + e2e → revisión del usuario
           │
 Ola 4  T11 AgentFeedHub server (usa T5) │ T12 AgentScreenModal UI
        S4 integración entrega 3 + e2e feed + CLAUDE.md → revisión del usuario
@@ -1872,112 +1872,220 @@ Además: registrar `extractWorkflowLaunch: extractClaudeWorkflowLaunch` y `disco
 
 ---
 
-## Ola 3 (paralela; entrega 2)
+## Ola 3 (entrega 2 — oficina viva, spec §3; rediseñada 2026-09-24)
 
-### T9: Directorio de agentes y OfficeRegistry — enrutado de mensajes por oficina
+> Reemplaza las tareas T9/T10/S3 de oficinas navegables (descartadas). Entrega 1 (S1, T1–T8, T16–T18, S2) está commiteada.
 
-**Files:**
+```
+S7 contrato presence + TaskStop + ajustes (super-líder)
+   │
+   ├─ T19 servidor: ciclo de vida (presence, descanso, salida)
+   ├─ T20 assets: puerta, arcade, consola, puff
+   ├─ T21 webview puro: composición de la oficina viva (módulos, áreas, puerta, descanso)
+   └─ T22 webview motor: entrar / descansar / volver / despedirse
+   │
+S8 integración + e2e + navegador → revisión del usuario
+```
 
-- Create: `webview-ui/src/office/scope/officeRegistry.ts`
-- Modify: `webview-ui/src/hooks/useExtensionMessages.ts`
-- Test: `webview-ui/test/officeRegistry.test.ts`
+T19–T22 corren en paralelo contra las interfaces fijadas aquí; ninguno toca archivos de otro.
+
+### S7: Contrato de presencia y señales de salida (super-líder)
+
+**Files:** `core/asyncapi.yaml` (+ regenerar), `core/src/provider.ts`, `core/src/teamProvider.ts`, `server/src/types.ts`, `server/src/constants.ts`, `webview-ui/src/constants.ts`, `CONTEXT.md`, `docs/adr/0003-living-office-lifecycle.md`.
+
+- [ ] **Step 1: contrato**
+  - Esquema nombrado `AgentPresence` (`type: string, enum: [working, available, lounge, leaving]`).
+  - ServerMessage `AgentPresenceChanged { type: 'agentPresence', id, presence }`.
+  - `presence?: AgentPresence` en `AgentCreated` y `AgentSeatMeta`.
+  - ClientMessage `SetIdleToLoungeMinutes { type: 'setIdleToLoungeMinutes', minutes: integer }` y el campo `idleToLoungeMinutes?` en `SettingsLoaded`.
+  - Regenerar sin `AnonymousSchema`.
+- [ ] **Step 2: interfaces**
+  - `AgentState.presence?: 'working' | 'available' | 'lounge' | 'leaving'` (undefined = working) y `AgentState.availableSince?: number`.
+  - `TeamProvider.extractSpawnStop?(toolName: string, toolInput: Record<string, unknown>): string | null` — la `task_id` que un `TaskStop` detiene (Claude: `toolName === 'TaskStop'`, `input.task_id` validado con `/^[A-Za-z0-9_-]{1,128}$/`).
+  - `TeamProvider.completionStatus?(noticeContent: string): 'completed' | 'failed' | 'killed' | 'stopped' | undefined` — el `<status>` de una notificación `<task-notification>`.
+- [ ] **Step 3: constantes**
+  - server: `IDLE_TO_LOUNGE_MS_DEFAULT = 30 * 60_000`, `IDLE_TO_LOUNGE_MINUTES_MIN = 1`, `IDLE_TO_LOUNGE_MINUTES_MAX = 240`, `LEAVE_ANIMATION_MAX_MS = 6000`, `LEAVE_STAGGER_MS = 400`, `PRESENCE_TICK_MS = 5000`.
+  - webview: `DOOR_OPEN_HOLD_MS = 900`, `GOODBYE_BUBBLE_MS = 1500`, `LOUNGE_AREA_LABEL = 'Descanso'`, `MODULE_GAP_COLS = 1`, colores de área por módulo (paleta de 6).
+- [ ] **Step 4: dominio**
+  - ADR 0003: terminar ≠ salir; señales de salida reales (`killed`/`stopped`/`TaskStop`/cierre/fin de raíz); inactividad → descanso; el servidor decide la presencia y la webview anima; alternativa rechazada: oficinas por scope navegables.
+  - `CONTEXT.md`: **Presence**, **Team module**, **Lounge**, **Entrance**; ajustar **Sub-agent**, que "vive hasta que su padre lo detiene o termina la sesión".
+- [ ] **Step 5:** `npm run compile`; commit `feat: Agregar contrato de presencia de agentes`.
+
+---
+
+### T19: Servidor — ciclo de vida con presencia
+
+**Files:** `server/src/transcriptParser.ts`, `server/src/fileWatcher.ts`, `server/src/agentRuntime.ts`, nuevo `server/src/presence.ts`, `server/src/providers/hook/claude/claudeTeamProvider.ts` (implementa `extractSpawnStop` y `completionStatus`), `server/src/clientMessageHandler.ts` (solo el caso `setIdleToLoungeMinutes` + `idleToLoungeMinutes` en `settingsLoaded`), `server/src/configPersistence.ts` (ajuste por namespace). Tests: nuevo `server/__tests__/presence.test.ts`, ajustes a `spawnTreeRuntime`/`backgroundAgents`/`workflowNodes`/`spawnSeed`.
 
 **Interfaces:**
 
-- Consumes: `AgentDirectory`, `generateScopeLayout`, `DEFAULT_SCOPE_KIT` (T4); `OfficeState` (`addAgent`, `removeAgent`, `rebuildFromLayout`).
 - Produces:
+  - `class PresenceTracker { constructor(store, opts: { idleToLoungeMs: () => number; now?: () => number }); markActivity(id): void; markAvailable(id): void; beginLeave(ids: number[]): void; tick(): void; dispose(): void }`.
+  - Broadcast `agentPresence` en cada cambio.
+  - `agentCreated` lleva `presence`.
+- Consumes: `completedSpawnToolId`, `noteSpawnTaskId` (existentes); `removeAgent` en cascada (T6); contrato S7.
+
+**Reglas:**
+
+- Notificación de un spawn de fondo:
+  - `completed`/`failed` ⇒ **no** se remueve: el hijo pasa a `available` y su spawn sigue vivo (sigue en `backgroundAgentToolIds`, así puede retomarse; `SendMessage` + nueva actividad ⇒ `working`).
+  - `killed`/`stopped` ⇒ `beginLeave([hijo + subárbol])`.
+- `TaskStop` en el transcript del padre con `task_id` resuelto (misma resolución que `<task-id>`) ⇒ `beginLeave`.
+- Cierre por el usuario y fin de la sesión raíz ⇒ `beginLeave` del subárbol. Orden de salida: hojas primero, escalonadas con `LEAVE_STAGGER_MS`. `removeAgent` real tras `LEAVE_ANIMATION_MAX_MS` (el cliente no puede bloquearlo).
+- Spawns de primer plano: su `tool_result` ⇒ `beginLeave` (terminan de verdad).
+- Workflows: sus agentes quedan `available` al terminar su turno; el completado del workflow ⇒ `beginLeave` del nodo y su subárbol.
+- `tick()` cada `PRESENCE_TICK_MS`: `available` por más de `idleToLoungeMs` ⇒ `lounge`; cualquier actividad (tool, texto, permiso) ⇒ `working`.
+- Una notificación `completed` repetida (el agente se retomó y volvió a parar) solo vuelve a `available`.
+- Nada nuevo se persiste. El ajuste `idleToLoungeMinutes` sí se persiste por namespace, acotado a `[MIN, MAX]`.
+
+- [ ] **Step 1: tests rojos** (`presence.test.ts`):
+  - (a) `completed` no remueve y el hijo pasa a `available`; (b) retomado con `SendMessage`, vuelve a `working`;
+  - (c) `killed` saca al hijo y su subárbol, hojas primero y escalonado; (d) `TaskStop` con la clave del hijo saca solo a ese hijo; (e) un `TaskStop` con un `task_id` ajeno no hace nada;
+  - (f) inactividad ⇒ `lounge` con reloj falso; actividad ⇒ `working`;
+  - (g) fin de la raíz ⇒ todos `leaving` y luego removidos; (h) primer plano con `tool_result` ⇒ `leaving`;
+  - (i) workflow completado ⇒ sus agentes y el nodo salen;
+  - (j) `setIdleToLoungeMinutes` fuera de rango se acota y se persiste; conexión sin privilegio ⇒ ignorado;
+  - (k) `agentCreated`/`existingAgents` llevan `presence`.
+- [ ] **Step 2:** implementar. **Step 3:** suite completa en verde. **Step 4:** QA y pentester (foco: inmortalidad, fugas de timers, notificaciones falsificadas, un `TaskStop` que saque a agentes de otra raíz). **Step 5:** reportar.
+
+---
+
+### T20: Assets — puerta, arcade, consola y puff
+
+**Files:** nuevos `webview-ui/public/assets/furniture/{DOOR,ARCADE,GAME_CONSOLE,BEANBAG}/` (PNG + `manifest.json`), script generador `scripts/generate-living-office-assets.mjs` (dibuja los PNG con `pngjs` a partir de matrices de píxeles en el código, para que se puedan revisar y regenerar), test `server/__tests__/livingOfficeAssets.test.ts`.
+
+**Requisitos:**
+
+- **Estilo:** 16 px por tile, paleta y contornos coherentes con `DESK`/`PC`/`SOFA` (lee sus PNG y usa colores de esa paleta), sombreado simple.
+- **`DOOR`:** 1×2 tiles, `category: 'wall'`, `canPlaceOnWalls: true`, estados `closed`/`open` en un `groupId`, orientación frontal.
+- **`ARCADE`:** 1×2, `category: 'electronics'`, estados `off`/`on` (pantalla encendida con 2 cuadros de animación si el manifest lo soporta, como el PC).
+- **`GAME_CONSOLE`:** 2×1, TV con consola, `electronics`.
+- **`BEANBAG`:** 1×1, `category: 'chairs'`; es asiento de descanso, así que su manifest lleva `restSeat: true` (campo nuevo, opcional, ignorado por quien no lo conozca; documéntalo en el manifest de ejemplo del README de assets si existe).
+- Verifica con el cargador real que `assetLoader` los carga y `buildDynamicCatalog` los incluye.
+- **Entregable visual:** captura de los 4 sprites a zoom 4× en una página de prueba, y compárala junto a un escritorio y un sofá existentes.
+
+- [ ] **Step 1: test rojo:** el cargador encuentra los 4 ids y sus estados. **Step 2:** script generador + PNG + manifests. **Step 3:** verde + captura. **Step 4:** QA (coherencia visual, footprints, orientación de silla que mire correctamente). **Step 5:** reportar con la captura.
+
+---
+
+### T21: Composición de la oficina viva (webview, pura)
+
+**Files:** nuevos `webview-ui/src/office/living/composeOffice.ts`, `webview-ui/src/office/living/moduleSeating.ts`; tests `webview-ui/test/composeOffice.test.ts`, `webview-ui/test/moduleSeating.test.ts`.
+
+**Interfaces (Produces):**
 
 ```ts
-export class OfficeRegistry {
-  constructor(root: OfficeState, directory: AgentDirectory, createOffice: () => OfficeState);
-  readonly directory: AgentDirectory;
-  readonly root: OfficeState;
-  get activeScope(): ScopeId;
-  get activeOffice(): OfficeState; // root when activeScope === 'root'
-  /** Build the scope office (generated layout), seat owner at slot 0, children after, replay directory activity. */
-  enter(scope: ScopeId): void;
-  /** Offices currently showing agent `id` (root and/or the active scope office). */
-  officesShowing(id: number): OfficeState[];
-  /** Call after any agent add/remove: grows the room, seats newcomers, or bounces when the owner is gone. Returns the scope after reconciliation. */
-  reconcile(): ScopeId;
-  onChange(fn: () => void): () => void;
+export interface TeamSpec {
+  ownerId: number;
+  label: string;
+  members: Array<{ id: number; parentId: number }>;
+} // owner's whole subtree, BFS order
+export interface LivingModule {
+  ownerId: number;
+  label: string;
+  color: string;
+  col: number;
+  row: number;
+  cols: number;
+  rows: number;
+  seatByAgent: Map<number, string>;
 }
+export interface LivingOffice {
+  layout: OfficeLayout; // user layout + modules (+ default door / lounge when missing), areas/areaTiles filled
+  modules: LivingModule[];
+  door: { col: number; row: number; uid: string }; // tile in front of the door (walk target)
+  loungeSeats: string[]; // seat uids that are rest seats
+  userCols: number; // modules start after this column; the editor edits only [0, userCols)
+  queued: number[]; // owners whose module did not fit (64×64)
+}
+export function composeLivingOffice(
+  user: OfficeLayout,
+  teams: TeamSpec[],
+  previous?: LivingOffice,
+): LivingOffice;
+export function teamsFromDirectory(dir: AgentDirectory): TeamSpec[]; // direct children of roots that have children; workflow nodes too
 ```
 
-- [ ] **Step 1: Tests que fallan** — con un `OfficeState` real (los tests de webview ya instancian `OfficeState` en Node, ver `teammateSeating.test.ts`):
-  - `enter(10)` → `activeOffice.characters` tiene exactamente `{10, 11}`; la raíz conserva sus personajes.
-  - `officesShowing(11)` con scope 10 activo → `[scopeOffice]`; `officesShowing(1)` → `[root]`; `officesShowing(10)` → `[scopeOffice]` (en la raíz no está: es hijo de 1).
-  - Replay: `directory.toolStart(11, 't', 'Editing', 'Edit')` antes de `enter(10)` → el personaje 11 en la oficina de scope está activo (`isActive`/estado TYPE, según la API de `OfficeState` usada por `agentToolStart`).
-  - Crecimiento: estando en scope 10, `directory.upsert(13, { parentAgentId: 10 })` + `reconcile()` → personaje 13 sentado; los asientos de 10 y 11 no cambian.
-  - Rebote (Review Focus 5): estando en scope 11, `directory.remove(11)` + `reconcile()` → `activeScope === 10` tras `SCOPE_OWNER_GONE_BOUNCE_MS` (fake timers).
-- [ ] **Step 2: Ver fallar** — `npx vitest run --root webview-ui test/officeRegistry.test.ts`.
-- [ ] **Step 3: Implementar `officeRegistry.ts`** — `enter(scope)`: si `'root'`, activo = raíz; si no, `createOffice()`, `rebuildFromLayout(generateScopeLayout(members.length, kit))`, `addAgent(id, palette, hueShift, seatId='scope-chair-<slot>', skipSpawnEffect=true)` por miembro (dueño slot 0), luego replay: `status`, cada tool en `tools`, `permission`. Guardar `lastKnownParents` para `nearestLiveScope`.
-- [ ] **Step 4: Refactor de `useExtensionMessages.ts`** — recibir `registry: OfficeRegistry` en lugar de `getOfficeState`. Regla mecánica por mensaje:
-  - mensajes sin `id` de agente (layout, assets, settings) → `registry.root`;
-  - `agentCreated` / `existingAgents` → `directory.upsert(...)`; si el agente no tiene padre → `root.addAgent(...)` (camino actual); después `registry.reconcile()`;
-  - `agentClosed` → `directory.remove(id)`, `for (const os of registry.officesShowing(id)) os.removeAgent(id)`, `registry.reconcile()`;
-  - `agentStatus`, `agentToolStart/Done/Clear`, `agentToolPermission(Clear)`, `agentContextUsage`, `subagent*` → actualizar `directory` y aplicar la lógica actual a cada `os` de `registry.officesShowing(msg.id)`.
-    Quitar el camino interim de S2 (sentar derivados en la raíz).
-- [ ] **Step 5: Verde** — `npm run test:webview` y `npm run check-types`.
-- [ ] **Step 6: Reportar al líder.**
+**Reglas** (spec §3.1–§3.2):
+
+- Los módulos van a la derecha del layout del usuario, en orden de aparición y estables con `previous`: un módulo existente nunca se mueve salvo para cerrar el hueco de uno liberado, y sus asientos conservan su uid.
+- Cada módulo usa `generateScopeLayout` (T4) y pinta un Área con `label` y el color de la paleta por dueño.
+- `moduleSeating` sienta al dueño en la cabecera y a los miembros por padre, con los hijos de un miembro en el puesto de revisión contiguo.
+- Puerta: la `DOOR` del usuario, o una por defecto en la primera pared exterior que tenga una casilla caminable adyacente.
+- Descanso: el Área `LOUNGE_AREA_LABEL` del usuario, o un módulo de descanso generado al final con `ARCADE`, `GAME_CONSOLE`, `BEANBAG`×3 y `COFFEE`.
+- Nunca se pasa de 64×64; lo que no cabe va a `queued`. Pura y determinista.
+
+- [ ] **Step 1: tests rojos:**
+  - (a) el layout del usuario queda intacto en `[0, userCols)`; (b) un módulo por equipo, con su Área y etiqueta;
+  - (c) estabilidad: agregar un equipo no mueve los anteriores; liberar uno cierra el hueco sin cambiar uids;
+  - (d) sentado por jerarquía (dueño, miembros, revisión junto a su padre);
+  - (e) puerta y descanso por defecto cuando faltan, y los del usuario cuando existen;
+  - (f) 64×64 respetado y `queued`; (g) los asientos de descanso no aparecen como escritorios.
+- [ ] **Step 2:** implementar. **Step 3:** verde + lint. **Step 4:** QA y pentester (etiquetas largas o maliciosas, árboles degenerados). **Step 5:** reportar.
 
 ---
 
-### T10: UI de navegación — insignias, migas de pan, doble clic
+### T22: Motor — entrar, descansar, volver y despedirse (webview)
 
-**Files:**
+**Files:** `webview-ui/src/office/engine/characters.ts`, `webview-ui/src/office/engine/officeState.ts`, `webview-ui/src/office/types.ts` (bubble `'goodbye'`; `Character.presence`; `Character.scripted`), `webview-ui/src/office/sprites/spriteData.ts` (sprite de la burbuja de despedida 👋 en pixel art), `webview-ui/src/office/engine/renderer.ts` (burbuja y puerta abierta mientras alguien la cruza); test `webview-ui/test/livingLifecycle.test.ts` (OfficeState real).
 
-- Create: `webview-ui/src/components/ScopeBreadcrumbs.tsx`
-- Create: `webview-ui/src/office/components/ScopeBadgeOverlay.tsx`
-- Modify: `webview-ui/src/office/components/OfficeCanvas.tsx` (prop `onDoubleClick?: (agentId: number) => void`, reutilizando el hit-test de `onClick`)
-- Test: `webview-ui/test/scopeBreadcrumbs.test.ts` (función pura `breadcrumbTrail`)
-
-**Interfaces:**
-
-- Consumes: `AgentDirectory`, `ScopeId` (T4); `overlayProjection`/`mapOffset` de `office/projection.ts`; constantes `SCOPE_BADGE_BG`, `SCOPE_BADGE_ALERT_BG` (S1).
-- Produces:
+**Interfaces (Produces, en `OfficeState`):**
 
 ```ts
-// ScopeBreadcrumbs.tsx
-export function breadcrumbTrail(
-  directory: AgentDirectory,
-  scope: ScopeId,
-): Array<{ scope: ScopeId; text: string }>;
-export function ScopeBreadcrumbs(props: {
-  directory: AgentDirectory;
-  scope: ScopeId;
-  onNavigate: (s: ScopeId) => void;
-}): JSX.Element | null; // null en root
-// ScopeBadgeOverlay.tsx
-export function ScopeBadgeOverlay(props: {
-  officeState: OfficeState;
-  directory: AgentDirectory;
-  activeScope: ScopeId;
-  containerRef: React.RefObject<HTMLDivElement | null>;
-  zoom: number;
-  panRef: React.RefObject<{ x: number; y: number }>;
-  onEnterScope: (id: number) => void;
-}): JSX.Element;
+setLivingTargets(t: { door: { col: number; row: number; uid: string }; loungeSeats: string[] }): void;
+enterThroughDoor(id: number, seatId: string): void;   // spawn at door tile (door opens), walk to seat, sit
+goToLounge(id: number): void;                          // stand up, walk to a free lounge seat, sit/idle-play
+returnToDesk(id: number): void;                        // walk back to own seat
+leaveThroughDoor(id: number, onGone: () => void): void; // walk to door, goodbye bubble GOODBYE_BUBBLE_MS, door opens, fade out, onGone()
+setPresence(id: number, presence: 'working' | 'available' | 'lounge' | 'leaving'): void; // drives the above
 ```
 
-- [ ] **Step 1: Test de `breadcrumbTrail`**: árbol 1→10→11; `breadcrumbTrail(d, 11)` → `[{scope:'root',text:'Oficina'},{scope:1,text:<label|agentName|'Agente #1'>},{scope:10,…},{scope:11,…}]`; texto = `agentName ?? label ?? role ?? 'Agente #' + id`, recortado a 24 caracteres con `…`.
-- [ ] **Step 2: Implementar `ScopeBreadcrumbs`** — barra arriba-izquierda, estilo pixel (fondo `var(--pixel-bg)`, borde `2px solid var(--pixel-border)`, sombra `var(--pixel-shadow)`, `borderRadius: 0`), tramos clicables separados por `›`; el último no es clicable.
-- [ ] **Step 3: Implementar `ScopeBadgeOverlay`** — por cada personaje de `officeState` con `directory.liveChildCount(id) > 0` y que NO sea el dueño del scope activo: botón `▸N` sobre la cabeza (misma proyección que `ToolOverlay`), fondo `SCOPE_BADGE_ALERT_BG` si `directory.hasPermissionBelow(id)`, si no `SCOPE_BADGE_BG`; `onClick` → `onEnterScope(id)`; `title` = "Entrar a la oficina de …".
-- [ ] **Step 4: `OfficeCanvas` doble clic** — `onDoubleClick` en el canvas usando el mismo hit-test que el clic; si hay personaje, `onDoubleClick?.(id)`. El clic simple no cambia.
-- [ ] **Step 5: Verde** — `npm run test:webview && npm run lint`.
-- [ ] **Step 6: Reportar al líder.**
+- Consumes: contrato S7; puerta y asientos de descanso con la forma de `LivingOffice` (T21), que en los tests se arma a mano.
+
+**Reglas:**
+
+- Mientras está en el descanso, un `agentToolStart` lo devuelve primero a su escritorio (`returnToDesk`) y después anima.
+- Durante la salida no acepta otras órdenes de movimiento.
+- Si no hay camino a la puerta, se desvanece en su lugar.
+- La puerta pasa a `open` mientras un personaje ocupa su casilla y durante `DOOR_OPEN_HOLD_MS`.
+- Las sesiones raíz conservan el efecto matrix; solo los derivados usan la puerta.
+
+- [ ] **Step 1: tests rojos:** entrar llega a la silla; ir al descanso ocupa un asiento de descanso libre; una tool en el descanso lo devuelve al escritorio; salir pasa por la puerta, muestra la burbuja y llama `onGone`; sin camino se desvanece; la puerta se abre y se cierra.
+- [ ] **Step 2:** implementar. **Step 3:** verde + lint. **Step 4:** QA. **Step 5:** reportar.
 
 ---
 
-### S3: Integración de la entrega 2 (super-líder)
+### S8: Integración de la entrega 2 (super-líder)
 
-**Files:** `webview-ui/src/App.tsx`, `webview-ui/src/office/components/ToolOverlay.tsx` (recibe la oficina activa), `e2e/tests/claude/hooks-off/scopeOffices.spec.ts`.
+**Files:** `webview-ui/src/hooks/useExtensionMessages.ts`, `webview-ui/src/App.tsx`, `webview-ui/src/hooks/useEditorActions.ts` (el editor ve solo la parte del usuario), `webview-ui/src/components/SettingsModal.tsx` (minutos hasta el descanso), `server/src/agentMessages.ts` (`presence`), `adapters/vscode/PixelAgentsViewProvider.ts`, `e2e/tests/claude/hooks-off/livingOffice.spec.ts`, `CLAUDE.md`.
 
-- [ ] **Step 1: `App.tsx`** — reemplazar `officeStateRef`/`getOfficeState()` por un `OfficeRegistry` (raíz = la `OfficeState` actual; `createOffice = () => new OfficeState()`); `getOfficeState()` devuelve `registry.activeOffice` para el editor y el canvas; estado React `activeScope` sincronizado con `registry.onChange`. Renderizar `ScopeBreadcrumbs` y `ScopeBadgeOverlay`; `onDoubleClick` y la insignia → `registry.enter(id)` si `liveChildCount(id) > 0`. `Esc` (fuera de edición) → subir un nivel. Botón "Layout" deshabilitado fuera de la raíz. `installTestHooks` expone `registry` para e2e.
-- [ ] **Step 2: E2E** `scopeOffices.spec.ts` (reutiliza el escenario de T8): insignia `▸1` sobre el lead en la raíz; clic → migas `Oficina › …`; dentro, insignia sobre `aaa`; entrar a `bbb`; el lead cierra `toolu_L` → a los ~2 s se vuelve a la raíz (Review Focus 5); un permiso en `ccc` (7 s de timer heurístico) pinta ámbar la insignia del lead en la raíz.
-- [ ] **Step 3: Verificación** — `npm run compile && npm test && npm run e2e -- --workers=1`; prueba en navegador con una sesión `/equipo` real; GIF `entrega2-oficinas.gif`.
-- [ ] **Step 4: Commits**: `feat: Agregar directorio de agentes y registro de oficinas por scope` (T9), `feat: Agregar navegación entre oficinas de scope` (T10), `feat: Integrar oficinas de scope en la webview` (S3).
-- [ ] **Step 5: Revisión del usuario.**
+- [ ] **Step 1: webview**
+  - Ante cambios del árbol (`agentCreated`, `agentClosed`, `existingAgents`): `composeLivingOffice(user, teamsFromDirectory(dir), prev)` y `os.rebuildFromLayout(living.layout)` conservando los personajes.
+  - Los derivados nuevos van con `enterThroughDoor(id, seatByAgent)`.
+  - `agentPresence` va a `setPresence`.
+  - Un agente que pasa a un módulo camina a su nuevo asiento.
+  - Se quita el camino provisional de S2 (sentar junto al padre en la raíz).
+- [ ] **Step 2: editor**
+  - Al entrar en edición se vuelve al layout del usuario (módulos ocultos) y al salir se recompone.
+  - Guardar escribe solo `[0, userCols)`.
+- [ ] **Step 3: Ajustes:** control "Minutos hasta el descanso" que envía `setIdleToLoungeMinutes`.
+- [ ] **Step 4: e2e `livingOffice.spec.ts`:**
+  - un líder con 2 devs y QA ⇒ aparece el módulo "Fase 1" con su etiqueta;
+  - los agentes entran por la puerta;
+  - `completed` ⇒ siguen en su puesto;
+  - `killed` ⇒ salen por la puerta con despedida y el módulo se libera.
+  - Reloj de inactividad acortado por ajuste (1 min) ⇒ va al descanso.
+- [ ] **Step 5: verificación**
+  - `npm run compile && npm test && npm run e2e -- --workers=1`.
+  - Prueba en navegador **con HOME aislado** (ver memoria `standalone-cli-touches-real-home`) y un `/equipo` real de 2 niveles.
+  - GIF `entrega2-oficina-viva.gif`.
+- [ ] **Step 6:** commits por tarea (S7, T19, T20, T21, T22, S8); `CLAUDE.md` actualizado (oficina viva, presencia, assets nuevos).
+- [ ] **Step 7:** revisión del usuario.
+
+**Ajustes a olas posteriores** (se aplican al llegar):
+
+- Ola 5 (conversaciones): `ConversationDirector.clear()` ya no se usa al cambiar de oficina (hay una sola), `canStage` queda en "ambos presentes", y un receptor en el descanso primero vuelve a su escritorio.
+- T14/T15 consumen `returnToDesk` de T22.
 
 ---
 
@@ -2156,9 +2264,7 @@ Constantes: server `CONVERSATION_TEXT_MAX_BYTES = 65536`; webview `CONVERSATION_
 
 ```ts
 // claudeConversation.ts
-export function parseClaudeConversations(
-  record: Record<string, unknown>,
-): Array<{
+export function parseClaudeConversations(record: Record<string, unknown>): Array<{
   kind: 'assign' | 'report' | 'message';
   text: string;
   to?: string;

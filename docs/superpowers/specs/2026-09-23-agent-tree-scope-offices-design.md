@@ -1,24 +1,25 @@
-# Árbol de agentes, oficinas por scope y pantalla ampliada — Diseño
+# Árbol de agentes, oficina viva y pantalla ampliada — Diseño
 
 - **Fecha**: 2026-09-23
 - **Estado**: borrador para revisión
-- **Secciones aprobadas en conversación**: 1 (modelo de dominio), 2 (servidor). Las secciones 3 y 4 recogen decisiones ya tomadas (oficinas navegables, layout autogenerado, solo hijos directos, feed con diffs y salidas) más decisiones recomendadas marcadas **[revisar]**.
+- **Secciones aprobadas en conversación**: 1 (modelo de dominio), 2 (servidor), 3 (oficina viva — rediseñada y aprobada el 2026-09-24; reemplaza a las oficinas navegables por scope), 4 (pantalla ampliada), 4b (conversaciones).
+- **Entrega 1** (§1–§2) implementada y commiteada el 2026-09-24.
 
 ## Objetivo
 
-Que la oficina represente fielmente cualquier sesión de Claude Code con muchos agentes —cualquier orquestación, no solo `/equipo`— como un **árbol de agentes de profundidad arbitraria**, que cada **scope** (un agente + sus hijos directos) sea una **oficina navegable**, y que se pueda **ver en grande lo que hace** cualquier agente.
+Que la oficina represente fielmente cualquier sesión de Claude Code con muchos agentes —cualquier orquestación, no solo `/equipo`— como un **árbol de agentes de profundidad arbitraria**, en **una sola oficina viva** que se arma sola como una oficina real (un módulo con nombre por equipo, puerta, sala de descanso), donde los agentes entran, trabajan, descansan, se hablan y se despiden, y que se pueda **ver en grande lo que hace** cualquier agente.
 
 ### Criterios de éxito
 
 1. En una sesión `/equipo` real (super-líder → `lider-fase` → `desarrollador` → `qa-revisor` + `pentester`), cada agente aparece como personaje propio en la oficina de su padre, a profundidad 3.
 2. La actividad de un sub-agente **nunca** anima al personaje de su padre (defecto actual).
-3. Clic en la insignia `▸N` entra a la oficina de ese scope; migas de pan para volver.
+3. Cada equipo aparece en su propio módulo con nombre al lado de la oficina del usuario; los agentes entran por la puerta, van al descanso tras inactividad y salen despidiéndose cuando el líder ya no los necesita.
 4. Clic en la pantalla de un agente abre su feed en vivo con texto, herramientas, diffs y salidas.
 5. Nada de esto depende de nombres de `agentType`: funciona con `Explore`, `general-purpose`, forks, agentes custom.
 
 ### Fuera de alcance
 
-- Editar el layout de oficinas de scope (se autogeneran).
+- Editar los módulos de equipo (se autogeneran; la oficina del usuario sigue siendo editable).
 - Persistir agentes derivados o su feed.
 - Proveedores distintos de Claude (la interfaz queda preparada; solo se implementa Claude).
 
@@ -53,7 +54,8 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 **Ciclo de vida de un Agent derivado.**
 
 - _Nace_: su sidecar aparece y su `toolUseId` es un spawn vivo de su padre (anti-espurio recursivo).
-- _Muere_: `tool_result` del spawn en el padre (primer plano), `queue-operation` de completado (segundo plano), `SubagentStop` por hook, o cascada cuando muere su padre (subárbol completo, hojas primero).
+- _Muere_ (entrega 1): `tool_result` del spawn en el padre (primer plano), `queue-operation` de completado (segundo plano), `SubagentStop` por hook, o cascada cuando muere su padre (subárbol completo, hojas primero).
+- _Ciclo de vida de la oficina viva_ (entrega 2, §3.3; reemplaza la regla anterior para spawns de segundo plano): terminar **no** es salir. Un spawn de fondo que termina (`<status>completed</status>` o `failed`) queda **disponible**: Claude Code puede retomarlo (`SendMessage` al mismo agente; la misma `task-id` vuelve a notificar). Solo sale con una señal de salida real: `<status>killed</status>` / `stopped`, un `TaskStop` del padre con su `task_id`, el cierre por el usuario, o el fin de la sesión raíz (cascada). Los spawns de primer plano terminan con su `tool_result` porque no pueden retomarse.
 - **Nunca se persiste ni se adopta como sesión.** Tras recarga, el escaneo lo rematerializa desde los spawns vivos (como hoy los hijos de segundo plano).
 
 **No cambia**: oficina raíz y su layout, asientos persistidos de sesiones de nivel superior, flujo de Agent Teams por config (`~/.claude/teams`).
@@ -93,17 +95,49 @@ La herramienta `Workflow` lanza un script que orquesta agentes. En disco: `<proj
 - Supuesto a validar en el primer test rojo: el `agent_id` del hook coincide con el `<hexId>` del nombre de archivo del sidecar (también es el `agentId` que devuelve el tool_result del spawn).
 - Sin hooks, el defecto no existe (cada nodo lee su propio `.jsonl`), pero el test lo cubre en ambos modos.
 
-## 3. Oficinas por scope (webview)
+## 3. Oficina viva (webview + ciclo de vida) — aprobada 2026-09-24
 
-- **Varias `OfficeState`**: `App.tsx` pasa de un `officeStateRef` a un registro `Map<scopeId, OfficeState>`. `root` = la actual (layout de `layout.json`). Cada oficina de scope se crea al entrar y se descarta al salir (se recrea al volver: es barata y derivada).
-- **Quién está en cada oficina**: la raíz muestra solo agentes sin `parentAgentId`. La oficina del scope X muestra X y sus hijos directos. **[revisar]** Esto también mueve a los Teammates de Agent Teams (hoy sentados en la raíz) a la oficina de su Lead, por coherencia.
-- **Layout autogenerado**: función pura `generateScopeLayout(memberCount)` en `webview-ui/src/office/layout/scopeLayoutGenerator.ts`. Una sala con un puesto (escritorio + silla + monitor del catálogo) para el dueño arriba y filas de puestos para los hijos; al superar la capacidad se regenera más grande conservando las asignaciones. No se persiste; el editor de layout se deshabilita fuera de la raíz.
-- **Navegación**:
-  - Insignia `▸N` (hijos vivos directos) sobre personajes con equipo. **[revisar]** Clic en la insignia o doble clic en el personaje entra a su oficina; clic simple conserva el comportamiento actual (seleccionar/enfocar terminal).
-  - Componente `ScopeBreadcrumbs` arriba a la izquierda: `Oficina › Fase 1 › dev-auth`, cada tramo clicable. `Esc` sube un nivel (fuera del modo edición).
-  - Si el dueño del scope actual muere, se muestra "scope terminado" 2 s y se sube al ancestro vivo más cercano.
-- **Atención que sube**: si un descendiente (a cualquier profundidad) pide permiso, la insignia `▸N` del ancestro visible en la oficina actual se pinta en ámbar. Evita perder permisos enterrados a profundidad 3.
-- **Paleta**: los hijos heredan paleta del padre con desplazamiento de tono por hermano (reutiliza `adjustSprite`), para distinguirlos dentro de la oficina.
+Reemplaza el diseño anterior de oficinas navegables por scope (doble clic, migas de pan, insignias `▸N`), que se descarta. Todo ocurre en **una sola oficina**.
+
+### 3.1 Distribución
+
+```
+┌─ Oficina del usuario (editable) ─┐┌─ Fase 1 · Auth ─────────────┐┌─ Fase 2 · Pagos ──────┐
+│ [raíz]          ┌─ Descanso ─┐    ││ [líder F1]                  ││ [líder F2]            │
+│                 │ 🎮 🛋 ☕    │    ││ [dev-auth] ┊ QA · pen        ││ [dev-pagos] ┊ QA      │
+│ 🚪 Entrada      └────────────┘    ││ [dev-login]┊ QA · pen        ││                       │
+└──────────────────────────────────┘└─────────────────────────────┘└───────────────────────┘
+```
+
+- **Oficina del usuario**: su `layout.json`, intacto y editable. Ahí se sientan las sesiones raíz y los hijos directos de la raíz que **no** tienen equipo (p. ej. un `Explore` suelto), en escritorios libres.
+- **Módulo de equipo**: cada hijo directo de una raíz que **tiene hijos** (un líder de fase, un nodo workflow ⚙) recibe un módulo generado a la derecha de la oficina, en orden de aparición. Dentro: el dueño en la cabecera; cada miembro con su puesto; los hijos de un miembro (p. ej. QA y pentester de un dev) en un **puesto de revisión** pegado al de ese miembro. Profundidades mayores se agrupan igual, bajo su padre, dentro del mismo módulo. Un hijo directo de la raíz que al nacer está solo se sienta en la oficina del usuario y se muda a su módulo (caminando) cuando le nace el primer hijo.
+- **Nombre del área**: `label` del dueño (su tarea, p. ej. "Fase 1 · Auth"), con `⚙ ` para workflows; sin token (sin `label`), el `role`. Se pinta con el sistema de **Áreas** existente (`OfficeLayout.areas` / `areaTiles`: overlay translúcido con etiqueta), color determinista por dueño.
+- **Capacidad**: el generador de T4 (`generateScopeLayout`, tope 57 puestos) se reutiliza por módulo; los módulos se colocan en columnas a la derecha sin superar `MAX_COLS`×`MAX_ROWS` (64×64); lo que no quepa espera a que se libere un módulo (un aviso).
+- **Liberación**: cuando todos los agentes de un módulo salieron, el módulo se retira y los de la derecha se corren; la oficina se contrae.
+- **Composición, no persistencia**: el layout visible = layout del usuario + módulos generados, compuesto en memoria. Nada de los módulos se escribe en `layout.json`; el editor de layout solo edita la parte del usuario (los módulos se ocultan mientras se edita).
+
+### 3.2 Puerta y sala de descanso
+
+- **Assets nuevos** (pixel art 16 px en el estilo del set, con `manifest.json` como el resto): `DOOR` (estados `closed`/`open`, montado en pared), `ARCADE`, `GAME_CONSOLE` (consola con TV), `BEANBAG` (puff). Entran al catálogo como muebles normales (categorías `wall` / `electronics` / `chairs`), así el usuario también puede colocarlos en el editor.
+- **Puerta**: la primera `DOOR` del layout del usuario; si no hay, se coloca una **por defecto sin guardarla** en la primera pared exterior con una casilla caminable debajo. Se abre (estado `open`) mientras alguien la cruza.
+- **Descanso**: el Área del usuario llamada "Descanso" (convención del editor de Áreas); si no existe, un **módulo de descanso** generado al final de la fila de módulos, con arcade, consola, puffs y café. Los asientos de descanso (puffs, sofás) nunca se asignan como escritorio.
+
+### 3.3 Ciclo de vida visible
+
+| Fase           | Disparador (servidor)                                                                                     | Qué se ve                                                                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Entrada**    | nace el agente derivado (§1)                                                                              | aparece en la puerta (se abre), camina a su puesto y se sienta — reemplaza el efecto matrix para derivados; las sesiones raíz conservan el suyo |
+| **Trabajo**    | actividad normal                                                                                          | escribe/lee en su escritorio                                                                                                                    |
+| **Disponible** | fin de turno / `completed` / `failed`                                                                     | en su puesto, en espera                                                                                                                         |
+| **Descanso**   | `IDLE_TO_LOUNGE_MS` (30 min por defecto, configurable en Ajustes) sin actividad estando disponible        | se levanta y va al descanso; se sienta en un puff o juega en el arcade                                                                          |
+| **Regreso**    | nueva actividad (p. ej. el padre le escribe con `SendMessage`)                                            | se levanta del descanso y vuelve a su escritorio                                                                                                |
+| **Salida**     | `killed`/`stopped`, `TaskStop` del padre con su `task_id`, cierre por el usuario, o fin de la sesión raíz | camina a la puerta, burbuja de despedida 👋, la puerta se abre y sale                                                                           |
+
+- **Servidor como fuente de verdad**: el estado de vida viaja en un campo nuevo `presence: 'working' | 'available' | 'lounge' | 'leaving'` (§5). Ir al descanso y salir lo decide el servidor (así dos pestañas ven lo mismo); la animación es de la webview. Un agente en `leaving` se elimina del store tras `LEAVE_ANIMATION_MAX_MS` (la webview no bloquea la salida).
+- **Cascada con despedida**: si sale un dueño, primero salen sus descendientes (hojas primero), cada uno despidiéndose; en ráfagas grandes (fin de sesión con muchos agentes) salen en fila con un pequeño escalonado.
+- **Workflows**: los agentes de un run quedan disponibles al terminar su turno; salen cuando el workflow completa (sus agentes se despiden, luego el nodo ⚙).
+- **Conversaciones** (§4b): al estar todo en una oficina, emisor y receptor siempre pueden caminar el uno al otro, entre módulos incluido. Un agente en el descanso que recibe un mensaje primero vuelve a su escritorio.
+- **`TaskStop`**: registro `tool_use` `TaskStop` con `input.task_id` en el transcript del padre; `task_id` es la clave del agente hijo (o la task id de un workflow). Se reconoce en el proveedor (Claude) y se resuelve con la misma lógica que las notificaciones por `<task-id>`.
 
 ## 4. Pantalla ampliada (feed en vivo)
 
@@ -141,12 +175,13 @@ Datos reales (todas las sesiones del usuario): 370 `Agent`, 215 `SubagentHandbac
 4. El emisor vuelve a su silla.
 5. `assign`: el hijo se materializa en su silla mientras le hablan. `report`: tras la escena el hijo desaparece (su despawn espera a que termine la escena, con tope `CONVERSATION_MAX_MS`).
 
-**Reglas**: una conversación a la vez por personaje (cola FIFO por emisor); si emisor y receptor no comparten la oficina visible, el emisor muestra un sobre ✉ en su puesto sin moverse; escenas de oficinas no visibles no se reproducen al entrar (solo estado actual); el paseo es puramente visual (no cambia `status` del agente).
+**Reglas**: una conversación a la vez por personaje (cola FIFO por emisor); todos comparten la oficina viva (§3), así que siempre se camina, entre módulos incluido — el sobre ✉ queda solo para destinatarios no resueltos (sin `toId`); un agente en el descanso primero vuelve a su escritorio; escenas de oficinas no visibles no se reproducen al entrar (solo estado actual); el paseo es puramente visual (no cambia `status` del agente).
 
 **Privacidad**: el texto es contenido del transcript. `agentConversation` se difunde a todos, pero la capa de envío por conexión **elimina `text`** en conexiones no privilegiadas (misma regla que el feed); esas ven la escena con `…`. En VS Code (embebido, privilegiado) va completo.
 
 ## 5. Cambios de protocolo (`core/asyncapi.yaml` → regenerar `messages.ts`)
 
+- (Entrega 2) ServerMessage `agentPresence { id, presence }` con `presence` en el esquema nombrado `AgentPresence` (`working | available | lounge | leaving`); `AgentCreated` y `AgentSeatMeta` ganan `presence?` (ausente = `working`).
 - (Entrega 4) ServerMessage `agentConversation { conversationId, fromId, toId?, kind: 'assign' | 'report' | 'message', text? }` (`kind` como esquema nombrado `ConversationKind`; `text` solo en conexiones privilegiadas).
 
 - `AgentCreated` y `AgentMeta` (en `existingAgents`): `parentAgentId?`, `role?`, `label?`, `depth?`, y `nodeKind?: 'agent' | 'workflow'` (esquema nombrado `AgentNodeKind`; ausente = `agent`). La UI dibuja el nodo workflow con el prefijo ⚙ en su etiqueta.
@@ -168,8 +203,8 @@ Datos reales (todas las sesiones del usuario): 370 `Agent`, 215 `SubagentHandbac
 
 ## 7. Entregas
 
-1. **Árbol en el servidor + defecto** (§1, §2, §5 parcial: campos de agente). Visible ya en la oficina raíz como personajes derivados sentados (interim, antes de las oficinas).
-2. **Oficinas por scope** (§3).
+1. **Árbol en el servidor + defecto** (§1, §2, §5 parcial: campos de agente). Visible ya en la oficina raíz como personajes derivados sentados (interim, antes de las oficinas). ✅ 2026-09-24.
+2. **Oficina viva** (§3: módulos por equipo con nombre, puerta, descanso, ciclo de vida entrada/descanso/salida). Reemplaza a las oficinas por scope.
 3. **Pantalla ampliada** (§4, §5 feed).
 4. **Conversaciones entre agentes** (§4b, §5 conversación). Depende de 1 y 2; puede ir en paralelo con 3.
 

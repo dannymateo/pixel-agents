@@ -110,6 +110,51 @@ export function setAgentRemovalCallback(cb: typeof agentRemovalCallback): void {
   agentRemovalCallback = cb;
 }
 
+/** Transcript record listener (the agent screen feed, server/src/agentFeed.ts)
+ *  and its interest gate. Records are handed over from readNewLines only — the
+ *  live stream, never the one-off history read that seeds spawns — and only
+ *  for agents the gate asks for, so the extra JSON.parse is paid while someone
+ *  watches that agent's screen, not otherwise. */
+type TranscriptLineListener = (agentId: number, record: Record<string, unknown>) => void;
+let transcriptLineListener: TranscriptLineListener | null = null;
+let transcriptLineWanted: ((agentId: number) => boolean) | null = null;
+
+/** Register the transcript record listener with its per-agent gate (required:
+ *  without it every line of every agent would be parsed twice), or clear it
+ *  with null. Feed hub: `setTranscriptLineListener(hub.onRecord, hub.hasSubscribers)`. */
+export function setTranscriptLineListener(listener: null): void;
+export function setTranscriptLineListener(
+  listener: TranscriptLineListener,
+  wants: (agentId: number) => boolean,
+): void;
+export function setTranscriptLineListener(
+  listener: TranscriptLineListener | null,
+  wants?: (agentId: number) => boolean,
+): void {
+  transcriptLineListener = listener && wants ? listener : null;
+  transcriptLineWanted = listener && wants ? wants : null;
+}
+
+/** Hand one transcript line to the listener. Never throws: a listener failure
+ *  must not stall the agent's own transcript processing. */
+function notifyTranscriptLine(agentId: number, line: string): void {
+  const listener = transcriptLineListener;
+  const wanted = transcriptLineWanted;
+  if (!listener || !wanted || !wanted(agentId)) return;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (typeof record !== 'object' || record === null || Array.isArray(record)) return;
+  try {
+    listener(agentId, record as Record<string, unknown>);
+  } catch (e) {
+    console.log(`[Pixel Agents] Watcher: Agent ${agentId} - transcript listener error: ${e}`);
+  }
+}
+
 /** Dependencies for per-agent /clear detection in readNewLines polling.
  *  Set once by ensureProjectScan; used by startFileWatching's poll loop. */
 let clearDetectionDeps: {
@@ -445,6 +490,7 @@ export function readNewLines(
     for (const line of lines) {
       if (!line.trim()) continue;
       processTranscriptLine(agentId, line, agents, waitingTimers, permissionTimers);
+      notifyTranscriptLine(agentId, line);
     }
   } catch (e) {
     // ENOENT is expected for hook-detected agents where the JSONL file hasn't been created yet

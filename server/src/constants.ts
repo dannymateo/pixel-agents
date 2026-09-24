@@ -124,6 +124,15 @@ export const FEED_SNAPSHOT_MAX_ENTRIES = 200;
 export const FEED_ENTRY_DETAIL_MAX_BYTES = 65536;
 /** Bytes read from the end of a transcript to build a feed snapshot. */
 export const FEED_TAIL_READ_BYTES = 1_048_576;
+/** Agents one connection may watch the screen of at once; subscribing past it
+ *  drops that connection's oldest subscription (one open screen is the norm). */
+export const FEED_MAX_SUBSCRIPTIONS_PER_CONNECTION = 8;
+/** Record uuids remembered per watched agent to drop the duplicate records
+ *  real transcripts contain (oldest forgotten first). A snapshot spans at most
+ *  FEED_SNAPSHOT_MAX_ENTRIES records, so this covers it several times over. */
+export const FEED_SEEN_UUIDS_MAX = 2048;
+/** A record uuid longer than this is not remembered (no dedup for it). */
+export const FEED_UUID_MAX_CHARS = 128;
 /** Workflow node labels and workflow-agent task lines are clipped to this. */
 export const WORKFLOW_LABEL_MAX_CHARS = 80;
 /** Spawn-tree guards against a runaway or hostile transcript: derived agents

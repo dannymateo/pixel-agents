@@ -39,7 +39,11 @@ Ola 0  S1 (contrato + interfaces + docs)                                    [sup
           │
 Ola 1  T1 proveedor Claude │ T2 SessionRouter │ T3 spawnTree puro │ T4 scope puro (webview) │ T5 feed parser
           │                     │                    │
-Ola 2  T6 runtime árbol (usa T1,T3) │ T7 hooks por agentKey (usa T2) │ T8 e2e árbol (usa S1)
+       S1b contrato nodeKind + interfaces de workflow (super-líder, antes de Ola 2)
+          │
+Ola 2  T6 runtime árbol (usa T1,T3) │ T7 hooks por agentKey (usa T2) │ T8 e2e árbol (usa S1) │ T16 proveedor workflows (usa S1b)
+          │
+Ola 2b T17 nodos workflow en el runtime (usa T6, T16; mismos archivos que T6 ⇒ después)
           │
        S2 integración entrega 1 → revisión del usuario (probar en navegador, standalone)
           │
@@ -48,6 +52,9 @@ Ola 3  T9 directorio + OfficeRegistry (usa T4) │ T10 UI navegación (usa T4)
           │
 Ola 4  T11 AgentFeedHub server (usa T5) │ T12 AgentScreenModal UI
        S4 integración entrega 3 + e2e feed + CLAUDE.md → revisión del usuario
+          │ (Ola 5 depende de S2 y S3; puede correr en paralelo con Ola 4 salvo S5/S4, que son del super-líder y van en serie)
+Ola 5  S5 contrato agentConversation │ T13 detección server │ T14 escena pura (webview) │ T15 motor + burbuja
+       S6 integración entrega 4 + e2e conversación → revisión del usuario
 ```
 
 Archivos reservados al super-líder (ningún dev los toca): `core/asyncapi.yaml`, `core/src/messages.ts`, `core/src/provider.ts`, `core/src/teamProvider.ts`, `server/src/types.ts`, `server/src/constants.ts`, `webview-ui/src/constants.ts`, `server/src/httpServer.ts`, `server/src/clientMessageHandler.ts`, `adapters/vscode/PixelAgentsViewProvider.ts`, `webview-ui/src/App.tsx`, `CONTEXT.md`, `CLAUDE.md`, `docs/adr/*`.
@@ -59,6 +66,7 @@ Archivos reservados al super-líder (ningún dev los toca): `core/asyncapi.yaml`
 ### S1: Contrato, interfaces compartidas y documentación de dominio (super-líder)
 
 **Files:**
+
 - Modify: `core/asyncapi.yaml` (schemas `AgentCreated`, `AgentSeatMeta`; nuevos mensajes y schemas de feed; listas `oneOf` de ServerMessage/ClientMessage)
 - Regenerate: `core/src/messages.ts`
 - Modify: `core/src/provider.ts:80-83` (envelope de `normalizeHookEvent`) y bloque opcional de feed
@@ -75,26 +83,26 @@ Archivos reservados al super-líder (ningún dev los toca): `core/asyncapi.yaml`
 Hoy `httpServer.ts:172-185` y `PixelAgentsViewProvider.ts:123-136` envían `isTeammate`, `teammateName`, `parentAgentId`, `teamName`, `hooksOnly` fuera del contrato. En `core/asyncapi.yaml`, dentro de `AgentCreated.properties`, después de `hueShift`:
 
 ```yaml
-        isTeammate:
-          type: boolean
-        teammateName:
-          type: string
-        teamName:
-          type: string
-        hooksOnly:
-          type: boolean
-        parentAgentId:
-          type: integer
-          description: Tree parent (the agent that spawned this one). Absent for top-level sessions.
-        role:
-          type: string
-          description: Spawn type label (Claude agentType, e.g. "Explore", "desarrollador"). Display only.
-        label:
-          type: string
-          description: Spawn task description. Display only.
-        depth:
-          type: integer
-          description: Spawn depth (1 = spawned by a top-level session).
+isTeammate:
+  type: boolean
+teammateName:
+  type: string
+teamName:
+  type: string
+hooksOnly:
+  type: boolean
+parentAgentId:
+  type: integer
+  description: Tree parent (the agent that spawned this one). Absent for top-level sessions.
+role:
+  type: string
+  description: Spawn type label (Claude agentType, e.g. "Explore", "desarrollador"). Display only.
+label:
+  type: string
+  description: Spawn task description. Display only.
+depth:
+  type: integer
+  description: Spawn depth (1 = spawned by a top-level session).
 ```
 
 Y en `AgentSeatMeta.properties` (usado por `existingAgents.agentMeta`), después de `seatId`: los mismos `parentAgentId`, `role`, `label`, `depth`, más `teammateName` (string).
@@ -104,128 +112,128 @@ Y en `AgentSeatMeta.properties` (usado por `existingAgents.agentMeta`), después
 En `components/schemas` agregar:
 
 ```yaml
-    SubscribeAgentFeed:
-      description: Ask for the live activity feed of one agent. Privileged connections only.
-      type: object
-      additionalProperties: false
-      required: [type, id]
-      properties:
-        type:
-          const: subscribeAgentFeed
-        id:
-          type: integer
+SubscribeAgentFeed:
+  description: Ask for the live activity feed of one agent. Privileged connections only.
+  type: object
+  additionalProperties: false
+  required: [type, id]
+  properties:
+    type:
+      const: subscribeAgentFeed
+    id:
+      type: integer
 
-    UnsubscribeAgentFeed:
-      description: Stop receiving an agent's feed.
-      type: object
-      additionalProperties: false
-      required: [type, id]
-      properties:
-        type:
-          const: unsubscribeAgentFeed
-        id:
-          type: integer
+UnsubscribeAgentFeed:
+  description: Stop receiving an agent's feed.
+  type: object
+  additionalProperties: false
+  required: [type, id]
+  properties:
+    type:
+      const: unsubscribeAgentFeed
+    id:
+      type: integer
 
-    AgentFeedSnapshot:
-      description: Point-to-point reply to subscribeAgentFeed with the newest entries.
-      type: object
-      additionalProperties: false
-      required: [type, id, entries, truncated]
-      properties:
-        type:
-          const: agentFeedSnapshot
-        id:
-          type: integer
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/FeedEntry'
-        truncated:
-          type: boolean
-          description: True when older entries exist beyond the snapshot limit.
+AgentFeedSnapshot:
+  description: Point-to-point reply to subscribeAgentFeed with the newest entries.
+  type: object
+  additionalProperties: false
+  required: [type, id, entries, truncated]
+  properties:
+    type:
+      const: agentFeedSnapshot
+    id:
+      type: integer
+    entries:
+      type: array
+      items:
+        $ref: '#/components/schemas/FeedEntry'
+    truncated:
+      type: boolean
+      description: True when older entries exist beyond the snapshot limit.
 
-    AgentFeedAppend:
-      description: New feed entries for a subscribed agent (point-to-point).
-      type: object
-      additionalProperties: false
-      required: [type, id, entries]
-      properties:
-        type:
-          const: agentFeedAppend
-        id:
-          type: integer
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/FeedEntry'
+AgentFeedAppend:
+  description: New feed entries for a subscribed agent (point-to-point).
+  type: object
+  additionalProperties: false
+  required: [type, id, entries]
+  properties:
+    type:
+      const: agentFeedAppend
+    id:
+      type: integer
+    entries:
+      type: array
+      items:
+        $ref: '#/components/schemas/FeedEntry'
 
-    AgentFeedDenied:
-      description: subscribeAgentFeed refused (unprivileged connection or unknown agent).
-      type: object
-      additionalProperties: false
-      required: [type, id, reason]
-      properties:
-        type:
-          const: agentFeedDenied
-        id:
-          type: integer
-        reason:
-          type: string
-          enum: [unprivileged, unknownAgent]
+AgentFeedDenied:
+  description: subscribeAgentFeed refused (unprivileged connection or unknown agent).
+  type: object
+  additionalProperties: false
+  required: [type, id, reason]
+  properties:
+    type:
+      const: agentFeedDenied
+    id:
+      type: integer
+    reason:
+      type: string
+      enum: [unprivileged, unknownAgent]
 
-    FeedEntry:
-      type: object
-      additionalProperties: false
-      required: [seq, ts, kind, summary]
-      properties:
-        seq:
-          type: integer
-        ts:
-          type: string
-          description: ISO timestamp from the transcript record (empty when absent).
-        kind:
-          type: string
-          enum: [text, tool, toolResult]
-        toolId:
-          type: string
-        toolName:
-          type: string
-        summary:
-          type: string
-        isError:
-          type: boolean
-        detail:
-          $ref: '#/components/schemas/FeedDetail'
+FeedEntry:
+  type: object
+  additionalProperties: false
+  required: [seq, ts, kind, summary]
+  properties:
+    seq:
+      type: integer
+    ts:
+      type: string
+      description: ISO timestamp from the transcript record (empty when absent).
+    kind:
+      type: string
+      enum: [text, tool, toolResult]
+    toolId:
+      type: string
+    toolName:
+      type: string
+    summary:
+      type: string
+    isError:
+      type: boolean
+    detail:
+      $ref: '#/components/schemas/FeedDetail'
 
-    FeedDetail:
-      type: object
-      additionalProperties: false
-      required: [type]
-      properties:
-        type:
-          type: string
-          enum: [diff, output]
-        lines:
-          type: array
-          description: For diff — one entry per line.
-          items:
-            $ref: '#/components/schemas/FeedDiffLine'
-        text:
-          type: string
-          description: For output — the (ANSI-stripped) text.
-        truncated:
-          type: boolean
+FeedDetail:
+  type: object
+  additionalProperties: false
+  required: [type]
+  properties:
+    type:
+      type: string
+      enum: [diff, output]
+    lines:
+      type: array
+      description: For diff — one entry per line.
+      items:
+        $ref: '#/components/schemas/FeedDiffLine'
+    text:
+      type: string
+      description: For output — the (ANSI-stripped) text.
+    truncated:
+      type: boolean
 
-    FeedDiffLine:
-      type: object
-      additionalProperties: false
-      required: [op, text]
-      properties:
-        op:
-          type: string
-          enum: [context, add, remove]
-        text:
-          type: string
+FeedDiffLine:
+  type: object
+  additionalProperties: false
+  required: [op, text]
+  properties:
+    op:
+      type: string
+      enum: [context, add, remove]
+    text:
+      type: string
 ```
 
 Añadir `SubscribeAgentFeed` y `UnsubscribeAgentFeed` al `oneOf` de ClientMessage y `AgentFeedSnapshot`, `AgentFeedAppend`, `AgentFeedDenied` al de ServerMessage (seguir el patrón de `$ref` existente en `channels`/`messages`).
@@ -376,11 +384,13 @@ git commit -m "feat: Agregar contrato e interfaces del árbol de agentes y feed"
 ### T1: Proveedor Claude — metadatos de sidecar y `agent_id` de hooks
 
 **Files:**
+
 - Modify: `server/src/providers/hook/claude/claudeTeamProvider.ts:25-47` (`parseSidecarMeta`), `:185-198` (bucle de sidecars)
 - Modify: `server/src/providers/hook/claude/claude.ts:130-135` (`normalizeHookEvent`)
 - Test: `server/__tests__/claudeTeamProvider.test.ts`, `server/__tests__/claude.test.ts`
 
 **Interfaces:**
+
 - Consumes: entrada ampliada de `discoverTeammates` y envelope con `agentKey` (S1).
 - Produces: `discoverTeammates` devuelve `agentKey`, `parentAgentKey`, `depth`, `agentType` para sidecars; `normalizeHookEvent` devuelve `agentKey` cuando el payload trae `agent_id` string no vacío.
 
@@ -395,17 +405,37 @@ it('exposes spawn-tree keys from sidecars', () => {
   fs.writeFileSync(path.join(dir, 'agent-aaa111.jsonl'), '');
   fs.writeFileSync(
     path.join(dir, 'agent-aaa111.meta.json'),
-    JSON.stringify({ agentType: 'lider-fase', description: 'Fase 1', toolUseId: 'toolu_1', spawnDepth: 1 }),
+    JSON.stringify({
+      agentType: 'lider-fase',
+      description: 'Fase 1',
+      toolUseId: 'toolu_1',
+      spawnDepth: 1,
+    }),
   );
   fs.writeFileSync(path.join(dir, 'agent-bbb222.jsonl'), '');
   fs.writeFileSync(
     path.join(dir, 'agent-bbb222.meta.json'),
-    JSON.stringify({ agentType: 'desarrollador', description: 'dev auth', toolUseId: 'toolu_2', parentAgentId: 'aaa111', spawnDepth: 2 }),
+    JSON.stringify({
+      agentType: 'desarrollador',
+      description: 'dev auth',
+      toolUseId: 'toolu_2',
+      parentAgentId: 'aaa111',
+      spawnDepth: 2,
+    }),
   );
   const entries = claudeTeamProvider.discoverTeammates(projectDir, LEAD);
   const byKey = new Map(entries.map((e) => [e.agentKey, e]));
-  expect(byKey.get('aaa111')).toMatchObject({ depth: 1, agentType: 'lider-fase', parentAgentKey: undefined, toolUseId: 'toolu_1' });
-  expect(byKey.get('bbb222')).toMatchObject({ depth: 2, agentType: 'desarrollador', parentAgentKey: 'aaa111' });
+  expect(byKey.get('aaa111')).toMatchObject({
+    depth: 1,
+    agentType: 'lider-fase',
+    parentAgentKey: undefined,
+    toolUseId: 'toolu_1',
+  });
+  expect(byKey.get('bbb222')).toMatchObject({
+    depth: 2,
+    agentType: 'desarrollador',
+    parentAgentKey: 'aaa111',
+  });
 });
 
 it('does not re-parse an unchanged sidecar on every scan', () => {
@@ -414,7 +444,10 @@ it('does not re-parse an unchanged sidecar on every scan', () => {
   fs.mkdirSync(dir, { recursive: true });
   for (let i = 0; i < 300; i++) {
     fs.writeFileSync(path.join(dir, `agent-d${i}.jsonl`), '');
-    fs.writeFileSync(path.join(dir, `agent-d${i}.meta.json`), JSON.stringify({ agentType: 'Explore', toolUseId: `toolu_d${i}`, spawnDepth: 1 }));
+    fs.writeFileSync(
+      path.join(dir, `agent-d${i}.meta.json`),
+      JSON.stringify({ agentType: 'Explore', toolUseId: `toolu_d${i}`, spawnDepth: 1 }),
+    );
   }
   claudeTeamProvider.discoverTeammates(projectDir, LEAD);
   const spy = vi.spyOn(fs, 'readFileSync');
@@ -430,8 +463,12 @@ En `claude.test.ts`:
 ```ts
 it('carries agent_id as agentKey for events fired inside a subagent', () => {
   const r = claudeProvider.normalizeHookEvent({
-    hook_event_name: 'PreToolUse', session_id: 's1', agent_id: 'bbb222', agent_type: 'desarrollador',
-    tool_name: 'Read', tool_input: { file_path: '/x.ts' },
+    hook_event_name: 'PreToolUse',
+    session_id: 's1',
+    agent_id: 'bbb222',
+    agent_type: 'desarrollador',
+    tool_name: 'Read',
+    tool_input: { file_path: '/x.ts' },
   });
   expect(r?.agentKey).toBe('bbb222');
   expect(r?.event.kind).toBe('toolStart');
@@ -498,17 +535,17 @@ function parseSidecarMeta(jsonlPath: string): SidecarMeta | null {
 En el bucle de `discoverTeammates` (líneas 185-198), el `result.push` pasa a:
 
 ```ts
-        result.push({
-          jsonlPath,
-          teammateName: meta.agentType,
-          toolUseId: meta.toolUseId,
-          description: meta.description,
-          name: meta.name,
-          agentKey: entry.slice('agent-'.length, -'.jsonl'.length),
-          parentAgentKey: meta.parentAgentKey,
-          depth: meta.depth,
-          agentType: meta.agentType,
-        });
+result.push({
+  jsonlPath,
+  teammateName: meta.agentType,
+  toolUseId: meta.toolUseId,
+  description: meta.description,
+  name: meta.name,
+  agentKey: entry.slice('agent-'.length, -'.jsonl'.length),
+  parentAgentKey: meta.parentAgentKey,
+  depth: meta.depth,
+  agentType: meta.agentType,
+});
 ```
 
 (Solo si el nombre empieza por `agent-`; si no, `agentKey` queda `undefined`.)
@@ -518,9 +555,10 @@ En el bucle de `discoverTeammates` (líneas 185-198), el `result.push` pasa a:
 `normalizeHookEvent` tiene varios `return { sessionId, event: ... }`. Envolver en un helper al inicio de la función, justo tras validar `eventName`/`sessionId`:
 
 ```ts
-  const agentKey =
-    typeof raw.agent_id === 'string' && raw.agent_id.length > 0 ? raw.agent_id : undefined;
-  const out = (event: AgentEvent) => (agentKey ? { sessionId, agentKey, event } : { sessionId, event });
+const agentKey =
+  typeof raw.agent_id === 'string' && raw.agent_id.length > 0 ? raw.agent_id : undefined;
+const out = (event: AgentEvent) =>
+  agentKey ? { sessionId, agentKey, event } : { sessionId, event };
 ```
 
 y reemplazar cada `return { sessionId, event: X }` por `return out(X)`. **Excepción**: `SubagentStart`/`SubagentStop` describen al hijo pero hoy se enrutan al padre (flujo de teammates); para ellos se conserva `agentKey` igualmente — el enrutado lo decide T7.
@@ -537,10 +575,12 @@ Expected: PASS.
 ### T2: SessionRouter — resolver por `(sessionId, agentKey)`
 
 **Files:**
+
 - Modify: `server/src/sessionRouter.ts`
 - Test: `server/__tests__/sessionRouter.test.ts`
 
 **Interfaces:**
+
 - Produces:
   - `registerSpawn(sessionId: string, agentKey: string, agentId: number): BufferedEvent[]` — registra un nodo derivado y devuelve los eventos bufferizados para ese `(sessionId, agentKey)`.
   - `unregisterSpawn(sessionId: string, agentKey: string): void`
@@ -659,10 +699,12 @@ export interface BufferedEvent {
 ### T3: Planificador puro del árbol de spawns
 
 **Files:**
+
 - Create: `server/src/spawnTree.ts`
 - Test: `server/__tests__/spawnTree.test.ts`
 
 **Interfaces:**
+
 - Produces:
 
 ```ts
@@ -703,12 +745,31 @@ export function subtreeRemovalOrder(
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { planSpawnTree, subtreeRemovalOrder, type SpawnEntry, type SpawnTreeNode } from '../src/spawnTree.js';
+import {
+  planSpawnTree,
+  subtreeRemovalOrder,
+  type SpawnEntry,
+  type SpawnTreeNode,
+} from '../src/spawnTree.js';
 
-const e = (agentKey: string, toolUseId: string, depth: number, parentAgentKey?: string): SpawnEntry => ({
-  jsonlPath: `/p/s/subagents/agent-${agentKey}.jsonl`, agentKey, parentAgentKey, toolUseId, depth, agentType: 'general-purpose',
+const e = (
+  agentKey: string,
+  toolUseId: string,
+  depth: number,
+  parentAgentKey?: string,
+): SpawnEntry => ({
+  jsonlPath: `/p/s/subagents/agent-${agentKey}.jsonl`,
+  agentKey,
+  parentAgentKey,
+  toolUseId,
+  depth,
+  agentType: 'general-purpose',
 });
-const node = (id: number, live: string[], spawnAgentKey?: string): SpawnTreeNode => ({ id, spawnAgentKey, liveSpawnToolIds: new Set(live) });
+const node = (id: number, live: string[], spawnAgentKey?: string): SpawnTreeNode => ({
+  id,
+  spawnAgentKey,
+  liveSpawnToolIds: new Set(live),
+});
 
 describe('planSpawnTree', () => {
   it('creates a depth-1 child under the root when its spawn tool is live', () => {
@@ -725,8 +786,13 @@ describe('planSpawnTree', () => {
   });
 
   it('attaches a grandchild to its derived parent by key, gated by the PARENT live tools', () => {
-    const nodes = new Map([[1, node(1, ['t1'])], [5, node(5, ['t2'], 'a')]]);
-    const plan = planSpawnTree(1, nodes, [e('b', 't2', 2, 'a')], (p) => p.endsWith('agent-a.jsonl'));
+    const nodes = new Map([
+      [1, node(1, ['t1'])],
+      [5, node(5, ['t2'], 'a')],
+    ]);
+    const plan = planSpawnTree(1, nodes, [e('b', 't2', 2, 'a')], (p) =>
+      p.endsWith('agent-a.jsonl'),
+    );
     expect(plan.create).toEqual([{ entry: e('b', 't2', 2, 'a'), parentId: 5 }]);
   });
 
@@ -745,7 +811,13 @@ describe('planSpawnTree', () => {
 
 describe('subtreeRemovalOrder', () => {
   it('returns leaves first and the removed node last', () => {
-    const parentOf = new Map<number, number | undefined>([[1, undefined], [5, 1], [6, 5], [7, 5], [8, 6]]);
+    const parentOf = new Map<number, number | undefined>([
+      [1, undefined],
+      [5, 1],
+      [6, 5],
+      [7, 5],
+      [8, 6],
+    ]);
     const order = subtreeRemovalOrder(5, parentOf);
     expect(order[order.length - 1]).toBe(5);
     expect(order.indexOf(8)).toBeLessThan(order.indexOf(6));
@@ -765,9 +837,15 @@ describe('subtreeRemovalOrder', () => {
  * entries become derived agents now, under which parent, and which must wait
  * for their parent node to exist. No I/O, no store access.
  */
-export interface SpawnEntry { /* como en Interfaces */ }
-export interface SpawnTreeNode { /* como en Interfaces */ }
-export interface SpawnPlan { /* como en Interfaces */ }
+export interface SpawnEntry {
+  /* como en Interfaces */
+}
+export interface SpawnTreeNode {
+  /* como en Interfaces */
+}
+export interface SpawnPlan {
+  /* como en Interfaces */
+}
 
 export function planSpawnTree(
   rootId: number,
@@ -825,11 +903,13 @@ export function subtreeRemovalOrder(
 ### T4: Modelo de scope y generador de layout (webview, puro)
 
 **Files:**
+
 - Create: `webview-ui/src/office/scope/agentDirectory.ts`
 - Create: `webview-ui/src/office/scope/scopeLayoutGenerator.ts`
 - Test: `webview-ui/test/agentDirectory.test.ts`, `webview-ui/test/scopeLayoutGenerator.test.ts`
 
 **Interfaces:**
+
 - Produces:
 
 ```ts
@@ -860,7 +940,10 @@ export class AgentDirectory {
   /** True when any strict descendant of `id` has permission=true. */
   hasPermissionBelow(id: number): boolean;
   /** Nearest existing ancestor scope for a scope whose owner disappeared ('root' if none). */
-  nearestLiveScope(scope: ScopeId, lastKnownParents: ReadonlyMap<number, number | undefined>): ScopeId;
+  nearestLiveScope(
+    scope: ScopeId,
+    lastKnownParents: ReadonlyMap<number, number | undefined>,
+  ): ScopeId;
   setStatus(id: number, status: 'active' | 'waiting'): void;
   toolStart(id: number, toolId: string, status: string, toolName?: string): void;
   toolDone(id: number, toolId: string): void;
@@ -869,10 +952,18 @@ export class AgentDirectory {
 }
 
 // scopeLayoutGenerator.ts
-export interface ScopeFurnitureKit { desk: string; chair: string; monitor: string } // asset type ids
+export interface ScopeFurnitureKit {
+  desk: string;
+  chair: string;
+  monitor: string;
+} // asset type ids
 export function generateScopeLayout(memberCount: number, kit: ScopeFurnitureKit): OfficeLayout;
 /** Kit from the loaded catalog, or null if a required asset is missing. */
-export const DEFAULT_SCOPE_KIT: ScopeFurnitureKit = { desk: 'DESK_FRONT', chair: 'CUSHIONED_CHAIR_BACK', monitor: 'PC_FRONT_OFF' };
+export const DEFAULT_SCOPE_KIT: ScopeFurnitureKit = {
+  desk: 'DESK_FRONT',
+  chair: 'CUSHIONED_CHAIR_BACK',
+  monitor: 'PC_FRONT_OFF',
+};
 ```
 
 - [ ] **Step 1: Tests que fallan** (`webview-ui/test/agentDirectory.test.ts`)
@@ -883,11 +974,11 @@ import { AgentDirectory } from '../src/office/scope/agentDirectory.js';
 
 function tree(): AgentDirectory {
   const d = new AgentDirectory();
-  d.upsert(1, {});                       // root session
-  d.upsert(10, { parentAgentId: 1 });    // lider F1
-  d.upsert(11, { parentAgentId: 10 });   // dev a
-  d.upsert(12, { parentAgentId: 11 });   // qa of dev a
-  d.upsert(2, {});                       // another root session
+  d.upsert(1, {}); // root session
+  d.upsert(10, { parentAgentId: 1 }); // lider F1
+  d.upsert(11, { parentAgentId: 10 }); // dev a
+  d.upsert(12, { parentAgentId: 11 }); // qa of dev a
+  d.upsert(2, {}); // another root session
   return d;
 }
 
@@ -912,8 +1003,12 @@ describe('AgentDirectory', () => {
   });
   it('bounces to the nearest living ancestor when a scope owner disappears', () => {
     const d = tree();
-    const parents = new Map<number, number | undefined>([[11, 10], [10, 1]]);
-    d.remove(12); d.remove(11);
+    const parents = new Map<number, number | undefined>([
+      [11, 10],
+      [10, 1],
+    ]);
+    d.remove(12);
+    d.remove(11);
     expect(d.nearestLiveScope(11, parents)).toBe(10);
     d.remove(10);
     expect(d.nearestLiveScope(11, parents)).toBe(1);
@@ -937,17 +1032,25 @@ describe('AgentDirectory', () => {
 ```ts
 import { describe, expect, it } from 'vitest';
 import { SCOPE_SLOTS_PER_ROW } from '../src/constants.js';
-import { DEFAULT_SCOPE_KIT, generateScopeLayout } from '../src/office/scope/scopeLayoutGenerator.js';
+import {
+  DEFAULT_SCOPE_KIT,
+  generateScopeLayout,
+} from '../src/office/scope/scopeLayoutGenerator.js';
 import { TileType } from '../src/office/types.js';
 
-const chairs = (n: number) => generateScopeLayout(n, DEFAULT_SCOPE_KIT).furniture.filter((f) => f.type === DEFAULT_SCOPE_KIT.chair);
+const chairs = (n: number) =>
+  generateScopeLayout(n, DEFAULT_SCOPE_KIT).furniture.filter(
+    (f) => f.type === DEFAULT_SCOPE_KIT.chair,
+  );
 
 describe('generateScopeLayout', () => {
   it('has one workstation per member', () => {
     for (const n of [1, 2, 3, 5, 9, 17]) expect(chairs(n)).toHaveLength(n);
   });
   it('is deterministic (same input, same uids and positions)', () => {
-    expect(generateScopeLayout(4, DEFAULT_SCOPE_KIT)).toEqual(generateScopeLayout(4, DEFAULT_SCOPE_KIT));
+    expect(generateScopeLayout(4, DEFAULT_SCOPE_KIT)).toEqual(
+      generateScopeLayout(4, DEFAULT_SCOPE_KIT),
+    );
   });
   it('keeps existing workstation uids when it grows', () => {
     const small = new Set(chairs(3).map((f) => `${f.uid}@${f.col},${f.row}`));
@@ -975,7 +1078,11 @@ import { SCOPE_SLOTS_PER_ROW, SCOPE_SLOT_H, SCOPE_SLOT_W } from '../../constants
 import type { OfficeLayout, PlacedFurniture } from '../types.js';
 import { TileType } from '../types.js';
 
-export interface ScopeFurnitureKit { desk: string; chair: string; monitor: string }
+export interface ScopeFurnitureKit {
+  desk: string;
+  chair: string;
+  monitor: string;
+}
 export const DEFAULT_SCOPE_KIT: ScopeFurnitureKit = {
   desk: 'DESK_FRONT',
   chair: 'CUSHIONED_CHAIR_BACK',
@@ -1024,11 +1131,13 @@ export function generateScopeLayout(memberCount: number, kit: ScopeFurnitureKit)
 ### T5: Parser de feed de Claude y diff de fragmentos
 
 **Files:**
+
 - Create: `server/src/feedDiff.ts`
 - Create: `server/src/providers/hook/claude/claudeFeed.ts`
 - Test: `server/__tests__/feedDiff.test.ts`, `server/__tests__/claudeFeed.test.ts`
 
 **Interfaces:**
+
 - Consumes: `FeedEntry`, `FeedDetail`, `FeedDiffLine` de `core/src/messages.ts` (S1); `FEED_ENTRY_DETAIL_MAX_BYTES` (S1).
 - Produces:
   - `snippetDiff(oldText: string, newText: string): FeedDiffLine[]`
@@ -1047,11 +1156,17 @@ import { FEED_ENTRY_DETAIL_MAX_BYTES } from '../src/constants.js';
 describe('snippetDiff', () => {
   it('keeps common prefix/suffix lines as context and marks the middle', () => {
     expect(snippetDiff('a\nb\nc', 'a\nX\nc')).toEqual([
-      { op: 'context', text: 'a' }, { op: 'remove', text: 'b' }, { op: 'add', text: 'X' }, { op: 'context', text: 'c' },
+      { op: 'context', text: 'a' },
+      { op: 'remove', text: 'b' },
+      { op: 'add', text: 'X' },
+      { op: 'context', text: 'c' },
     ]);
   });
   it('treats an empty old text as a pure addition', () => {
-    expect(snippetDiff('', 'x\ny')).toEqual([{ op: 'add', text: 'x' }, { op: 'add', text: 'y' }]);
+    expect(snippetDiff('', 'x\ny')).toEqual([
+      { op: 'add', text: 'x' },
+      { op: 'add', text: 'y' },
+    ]);
   });
 });
 
@@ -1073,7 +1188,11 @@ it('stripAnsi removes color codes', () => {
 import { describe, expect, it } from 'vitest';
 import { parseClaudeFeedEntries } from '../src/providers/hook/claude/claudeFeed.js';
 
-const assistant = (content: unknown[]) => ({ type: 'assistant', timestamp: '2026-09-23T10:00:00Z', message: { content } });
+const assistant = (content: unknown[]) => ({
+  type: 'assistant',
+  timestamp: '2026-09-23T10:00:00Z',
+  message: { content },
+});
 
 describe('parseClaudeFeedEntries', () => {
   it('emits assistant text', () => {
@@ -1082,25 +1201,72 @@ describe('parseClaudeFeedEntries', () => {
     ]);
   });
   it('emits an Edit as a tool entry with a diff', () => {
-    const [e] = parseClaudeFeedEntries(assistant([{ type: 'tool_use', id: 't1', name: 'Edit',
-      input: { file_path: '/r/src/Login.java', old_string: 'return token;', new_string: 'return refresh(token);' } }]));
-    expect(e).toMatchObject({ kind: 'tool', toolId: 't1', toolName: 'Edit', summary: 'Edit Login.java' });
-    expect(e.detail).toEqual({ type: 'diff', lines: [{ op: 'remove', text: 'return token;' }, { op: 'add', text: 'return refresh(token);' }] });
+    const [e] = parseClaudeFeedEntries(
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't1',
+          name: 'Edit',
+          input: {
+            file_path: '/r/src/Login.java',
+            old_string: 'return token;',
+            new_string: 'return refresh(token);',
+          },
+        },
+      ]),
+    );
+    expect(e).toMatchObject({
+      kind: 'tool',
+      toolId: 't1',
+      toolName: 'Edit',
+      summary: 'Edit Login.java',
+    });
+    expect(e.detail).toEqual({
+      type: 'diff',
+      lines: [
+        { op: 'remove', text: 'return token;' },
+        { op: 'add', text: 'return refresh(token);' },
+      ],
+    });
   });
   it('emits a Bash tool entry with its command and the result as output', () => {
-    const [tool] = parseClaudeFeedEntries(assistant([{ type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'mvn -q test' } }]));
+    const [tool] = parseClaudeFeedEntries(
+      assistant([{ type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'mvn -q test' } }]),
+    );
     expect(tool.summary).toBe('Bash: mvn -q test');
-    const [res] = parseClaudeFeedEntries({ type: 'user', timestamp: '', message: { content: [
-      { type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: '\u001b[32mTests run: 12\u001b[0m' }] } ] } });
-    expect(res).toMatchObject({ kind: 'toolResult', toolId: 't2', detail: { type: 'output', text: 'Tests run: 12' } });
+    const [res] = parseClaudeFeedEntries({
+      type: 'user',
+      timestamp: '',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't2',
+            content: [{ type: 'text', text: '\u001b[32mTests run: 12\u001b[0m' }],
+          },
+        ],
+      },
+    });
+    expect(res).toMatchObject({
+      kind: 'toolResult',
+      toolId: 't2',
+      detail: { type: 'output', text: 'Tests run: 12' },
+    });
   });
   it('marks failed tool results', () => {
-    const [res] = parseClaudeFeedEntries({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't3', is_error: true, content: 'boom' }] } });
+    const [res] = parseClaudeFeedEntries({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 't3', is_error: true, content: 'boom' }],
+      },
+    });
     expect(res.isError).toBe(true);
   });
   it('ignores records it does not understand', () => {
     expect(parseClaudeFeedEntries({ type: 'queue-operation' })).toEqual([]);
-    expect(parseClaudeFeedEntries({ type: 'user', message: { content: 'plain prompt' } })).toEqual([]);
+    expect(parseClaudeFeedEntries({ type: 'user', message: { content: 'plain prompt' } })).toEqual(
+      [],
+    );
   });
 });
 ```
@@ -1125,7 +1291,12 @@ export function snippetDiff(oldText: string, newText: string): FeedDiffLine[] {
   let pre = 0;
   while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
   let suf = 0;
-  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  while (
+    suf < a.length - pre &&
+    suf < b.length - pre &&
+    a[a.length - 1 - suf] === b[b.length - 1 - suf]
+  )
+    suf++;
   return [
     ...a.slice(0, pre).map((text) => ({ op: 'context' as const, text })),
     ...a.slice(pre, a.length - suf).map((text) => ({ op: 'remove' as const, text })),
@@ -1183,14 +1354,19 @@ function toolSummary(name: string, input: Record<string, unknown>): string {
 }
 
 function toolDetail(name: string, input: Record<string, unknown>): FeedEntry['detail'] {
-  if (name === 'Edit') return capDetail({ type: 'diff', lines: snippetDiff(String(input.old_string ?? ''), String(input.new_string ?? '')) });
+  if (name === 'Edit')
+    return capDetail({
+      type: 'diff',
+      lines: snippetDiff(String(input.old_string ?? ''), String(input.new_string ?? '')),
+    });
   if (name === 'MultiEdit' && Array.isArray(input.edits)) {
     const lines = (input.edits as Array<Record<string, unknown>>).flatMap((e) =>
       snippetDiff(String(e.old_string ?? ''), String(e.new_string ?? '')),
     );
     return capDetail({ type: 'diff', lines });
   }
-  if (name === 'Write') return capDetail({ type: 'diff', lines: snippetDiff('', String(input.content ?? '')) });
+  if (name === 'Write')
+    return capDetail({ type: 'diff', lines: snippetDiff('', String(input.content ?? '')) });
   return undefined;
 }
 
@@ -1198,7 +1374,11 @@ function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
-      .map((b) => (b && typeof b === 'object' && (b as { type?: unknown }).type === 'text' ? String((b as { text?: unknown }).text ?? '') : ''))
+      .map((b) =>
+        b && typeof b === 'object' && (b as { type?: unknown }).type === 'text'
+          ? String((b as { text?: unknown }).text ?? '')
+          : '',
+      )
       .join('\n');
   }
   return '';
@@ -1211,18 +1391,33 @@ export function parseClaudeFeedEntries(record: Record<string, unknown>): Draft[]
   if (!Array.isArray(content)) return [];
   const out: Draft[] = [];
   for (const block of content as Array<Record<string, unknown>>) {
-    if (record.type === 'assistant' && block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+    if (
+      record.type === 'assistant' &&
+      block.type === 'text' &&
+      typeof block.text === 'string' &&
+      block.text.trim()
+    ) {
       out.push({ ts, kind: 'text', summary: block.text });
     } else if (record.type === 'assistant' && block.type === 'tool_use') {
       const name = String(block.name ?? '');
       const input = (block.input ?? {}) as Record<string, unknown>;
       const detail = toolDetail(name, input);
-      out.push({ ts, kind: 'tool', toolId: String(block.id ?? ''), toolName: name, summary: toolSummary(name, input), ...(detail ? { detail } : {}) });
+      out.push({
+        ts,
+        kind: 'tool',
+        toolId: String(block.id ?? ''),
+        toolName: name,
+        summary: toolSummary(name, input),
+        ...(detail ? { detail } : {}),
+      });
     } else if (record.type === 'user' && block.type === 'tool_result') {
       const text = stripAnsi(resultText(block.content));
       const firstLine = text.split('\n').find((l) => l.trim()) ?? '';
       out.push({
-        ts, kind: 'toolResult', toolId: String(block.tool_use_id ?? ''), summary: firstLine.slice(0, 200),
+        ts,
+        kind: 'toolResult',
+        toolId: String(block.tool_use_id ?? ''),
+        summary: firstLine.slice(0, 200),
         ...(block.is_error === true ? { isError: true } : {}),
         detail: capDetail({ type: 'output', text }),
       });
@@ -1238,11 +1433,45 @@ export function parseClaudeFeedEntries(record: Record<string, unknown>): Draft[]
 
 ---
 
+## S1b: Contrato de workflows (super-líder, antes de la Ola 2; spec §2.1b)
+
+**Files:** `core/asyncapi.yaml` (+ regenerar `messages.ts`), `core/src/teamProvider.ts`, `server/src/types.ts`, `server/src/constants.ts`.
+
+- [ ] **Step 1: contrato** — esquema nombrado `AgentNodeKind` (`type: string, enum: [agent, workflow]`) y propiedad `nodeKind: $ref AgentNodeKind` en `AgentCreated` y `AgentSeatMeta`. Regenerar sin `AnonymousSchema`.
+- [ ] **Step 2: `TeamProvider`** (opcionales):
+
+```ts
+  /** A spawn-tool result that launched a scripted multi-agent run (Claude:
+   *  the `Workflow` tool). `runDir` is where the run's agents write their
+   *  transcripts; `name` is the run's display name. Null when not a launch. */
+  extractWorkflowLaunch?(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    resultContent: unknown,
+  ): { runDir: string; name?: string } | null;
+
+  /** Agents of one workflow run. Their sidecars carry no spawn tool id; the
+   *  host gates them on the run being live. `label` is a short task line. */
+  discoverWorkflowAgents?(runDir: string): Array<{
+    jsonlPath: string;
+    agentKey: string;
+    parentAgentKey?: string;
+    agentType: string;
+    label?: string;
+  }>;
+```
+
+- [ ] **Step 3: `AgentState`** — `nodeKind?: 'agent' | 'workflow'`; `workflowRunDir?: string` (solo nodos workflow). Constante `WORKFLOW_LABEL_MAX_CHARS = 80`.
+- [ ] **Step 4:** `npm run compile`; commit `feat: Agregar contrato de nodos workflow`.
+
+---
+
 ## Ola 2 (paralela; tras integrar la Ola 1)
 
 ### T6: Runtime — árbol recursivo, muerte en cascada y retiro del shadow store
 
 **Files:**
+
 - Modify: `server/src/fileWatcher.ts:788-953` (`liveSpawnToolIds`, `scanForBackgroundAgentFiles` → `scanSpawnTree`), setters `setSubagentWatch` (eliminar)
 - Modify: `server/src/agentRuntime.ts:95-135` (callbacks) y `:308-338` (`removeAgent` en cascada)
 - Modify: `server/src/transcriptParser.ts` (callback de spawn abierto/cerrado)
@@ -1252,6 +1481,7 @@ export function parseClaudeFeedEntries(record: Record<string, unknown>): Draft[]
 - Create test: `server/__tests__/spawnTreeRuntime.test.ts`
 
 **Interfaces:**
+
 - Consumes: `planSpawnTree`, `subtreeRemovalOrder` (T3); campos de `discoverTeammates` (T1); `AgentState` tree fields (S1); `SessionRouter.registerSpawn/unregisterSpawn` (T2) vía `HookEventHandler.registerSpawn` que expone T7.
 - Produces:
   - `scanSpawnTree(rootId, agents, nextAgentIdRef, fileWatchers, pollingTimers, waitingTimers, permissionTimers, onAgentCreated?)` exportada desde `fileWatcher.ts`.
@@ -1263,6 +1493,7 @@ export function parseClaudeFeedEntries(record: Record<string, unknown>): Draft[]
 - [ ] **Step 1: Test de integración que falla** (`spawnTreeRuntime.test.ts`; reutilizar `createLeadAgent` y los helpers de registros de `backgroundAgents.test.ts` — copiarlos, no importarlos de otro test)
 
 Escenario A — profundidad 3:
+
 1. Lead (id 1) procesa un `assistant` con `tool_use` `Agent` id `toolu_L` (primer plano).
 2. Existe `subagents/agent-aaa.jsonl` + meta `{agentType:'lider-fase', toolUseId:'toolu_L', spawnDepth:1}`.
 3. `scanSpawnTree(1, …)` → se crea un agente con `parentAgentId === 1`, `spawnAgentKey === 'aaa'`, `role === 'lider-fase'`, `depth === 1`.
@@ -1271,7 +1502,11 @@ Escenario A — profundidad 3:
 6. Repetir con `agent-ccc` (`qa-revisor`, `parentAgentId:'bbb'`, depth 3).
 
 ```ts
-expect(byKey('ccc')).toMatchObject({ parentAgentId: byKey('bbb').id, depth: 3, role: 'qa-revisor' });
+expect(byKey('ccc')).toMatchObject({
+  parentAgentId: byKey('bbb').id,
+  depth: 3,
+  role: 'qa-revisor',
+});
 ```
 
 Escenario B — cascada: `runtime.removeAgent(idDe('aaa'))` → `store.get` de `aaa`, `bbb`, `ccc` es `undefined`; el lead sigue.
@@ -1291,11 +1526,21 @@ Escenario F — nieto antes que su padre: meta de `bbb` presente pero `aaa` aún
 ```ts
 export function rootOf(agentId: number, agents: AgentStateStore): number {
   let id = agentId;
-  for (let a = agents.get(id); a?.parentAgentId !== undefined; a = agents.get(id)) id = a.parentAgentId;
+  for (let a = agents.get(id); a?.parentAgentId !== undefined; a = agents.get(id))
+    id = a.parentAgentId;
   return id;
 }
 
-export function scanSpawnTree(rootId: number, agents: AgentStateStore, nextAgentIdRef: { current: number }, fileWatchers: Map<number, fs.FSWatcher>, pollingTimers: Map<number, ReturnType<typeof setInterval>>, waitingTimers: Map<number, ReturnType<typeof setTimeout>>, permissionTimers: Map<number, ReturnType<typeof setTimeout>>, onAgentCreated?: (agent: AgentState) => void): void {
+export function scanSpawnTree(
+  rootId: number,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+  fileWatchers: Map<number, fs.FSWatcher>,
+  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+  onAgentCreated?: (agent: AgentState) => void,
+): void {
   if (!teamProvider) return;
   const root = agents.get(rootId);
   if (!root || !root.sessionId || !root.projectDir || root.parentAgentId !== undefined) return;
@@ -1311,7 +1556,16 @@ export function scanSpawnTree(rootId: number, agents: AgentStateStore, nextAgent
   const entries: SpawnEntry[] = [];
   for (const t of teamProvider.discoverTeammates(root.projectDir, root.sessionId)) {
     if (!t.agentKey || !t.toolUseId) continue;
-    entries.push({ jsonlPath: t.jsonlPath, agentKey: t.agentKey, parentAgentKey: t.parentAgentKey, toolUseId: t.toolUseId, depth: t.depth ?? 1, agentType: t.agentType ?? t.teammateName, description: t.description, name: t.name });
+    entries.push({
+      jsonlPath: t.jsonlPath,
+      agentKey: t.agentKey,
+      parentAgentKey: t.parentAgentKey,
+      toolUseId: t.toolUseId,
+      depth: t.depth ?? 1,
+      agentType: t.agentType ?? t.teammateName,
+      description: t.description,
+      name: t.name,
+    });
   }
   const isTracked = (p: string) => [...agents.values()].some((a) => pathsMatch(a.jsonlFile, p));
   const plan = planSpawnTree(rootId, nodes, entries, isTracked);
@@ -1320,29 +1574,60 @@ export function scanSpawnTree(rootId: number, agents: AgentStateStore, nextAgent
     const parent = agents.get(parentId)!;
     const id = nextAgentIdRef.current++;
     const agent: AgentState = {
-      id, sessionId: root.sessionId, terminalRef: undefined, isExternal: true, projectDir: root.projectDir,
-      jsonlFile: entry.jsonlPath, fileOffset: 0, lineBuffer: '',
-      activeToolIds: new Set(), activeToolStatuses: new Map(), activeToolNames: new Map(),
-      activeSubagentToolIds: new Map(), activeSubagentToolNames: new Map(), backgroundAgentToolIds: new Set(),
-      isWaiting: false, permissionSent: false, hadToolsInTurn: false, hookDelivered: false,
-      lastDataAt: Date.now(), linesProcessed: 0, seenUnknownRecordTypes: new Set(),
-      contextTokens: 0, maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
-      spawnToolUseId: entry.toolUseId, spawnAgentKey: entry.agentKey, parentAgentId: parentId,
-      role: entry.agentType, label: entry.description, depth: entry.depth,
+      id,
+      sessionId: root.sessionId,
+      terminalRef: undefined,
+      isExternal: true,
+      projectDir: root.projectDir,
+      jsonlFile: entry.jsonlPath,
+      fileOffset: 0,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      hookDelivered: false,
+      lastDataAt: Date.now(),
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+      spawnToolUseId: entry.toolUseId,
+      spawnAgentKey: entry.agentKey,
+      parentAgentId: parentId,
+      role: entry.agentType,
+      label: entry.description,
+      depth: entry.depth,
       ...(entry.name ? { agentName: entry.name, leadAgentId: parentId } : {}),
     };
     if (parent.palette !== undefined) {
       const siblingIndex = [...agents.values()].filter((a) => a.parentAgentId === parentId).length;
       agent.palette = parent.palette;
-      agent.hueShift = ((parent.hueShift ?? 0) + SPAWN_SIBLING_HUE_STEP_DEG * (siblingIndex + 1)) % 360;
+      agent.hueShift =
+        ((parent.hueShift ?? 0) + SPAWN_SIBLING_HUE_STEP_DEG * (siblingIndex + 1)) % 360;
     } else assignPaletteIfNeeded(agent, agents);
     agents.set(id, agent);
-    if (entry.name && !parent.isTeamLead) { /* bloque agentTeamInfo existente, con parentId */ }
+    if (entry.name && !parent.isTeamLead) {
+      /* bloque agentTeamInfo existente, con parentId */
+    }
     // The parent's transient Subtask for this spawn is superseded by the real character.
     agents.broadcast({ type: 'subagentClear', id: parentId, parentToolId: entry.toolUseId });
     spawnTreeCallbacks?.onDerivedCreated(agent);
     onAgentCreated?.(agent);
-    startFileWatching(id, entry.jsonlPath, agents, fileWatchers, pollingTimers, waitingTimers, permissionTimers);
+    startFileWatching(
+      id,
+      entry.jsonlPath,
+      agents,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+    );
     readNewLines(id, agents, waitingTimers, permissionTimers);
   }
 }
@@ -1383,10 +1668,12 @@ con el cuerpo actual movido a `private removeSingleAgent(id)`, que además llama
 ### T7: HookEventHandler — enrutar por `agentKey` (corrige el defecto)
 
 **Files:**
+
 - Modify: `server/src/hookEventHandler.ts:100-120` (registro), `:230-320` (resolución en `handleEvent`)
 - Test: `server/__tests__/hookEventHandler.test.ts`
 
 **Interfaces:**
+
 - Consumes: `SessionRouter.registerSpawn/resolveSpawn/unregisterSpawn/bufferEvent(…, agentKey)` (T2); envelope `agentKey` (S1/T1).
 - Produces:
   - `HookEventHandler.registerSpawn(sessionId: string, agentKey: string, agentId: number): void` (registra y re-despacha eventos bufferizados)
@@ -1401,10 +1688,18 @@ it('a tool event fired inside a subagent never animates the session root', () =>
   const broadcasts: Array<Record<string, unknown>> = [];
   store.on('broadcast', (m) => broadcasts.push(m));
   handler.handleEvent('claude', {
-    hook_event_name: 'PreToolUse', session_id: 'sess-1', agent_id: 'bbb222', agent_type: 'desarrollador',
-    tool_name: 'Bash', tool_input: { command: 'mvn test' },
+    hook_event_name: 'PreToolUse',
+    session_id: 'sess-1',
+    agent_id: 'bbb222',
+    agent_type: 'desarrollador',
+    tool_name: 'Bash',
+    tool_input: { command: 'mvn test' },
   });
-  expect(broadcasts.filter((m) => m.id === 1 && (m.type === 'agentToolStart' || m.type === 'agentStatus'))).toEqual([]);
+  expect(
+    broadcasts.filter(
+      (m) => m.id === 1 && (m.type === 'agentToolStart' || m.type === 'agentStatus'),
+    ),
+  ).toEqual([]);
 });
 ```
 
@@ -1414,10 +1709,19 @@ Run: `npx vitest run server/__tests__/hookEventHandler.test.ts -t "never animate
 
 ```ts
 it('routes a keyed event to the derived agent once registered, including buffered ones', () => {
-  store.set(7, makeAgent({ id: 7, sessionId: 'sess-1', spawnAgentKey: 'bbb222', parentAgentId: 1 }));
+  store.set(
+    7,
+    makeAgent({ id: 7, sessionId: 'sess-1', spawnAgentKey: 'bbb222', parentAgentId: 1 }),
+  );
   const seen: Array<Record<string, unknown>> = [];
   store.on('broadcast', (m) => seen.push(m));
-  handler.handleEvent('claude', { hook_event_name: 'PreToolUse', session_id: 'sess-1', agent_id: 'bbb222', tool_name: 'Read', tool_input: { file_path: '/a.ts' } });
+  handler.handleEvent('claude', {
+    hook_event_name: 'PreToolUse',
+    session_id: 'sess-1',
+    agent_id: 'bbb222',
+    tool_name: 'Read',
+    tool_input: { file_path: '/a.ts' },
+  });
   expect(seen.some((m) => m.id === 7)).toBe(false); // not registered yet → buffered
   handler.registerSpawn('sess-1', 'bbb222', 7);
   expect(seen.some((m) => m.id === 7 && m.type === 'agentToolStart')).toBe(true);
@@ -1427,12 +1731,22 @@ it('routes a keyed event to the derived agent once registered, including buffere
 it('SubagentStart with agent_id asks the runtime to scan the tree', () => {
   const onSpawnObserved = vi.fn();
   // construir handler con callbacks { ..., onSpawnObserved }
-  handler.handleEvent('claude', { hook_event_name: 'SubagentStart', session_id: 'sess-1', agent_id: 'bbb222', agent_type: 'Explore' });
+  handler.handleEvent('claude', {
+    hook_event_name: 'SubagentStart',
+    session_id: 'sess-1',
+    agent_id: 'bbb222',
+    agent_type: 'Explore',
+  });
   expect(onSpawnObserved).toHaveBeenCalledWith(1);
 });
 
 it('events without agent_id keep routing to the root as today', () => {
-  handler.handleEvent('claude', { hook_event_name: 'PreToolUse', session_id: 'sess-1', tool_name: 'Read', tool_input: {} });
+  handler.handleEvent('claude', {
+    hook_event_name: 'PreToolUse',
+    session_id: 'sess-1',
+    tool_name: 'Read',
+    tool_input: {},
+  });
   expect(lastBroadcastFor(1)?.type).toBe('agentToolStart');
 });
 ```
@@ -1442,19 +1756,23 @@ it('events without agent_id keep routing to the root as today', () => {
 En `handleEvent`, tras `normalizeHookEvent` (tomar `agentKey` del resultado):
 
 ```ts
-    const agentKey = normalized.agentKey;
-    if (agentKey !== undefined && normEvent.kind !== 'subagentStart' && normEvent.kind !== 'subagentEnd') {
-      const derivedId = this.sessionRouter.resolveSpawn(event.session_id, agentKey);
-      if (derivedId === undefined) {
-        // The node is not materialized yet (scan runs every 1 s). Buffer; it
-        // must never fall through to the session root — that was the bug.
-        this.sessionRouter.bufferEvent(providerId, event, agentKey);
-        return;
-      }
-      const derived = this.agents.get(derivedId);
-      if (!derived) return;
-      return this.dispatch(normEvent, derived, derivedId, event);
-    }
+const agentKey = normalized.agentKey;
+if (
+  agentKey !== undefined &&
+  normEvent.kind !== 'subagentStart' &&
+  normEvent.kind !== 'subagentEnd'
+) {
+  const derivedId = this.sessionRouter.resolveSpawn(event.session_id, agentKey);
+  if (derivedId === undefined) {
+    // The node is not materialized yet (scan runs every 1 s). Buffer; it
+    // must never fall through to the session root — that was the bug.
+    this.sessionRouter.bufferEvent(providerId, event, agentKey);
+    return;
+  }
+  const derived = this.agents.get(derivedId);
+  if (!derived) return;
+  return this.dispatch(normEvent, derived, derivedId, event);
+}
 ```
 
 donde `dispatch` es el `switch (normEvent.kind)` actual extraído a un método privado (sin cambiar su contenido). Para `subagentStart` con `agentKey`: tras el manejo actual en el padre, `this.lifecycleCallbacks.onSpawnObserved?.(rootAgentIdDeLaSesion)`.
@@ -1481,11 +1799,13 @@ donde `dispatch` es el `switch (normEvent.kind)` actual extraído a un método p
 ### T8: E2E — árbol de tres niveles (hooks OFF)
 
 **Files:**
+
 - Modify (si hace falta): `e2e/fixtures/mock-claude-runner.cjs`, `e2e/helpers/mock-claude.ts` — operación `writeFile(relPathFromProjectDir, content)` para escribir sidecars y transcripts de sub-agentes
 - Create: `e2e/tests/claude/hooks-off/spawnTree.spec.ts`
 - Modify: `e2e/README.md` (solo vía `npm run e2e:inventory`)
 
 **Interfaces:**
+
 - Consumes: comportamiento de S2 (agentCreated con `parentAgentId`/`role`/`label`; personajes derivados sentados en la raíz en la entrega 1).
 - Produces: spec `spawnTree.spec.ts` con tag `@area:teams`.
 
@@ -1495,6 +1815,34 @@ donde `dispatch` es el `switch (normEvent.kind)` actual extraído a un método p
 - [ ] **Step 4: Aserciones** (helpers de `e2e/helpers/office.ts`): aparecen 4 personajes; el overlay de `ccc` muestra la actividad de `Read`; el lead **no** muestra `Read` (defecto); al cerrar el `toolu_L` del lead con su `tool_result`, desaparecen `aaa`, `bbb`, `ccc`. Timeouts ≥ 10 s (escaneo 1 s + polling 500 ms por nivel × 3).
 - [ ] **Step 5: Correr** — Run: `npm run e2e -- --workers=1 --grep "spawn tree"` → PASS; `npm run e2e:inventory`.
 - [ ] **Step 6: Reportar al líder.**
+
+---
+
+### T16: Proveedor Claude — workflows
+
+**Files:** Create `server/src/providers/hook/claude/claudeWorkflow.ts`, test `server/__tests__/claudeWorkflow.test.ts`. (El registro en `claudeTeamProvider` lo hace S2.)
+
+**Interfaces:** Produces `extractClaudeWorkflowLaunch(toolName, toolInput, resultContent)` y `discoverClaudeWorkflowAgents(runDir)` con las firmas de S1b.
+
+Reglas:
+
+- Launch: `toolName === 'Workflow'` y el texto del resultado (string o bloques) contiene `Workflow launched`; `runDir` = valor tras `Transcript dir:` (hasta fin de línea, trim), aceptado solo si su basename casa con `/^wf_[A-Za-z0-9-]{1,64}$/` y su padre es `…/subagents/workflows`; `name` = `meta.name` extraído de `toolInput.script` con `/name:\s*['"]([^'"\n]{1,120})['"]/`, si no el texto tras `Summary:`; saneado con `sanitizeFeedText` y truncado a `WORKFLOW_LABEL_MAX_CHARS`.
+- Agents: `agent-<key>.jsonl` del `runDir` con clave válida (`normalizeClaudeAgentKey` de T1), sidecar parseado con el mismo cuidado que T1 (archivo regular, ≤ 64 KB, caché por mtime+size); `parentAgentKey` con la regla de T1 (presente e inválido ⇒ omitir entrada); `label` = primera línea no vacía del primer registro `user` (leer solo los primeros 16 KB del `.jsonl`), saneada y truncada.
+
+- [ ] **Step 1: tests rojos** con fixtures que copian la forma real (tool_result "Workflow launched in background. Task ID: w4eubwvnv\nSummary: …\nTranscript dir: C:\\…\\subagents\\workflows\\wf_9b94fdcd-8af"): launch reconocido con `name` desde el script; sin `Transcript dir` ⇒ null; `runDir` con `..` o basename inválido ⇒ null; resultados de otras herramientas ⇒ null; `discoverClaudeWorkflowAgents` devuelve clave/tipo/label y omite claves inválidas; transcript de 50 MB no se lee entero.
+- [ ] **Step 2:** implementar. **Step 3:** verde (`npx vitest run __tests__/claudeWorkflow.test.ts`). **Step 4:** reportar.
+
+---
+
+### T17: Nodos workflow en el runtime (Ola 2b, tras T6)
+
+**Files:** `server/src/fileWatcher.ts`, `server/src/transcriptParser.ts`, `server/src/agentRuntime.ts`; test `server/__tests__/workflowNodes.test.ts`.
+
+**Interfaces:** Consumes `extractWorkflowLaunch`/`discoverWorkflowAgents` (T16 vía `TeamProvider`), `scanSpawnTree`/`rootOf`/`removeAgent` en cascada (T6), `registerSpawn` (T7).
+
+- [ ] **Step 1: tests rojos** (`workflowNodes.test.ts`): (a) el lead procesa `tool_use Workflow` + su `tool_result` "launched" ⇒ se crea un agente con `nodeKind: 'workflow'`, `parentAgentId = lead`, `label` = nombre, sin watcher de archivo; (b) con 3 `agent-*.jsonl` en `runDir`, el escaneo crea 3 hijos del nodo workflow con `role`/`label`, `depth = nodo + 1`; (c) un `runDir` de un workflow ya completado (sin nodo vivo) no crea nada; (d) la `queue-operation` de completado con ese `tool-use-id` elimina el nodo y sus hijos; (e) estado derivado: un hijo activo ⇒ el nodo emite `agentStatus active`; todos en espera ⇒ `waiting`; (f) nada de esto se persiste; (g) el lead no queda con el `Workflow` como herramienta "activa" que dispare su timer de permiso.
+- [ ] **Step 2: implementar** — en `transcriptParser`, al ver el `tool_result` de un `Workflow`, llamar `extractWorkflowLaunch`; si hay launch, callback al runtime que crea el nodo (registrar el `toolUseId` como spawn de fondo vivo del lead, como `backgroundAgentToolIds`); `scanSpawnTree` incluye, por cada nodo workflow vivo del árbol, las entradas de `discoverWorkflowAgents(runDir)` con padre = nodo (o su `parentAgentKey`); el completado reutiliza `setBackgroundAgentCompletedCallback`; estado derivado recalculado en `agentUpdated` de los hijos.
+- [ ] **Step 3:** verde (`npx vitest run __tests__/workflowNodes.test.ts __tests__/spawnTreeRuntime.test.ts __tests__/backgroundAgents.test.ts`). **Step 4:** reportar.
 
 ---
 
@@ -1510,7 +1858,10 @@ donde `dispatch` es el `switch (normEvent.kind)` actual extraído a un método p
         role: agent.role,
         label: agent.label,
         depth: agent.depth,
+        nodeKind: agent.nodeKind,
 ```
+
+Además: registrar `extractWorkflowLaunch: extractClaudeWorkflowLaunch` y `discoverWorkflowAgents: discoverClaudeWorkflowAgents` en `claudeTeamProvider`; `nodeKind` también en `existingAgents.agentMeta`; en la webview, la etiqueta de un nodo `workflow` lleva el prefijo `⚙ `. Commits extra: `feat: Detectar workflows en el proveedor Claude` (T16), `feat: Representar workflows como nodos del árbol` (T17). E2E adicional en `spawnTree.spec.ts`: un `Workflow` lanzado con 2 agentes ⇒ aparece el nodo ⚙ con 2 hijos y desaparecen al completarse.
 
 - [ ] **Step 3: `existingAgents.agentMeta`** en `clientMessageHandler.ts` agrega `parentAgentId: agent.parentAgentId ?? agent.leadAgentId, role, label, depth, teammateName: agent.agentName`. Test en `server/__tests__/clientMessageHandler.test.ts`: con un agente derivado en el store, `existingAgents.agentMeta[id]` trae `parentAgentId` y `role` (Review Focus 4).
 - [ ] **Step 4: Webview interim** — en `agentCreated`, tratar `parentAgentId !== undefined` como el camino de teammate (heredar paleta, sentar cerca del padre), usando `msg.teammateName ?? msg.label` como nombre visible; en `existingAgents`, pasar `nearAgentId` del meta.
@@ -1526,11 +1877,13 @@ donde `dispatch` es el `switch (normEvent.kind)` actual extraído a un método p
 ### T9: Directorio de agentes y OfficeRegistry — enrutado de mensajes por oficina
 
 **Files:**
+
 - Create: `webview-ui/src/office/scope/officeRegistry.ts`
 - Modify: `webview-ui/src/hooks/useExtensionMessages.ts`
 - Test: `webview-ui/test/officeRegistry.test.ts`
 
 **Interfaces:**
+
 - Consumes: `AgentDirectory`, `generateScopeLayout`, `DEFAULT_SCOPE_KIT` (T4); `OfficeState` (`addAgent`, `removeAgent`, `rebuildFromLayout`).
 - Produces:
 
@@ -1564,7 +1917,7 @@ export class OfficeRegistry {
   - `agentCreated` / `existingAgents` → `directory.upsert(...)`; si el agente no tiene padre → `root.addAgent(...)` (camino actual); después `registry.reconcile()`;
   - `agentClosed` → `directory.remove(id)`, `for (const os of registry.officesShowing(id)) os.removeAgent(id)`, `registry.reconcile()`;
   - `agentStatus`, `agentToolStart/Done/Clear`, `agentToolPermission(Clear)`, `agentContextUsage`, `subagent*` → actualizar `directory` y aplicar la lógica actual a cada `os` de `registry.officesShowing(msg.id)`.
-  Quitar el camino interim de S2 (sentar derivados en la raíz).
+    Quitar el camino interim de S2 (sentar derivados en la raíz).
 - [ ] **Step 5: Verde** — `npm run test:webview` y `npm run check-types`.
 - [ ] **Step 6: Reportar al líder.**
 
@@ -1573,23 +1926,36 @@ export class OfficeRegistry {
 ### T10: UI de navegación — insignias, migas de pan, doble clic
 
 **Files:**
+
 - Create: `webview-ui/src/components/ScopeBreadcrumbs.tsx`
 - Create: `webview-ui/src/office/components/ScopeBadgeOverlay.tsx`
 - Modify: `webview-ui/src/office/components/OfficeCanvas.tsx` (prop `onDoubleClick?: (agentId: number) => void`, reutilizando el hit-test de `onClick`)
 - Test: `webview-ui/test/scopeBreadcrumbs.test.ts` (función pura `breadcrumbTrail`)
 
 **Interfaces:**
+
 - Consumes: `AgentDirectory`, `ScopeId` (T4); `overlayProjection`/`mapOffset` de `office/projection.ts`; constantes `SCOPE_BADGE_BG`, `SCOPE_BADGE_ALERT_BG` (S1).
 - Produces:
 
 ```ts
 // ScopeBreadcrumbs.tsx
-export function breadcrumbTrail(directory: AgentDirectory, scope: ScopeId): Array<{ scope: ScopeId; text: string }>;
-export function ScopeBreadcrumbs(props: { directory: AgentDirectory; scope: ScopeId; onNavigate: (s: ScopeId) => void }): JSX.Element | null; // null en root
+export function breadcrumbTrail(
+  directory: AgentDirectory,
+  scope: ScopeId,
+): Array<{ scope: ScopeId; text: string }>;
+export function ScopeBreadcrumbs(props: {
+  directory: AgentDirectory;
+  scope: ScopeId;
+  onNavigate: (s: ScopeId) => void;
+}): JSX.Element | null; // null en root
 // ScopeBadgeOverlay.tsx
 export function ScopeBadgeOverlay(props: {
-  officeState: OfficeState; directory: AgentDirectory; activeScope: ScopeId;
-  containerRef: React.RefObject<HTMLDivElement | null>; zoom: number; panRef: React.RefObject<{ x: number; y: number }>;
+  officeState: OfficeState;
+  directory: AgentDirectory;
+  activeScope: ScopeId;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  zoom: number;
+  panRef: React.RefObject<{ x: number; y: number }>;
   onEnterScope: (id: number) => void;
 }): JSX.Element;
 ```
@@ -1620,11 +1986,13 @@ export function ScopeBadgeOverlay(props: {
 ### T11: AgentFeedHub — suscripciones dirigidas al feed
 
 **Files:**
+
 - Create: `server/src/agentFeed.ts`
 - Modify: `server/src/fileWatcher.ts` (setter `setTranscriptLineListener((agentId: number, record: Record<string, unknown>) => void)` invocado por cada línea parseada en `readNewLines`/`processTranscriptLine`)
 - Test: `server/__tests__/agentFeed.test.ts`
 
 **Interfaces:**
+
 - Consumes: `HookProvider.parseFeedEntries` (S1/S2), `FEED_*` (S1), `AgentStateStore`.
 - Produces:
 
@@ -1657,24 +2025,36 @@ export class AgentFeedHub {
 ### T12: AgentScreenModal — la pantalla ampliada
 
 **Files:**
+
 - Create: `webview-ui/src/components/AgentScreenModal.tsx`
 - Create: `webview-ui/src/hooks/useAgentFeed.ts`
 - Create: `webview-ui/src/components/feedFormat.ts` (puro) + Test: `webview-ui/test/feedFormat.test.ts`
 
 **Interfaces:**
+
 - Consumes: tipos `FeedEntry`, mensajes `agentFeed*` (S1); `MessageTransport`; `AgentDirectory` (T4) para la cabecera; colores `FEED_DIFF_*` (S1).
 - Produces:
 
 ```ts
 // useAgentFeed.ts
-export function useAgentFeed(transport: MessageTransport, agentId: number | null): {
-  entries: FeedEntry[]; truncated: boolean; denied: 'unprivileged' | 'unknownAgent' | null;
+export function useAgentFeed(
+  transport: MessageTransport,
+  agentId: number | null,
+): {
+  entries: FeedEntry[];
+  truncated: boolean;
+  denied: 'unprivileged' | 'unknownAgent' | null;
 };
 // feedFormat.ts
 export function toolRowState(entries: FeedEntry[], toolId: string): 'running' | 'done' | 'error';
 export function mergeFeed(prev: FeedEntry[], incoming: FeedEntry[], max: number): FeedEntry[]; // dedup por seq, orden por seq, recorta a max
 // AgentScreenModal.tsx
-export function AgentScreenModal(props: { agentId: number; directory: AgentDirectory; transport: MessageTransport; onClose: () => void }): JSX.Element;
+export function AgentScreenModal(props: {
+  agentId: number;
+  directory: AgentDirectory;
+  transport: MessageTransport;
+  onClose: () => void;
+}): JSX.Element;
 ```
 
 - [ ] **Step 1: Tests de `feedFormat`**: `toolRowState` → `running` sin toolResult, `done` con resultado, `error` con `isError`; `mergeFeed` deduplica por `seq`, ordena y recorta.
@@ -1696,4 +2076,197 @@ export function AgentScreenModal(props: { agentId: number; directory: AgentDirec
 - [ ] **Step 5: `CLAUDE.md`** — actualizar: árbol de spawns (reemplaza la sección de sidecar-backed background agents y del shadow store), oficinas de scope, feed y su regla de privilegio, cuentas de mensajes AsyncAPI, archivos nuevos en el árbol de directorios, y la nota de `~/.pixel-agents/servers/` (registro multi-servidor ya existente).
 - [ ] **Step 6: Verificación completa** — `npm run compile && npm test && npm run e2e -- --workers=1 && npm run e2e:inventory`; prueba en navegador con `/equipo` real; GIF `entrega3-pantalla.gif`.
 - [ ] **Step 7: Commits**: `feat: Agregar hub de feed de actividad por agente` (T11), `feat: Agregar pantalla ampliada de agente` (T12), `feat: Integrar pantalla ampliada con acceso privilegiado` (S4), `docs: Actualizar CLAUDE.md con árbol de agentes y oficinas` (S4).
-- [ ] **Step 8: Revisión final del usuario** — y preguntar si se hace push/PR.
+- [ ] **Step 8: Revisión del usuario** (el push/PR se pregunta al cerrar la entrega 4).
+
+---
+
+## Ola 5 (entrega 4 — conversaciones entre agentes, spec §4b)
+
+### S5: Contrato de conversación y filtro por conexión (super-líder)
+
+**Files:** `core/asyncapi.yaml`, `core/src/messages.ts` (regenerado), `core/src/provider.ts`, `server/src/constants.ts`, `webview-ui/src/constants.ts`, `server/src/httpServer.ts`, `adapters/vscode/PixelAgentsViewProvider.ts`.
+
+**Interfaces (Produces):**
+
+```yaml
+AgentConversation:
+  description: >-
+    One agent addresses another (assigns work, reports back, or sends a
+    message). Broadcast to every client for the animation; `text` is
+    transcript content and is stripped for unprivileged connections.
+  type: object
+  additionalProperties: false
+  required: [type, conversationId, fromId, kind]
+  properties:
+    type:
+      const: agentConversation
+    conversationId:
+      type: string
+    fromId:
+      type: integer
+    toId:
+      type: integer
+      description: Absent when the recipient could not be resolved to a tracked agent.
+    kind:
+      $ref: '#/components/schemas/ConversationKind'
+    text:
+      type: string
+ConversationKind:
+  type: string
+  enum: [assign, report, message]
+```
+
+(añadir `AgentConversation` a `ServerMessage.oneOf`).
+
+```ts
+// core/src/provider.ts — HookProvider, bloque opcional
+  /** Recognize an inter-agent communication in one transcript record of the
+   *  agent that wrote it. `to` is a provider reference (Claude: agent key or
+   *  teammate name) the host resolves inside the same root tree; `spawnToolUseId`
+   *  is set for assignments (the spawn call) so the host can emit them when the
+   *  child materializes. Undefined = no conversations for this provider. */
+  parseConversations?(record: Record<string, unknown>): Array<{
+    kind: 'assign' | 'report' | 'message';
+    text: string;
+    to?: string;
+    spawnToolUseId?: string;
+  }>;
+```
+
+Constantes: server `CONVERSATION_TEXT_MAX_BYTES = 65536`; webview `CONVERSATION_TYPE_CPS = 80`, `CONVERSATION_MAX_MS = 15000`, `CONVERSATION_BUBBLE_MAX_W = 220`, `CONVERSATION_BUBBLE_MAX_LINES = 8`, colores `CONVERSATION_BUBBLE_BG`, `CONVERSATION_BUBBLE_BORDER`.
+
+- [ ] **Step 1:** contrato + regenerar (`asyncapi:validate`, `asyncapi:generate`, sin `AnonymousSchema`).
+- [ ] **Step 2: filtro por conexión.** En `httpServer.ts`, en el reenvío de broadcasts por socket: si `msg.type === 'agentConversation' && !privileged`, enviar el mensaje sin `text`. VS Code (embebido) envía completo. Test en `server/__tests__/httpServerWs.test.ts`: dos clientes, uno con `?token=` y otro sin; el segundo recibe el evento sin `text`.
+- [ ] **Step 3:** `npm run compile && npm run test:server`; commit `feat: Agregar contrato de conversaciones entre agentes`.
+
+---
+
+### T13: Detección de conversaciones en el servidor
+
+**Files:**
+
+- Create: `server/src/providers/hook/claude/claudeConversation.ts` (+ test `server/__tests__/claudeConversation.test.ts`)
+- Create: `server/src/conversations.ts` (+ test `server/__tests__/conversations.test.ts`)
+- Modify: `server/src/fileWatcher.ts` / `server/src/transcriptParser.ts` — un único gancho: por cada registro parseado de un agente, `conversationTracker.onRecord(agentId, record)`; en `scanSpawnTree`, tras crear un hijo, `conversationTracker.onChildMaterialized(parentId, childId, spawnToolUseId)`; al cerrarse un spawn con su `tool_result`, `onSpawnResult(parentId, toolUseId, text)`.
+
+**Interfaces:**
+
+- Consumes: `HookProvider.parseConversations` (S5); árbol de T6 (`parentAgentId`, `spawnAgentKey`, `agentName`, `rootOf`); `sanitizeFeedText`/`truncateUtf8` (T5); `AgentStateStore.broadcast`.
+- Produces:
+
+```ts
+// claudeConversation.ts
+export function parseClaudeConversations(
+  record: Record<string, unknown>,
+): Array<{
+  kind: 'assign' | 'report' | 'message';
+  text: string;
+  to?: string;
+  spawnToolUseId?: string;
+}>;
+// conversations.ts
+export class ConversationTracker {
+  constructor(store: AgentStateStore, provider: HookProvider);
+  onRecord(agentId: number, record: Record<string, unknown>): void;
+  onChildMaterialized(parentId: number, childId: number, spawnToolUseId: string): void;
+  /** Report fallback: the parent's spawn tool_result arrived and the child never sent a handback. */
+  onSpawnResult(parentId: number, spawnToolUseId: string, resultText: string): void;
+  dispose(): void;
+}
+```
+
+Reglas:
+
+- `assign`: `onRecord` del padre guarda `text` por `spawnToolUseId` (Map acotado; se borra al emitir o al cerrarse el spawn); se emite en `onChildMaterialized` con `toId = childId`.
+- `report`: `SubagentHandback` en el transcript del hijo → `toId = parentAgentId`; marca el spawn como reportado para que `onSpawnResult` no duplique.
+- `message`: `SendMessage` → resolver `to`/`recipient` contra `spawnAgentKey` y luego `agentName` de agentes con el mismo `rootOf`; si no resuelve, emitir sin `toId`.
+- `conversationId` = `${agentId}:${record.uuid ?? toolUseId}`; deduplicar (los transcripts repiten registros).
+- `text` truncado a `CONVERSATION_TEXT_MAX_BYTES` en frontera UTF-8 y saneado con `sanitizeFeedText`.
+- No emitir para registros de la lectura inicial de un agente adoptado/restaurado a mitad de sesión (solo registros nuevos).
+- Índices solo en `Map`/`Set` (claves como `__proto__` son válidas).
+
+- [ ] **Step 1: tests rojos** — `claudeConversation.test.ts`: `Agent` tool_use → `assign` con `prompt` y `spawnToolUseId`; `SubagentHandback` → `report`; `SendMessage` con `to`+`message` y con `recipient`+`content` → `message`; registros ajenos → `[]`. `conversations.test.ts`: assign se emite solo al materializar el hijo y con `toId` correcto; report con `toId = parent`; `onSpawnResult` no duplica un handback; `message` resuelve por clave y por nombre, y sin `toId` si no resuelve; dedup por `conversationId`; la lectura inicial no emite.
+- [ ] **Step 2:** implementar. **Step 3:** verde (`npx vitest run __tests__/claudeConversation.test.ts __tests__/conversations.test.ts __tests__/spawnTreeRuntime.test.ts`). **Step 4:** reportar (registro en `claudeProvider` y creación del tracker en `AgentRuntime` los hace S6).
+
+---
+
+### T14: Escena de conversación — máquina de estados pura (webview)
+
+**Files:** Create `webview-ui/src/office/engine/conversationScene.ts`, test `webview-ui/test/conversationScene.test.ts`.
+
+**Interfaces (Produces):**
+
+```ts
+export type ScenePhase = 'queued' | 'walking' | 'talking' | 'returning' | 'done';
+export interface ConversationEvent {
+  conversationId: string;
+  fromId: number;
+  toId?: number;
+  kind: 'assign' | 'report' | 'message';
+  text?: string;
+}
+export interface SceneView {
+  conversationId: string;
+  fromId: number;
+  toId?: number;
+  phase: ScenePhase;
+  visibleText: string;
+  complete: boolean;
+  kind: ConversationEvent['kind'];
+}
+export interface SceneHost {
+  /** Both characters present in the visible office? */
+  canStage(fromId: number, toId: number | undefined): boolean;
+  /** Start walking `fromId` next to `toId`; false if no path. */
+  walkNextTo(fromId: number, toId: number): boolean;
+  hasArrived(fromId: number): boolean;
+  faceEachOther(fromId: number, toId: number): void;
+  returnToSeat(fromId: number): void;
+  isSeated(fromId: number): boolean;
+  showEnvelope(fromId: number): void;
+}
+export class ConversationDirector {
+  constructor(host: SceneHost, opts: { cps: number; maxMs: number });
+  enqueue(ev: ConversationEvent): void; // FIFO per fromId
+  update(dtSec: number): void; // advance phases + typewriter
+  skip(conversationId: string): void; // reveal full text now
+  views(): SceneView[]; // active scenes for rendering
+  isBusy(agentId: number): boolean; // speaker or listener in an active scene
+  clear(): void; // on office switch: drop everything, no replay
+}
+```
+
+- [ ] **Step 1: tests rojos** con un `SceneHost` falso: FIFO por emisor (la 2ª espera a que la 1ª llegue a `done`); `canStage=false` → `showEnvelope` y `done` sin caminar; `walkNextTo=false` → envelope; typewriter: tras `update(0.5)` a 80 cps hay 40 caracteres visibles; `skip` → `complete=true`; al pasar `maxMs` en `talking` → `complete=true` y pasa a `returning`; `returning` → `done` cuando `isSeated`; `text` ausente → `visibleText = '…'`; `clear()` vacía todo.
+- [ ] **Step 2:** implementar. **Step 3:** verde (`npx vitest run test/conversationScene.test.ts` desde `webview-ui/`). **Step 4:** reportar.
+
+---
+
+### T15: Motor y burbuja — caminar, mirarse y hablar
+
+**Files:**
+
+- Modify: `webview-ui/src/office/engine/characters.ts` (flag `scripted` que suspende el retorno automático al asiento del FSM activo mientras dura la escena)
+- Modify: `webview-ui/src/office/engine/officeState.ts` (métodos que implementan `SceneHost`: `walkNextTo` con `closestFreeWalkableTile` alrededor del puesto del receptor + `walkToTile`; `faceEachOther`; `returnToSeat` → `sendToSeat`; `isSeated`; `showEnvelope` → bubble `'envelope'`)
+- Modify: `webview-ui/src/office/types.ts` (`bubbleType` gana `'envelope' | 'listening'`; `Character.scripted?: boolean`)
+- Create: `webview-ui/src/office/components/ConversationBubble.tsx` (overlay DOM con `office/projection.ts`, como `ToolOverlay`)
+- Test: `webview-ui/test/conversationHost.test.ts` (OfficeState real)
+
+**Interfaces:** Consumes `SceneHost`/`SceneView` (T14), `generateScopeLayout` (T4). Produces `OfficeState` que implementa `SceneHost` y `ConversationBubble(props: { officeState; views: SceneView[]; containerRef; zoom; panRef; onSkip(id: string); onOpenScreen(agentId: number) })`.
+
+- [ ] **Step 1: tests rojos** (OfficeState con layout generado, dos agentes sentados): `walkNextTo(a, b)` deja a `a` en una casilla adyacente libre al puesto de `b` tras avanzar el loop; mientras `scripted`, un `agentToolStart` sobre `a` NO lo manda a su silla; `returnToSeat` lo sienta y limpia `scripted`; `faceEachOther` orienta ambos; `showEnvelope` pone `bubbleType='envelope'`.
+- [ ] **Step 2:** implementar motor.
+- [ ] **Step 3: `ConversationBubble`** — burbuja pixel (`borderRadius: 0`, `2px solid`, `var(--pixel-shadow)`, FS Pixel Sans) sobre el emisor, ancho máx `CONVERSATION_BUBBLE_MAX_W`, scroll interno a `CONVERSATION_BUBBLE_MAX_LINES`, texto SOLO como children de React (nada de HTML), clic → `onSkip`; completado por tope → enlace "…ver completo" → `onOpenScreen(fromId)`; "…" de escucha sobre el receptor.
+- [ ] **Step 4:** verde — `npm run test:webview && npm run lint`. **Step 5:** reportar.
+
+---
+
+### S6: Integración de la entrega 4 (super-líder)
+
+**Files:** `server/src/agentRuntime.ts`, `server/src/providers/hook/claude/claude.ts`, `webview-ui/src/hooks/useExtensionMessages.ts`, `webview-ui/src/App.tsx`, `webview-ui/src/office/engine/gameLoop.ts` (llamar `director.update(dt)`), `e2e/tests/claude/hooks-off/conversations.spec.ts`, `CLAUDE.md`, `CONTEXT.md` (término **Conversation**).
+
+- [ ] **Step 1: Server** — `claudeProvider.parseConversations = parseClaudeConversations`; `AgentRuntime` crea `ConversationTracker` y cablea los ganchos de T13.
+- [ ] **Step 2: Webview** — un `ConversationDirector` por oficina activa (`OfficeRegistry.enter` → `director.clear()`); `agentConversation` → `director.enqueue`; `agentClosed` de un hijo con escena `report` en curso: diferir `removeAgent` hasta `!director.isBusy(id)` o `CONVERSATION_MAX_MS`; render de `ConversationBubble`; `onOpenScreen` abre `AgentScreenModal` (entrega 3) si existe, si no, no-op.
+- [ ] **Step 3: E2E** `conversations.spec.ts` (reutiliza el escenario de T8): el lead asigna → burbuja con el inicio del `prompt` sobre el lead junto al puesto del hijo; el hijo escribe `SubagentHandback` → camina al lead, se ve el inicio de su `message`, y desaparece después; standalone sin token → la burbuja muestra `…`.
+- [ ] **Step 4:** `npm run compile && npm test && npm run e2e -- --workers=1 && npm run e2e:inventory`; prueba en navegador con `/equipo` real; GIF `entrega4-conversaciones.gif`.
+- [ ] **Step 5: Commits**: `feat: Agregar contrato de conversaciones entre agentes` (S5), `feat: Detectar conversaciones entre agentes` (T13), `feat: Agregar director de escenas de conversación` (T14), `feat: Animar conversaciones entre personajes` (T15), `feat: Integrar conversaciones entre agentes` (S6).
+- [ ] **Step 6: Revisión final del usuario** — y preguntar si se hace push/PR.

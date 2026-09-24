@@ -35,14 +35,14 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 
 **Árbol de agentes.** Toda sesión de nivel superior (lanzada o adoptada) es raíz de un árbol. Todo agente creado dentro de ella por la herramienta de spawn del proveedor (`Agent`/`Task`), en primer o segundo plano, a cualquier profundidad, es un **Agent derivado** con:
 
-| Campo | Origen | Uso |
-| --- | --- | --- |
-| `parentAgentId` | nodo cuyo id de sidecar = `parentAgentId` del sidecar; si falta, la raíz | Estructura del árbol |
-| `spawnAgentKey` | `<hexId>` del nombre de archivo | Enlazar hijos y enrutar hooks |
-| `role` | `agentType` | Etiqueta visible (solo etiqueta, nunca regla) |
-| `label` | `description` | Etiqueta visible / cabecera del feed |
-| `depth` | `spawnDepth` | Informativo |
-| `agentName` | `name` (si existe) | Sigue marcando Teammate |
+| Campo           | Origen                                                                   | Uso                                           |
+| --------------- | ------------------------------------------------------------------------ | --------------------------------------------- |
+| `parentAgentId` | nodo cuyo id de sidecar = `parentAgentId` del sidecar; si falta, la raíz | Estructura del árbol                          |
+| `spawnAgentKey` | `<hexId>` del nombre de archivo                                          | Enlazar hijos y enrutar hooks                 |
+| `role`          | `agentType`                                                              | Etiqueta visible (solo etiqueta, nunca regla) |
+| `label`         | `description`                                                            | Etiqueta visible / cabecera del feed          |
+| `depth`         | `spawnDepth`                                                             | Informativo                                   |
+| `agentName`     | `name` (si existe)                                                       | Sigue marcando Teammate                       |
 
 **Glosario (`CONTEXT.md`) — cambios.** Se registran en `docs/adr/0002-every-spawn-is-a-derived-agent.md`:
 
@@ -52,8 +52,8 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 
 **Ciclo de vida de un Agent derivado.**
 
-- *Nace*: su sidecar aparece y su `toolUseId` es un spawn vivo de su padre (anti-espurio recursivo).
-- *Muere*: `tool_result` del spawn en el padre (primer plano), `queue-operation` de completado (segundo plano), `SubagentStop` por hook, o cascada cuando muere su padre (subárbol completo, hojas primero).
+- _Nace_: su sidecar aparece y su `toolUseId` es un spawn vivo de su padre (anti-espurio recursivo).
+- _Muere_: `tool_result` del spawn en el padre (primer plano), `queue-operation` de completado (segundo plano), `SubagentStop` por hook, o cascada cuando muere su padre (subárbol completo, hojas primero).
 - **Nunca se persiste ni se adopta como sesión.** Tras recarga, el escaneo lo rematerializa desde los spawns vivos (como hoy los hijos de segundo plano).
 
 **No cambia**: oficina raíz y su layout, asientos persistidos de sesiones de nivel superior, flujo de Agent Teams por config (`~/.claude/teams`).
@@ -71,6 +71,14 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 - **Frontera de proveedor**: `TeamProvider.discoverTeammates` amplía su entrada con `agentKey`, `parentAgentKey`, `depth`, `agentType`, `description`. El runtime nunca lee sidecars.
 - **Se elimina** el shadow store (`server/src/subagentWatch.ts`) y la traducción `subagentTool*` para spawns con sidecar. Consecuencia: burbujas de permiso, espera y medidor de contexto funcionan por nodo sin código extra.
 - **Compatibilidad Task-era**: transcripts antiguos sin sidecar (`agent_progress`) conservan el camino actual de sub-personaje "Subtask" como respaldo. Cuando un nodo se materializa para ese `toolUseId`, el Subtask se limpia con `subagentClear` (mecanismo existente).
+
+### 2.1b Workflows (aprobado 2026-09-23)
+
+La herramienta `Workflow` lanza un script que orquesta agentes. En disco: `<projectDir>/<sessionId>/subagents/workflows/wf_<id>/agent-<key>.jsonl` + sidecar con **solo** `agentType` y `spawnDepth` (sin `toolUseId` ni `description`). Enlace con la sesión: el `tool_result` de la llamada `Workflow` (`toolu_X`) dice `Workflow launched in background … Transcript dir: <ruta wf_…>`; el fin llega como `queue-operation` `<task-notification>` con `<tool-use-id>toolu_X</tool-use-id>` y `<status>completed</status>`.
+
+- **Nodo workflow**: Agent derivado con `nodeKind: 'workflow'`, hijo de quien llamó `Workflow`, sin transcript (no se vigila ningún archivo), `label` = `meta.name` del script (`input.script`), si no el `Summary:` del tool_result; `role` = `'workflow'`. Nace al parsear el tool_result "Workflow launched"; muere (con su subárbol) con la notificación de completado de ese `toolUseId`, o con su padre. Su estado es derivado: `active` si alguno de sus hijos está activo, si no `waiting`.
+- **Agentes del workflow**: hijos del nodo workflow. Compuerta anti-espuria: el nodo workflow de ese `Transcript dir` existe (la llamada sigue viva). `label` = primera línea no vacía del primer mensaje `user` de su transcript (truncada); `role` = `agentType`; `depth` = profundidad del nodo + 1. Si su sidecar trae `parentAgentId`, se cuelga de ese agente como cualquier spawn. Sus hooks llegan con `agent_id` y se enrutan por `(sessionId, agentKey)`. No hay señal de fin individual: al terminar su turno quedan en `waiting` en su puesto hasta que el workflow completa.
+- **Frontera de proveedor**: `TeamProvider.extractWorkflowLaunch?(toolName, toolInput, resultContent) → { runDir, name? } | null` y `TeamProvider.discoverWorkflowAgents?(runDir) → Array<{ jsonlPath, agentKey, parentAgentKey?, agentType, label? }>`.
 
 ### 2.2 Muerte en cascada
 
@@ -110,12 +118,40 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 - **Fuente**: el `.jsonl` del agente. Al suscribirse, lectura de cola (últimas `FEED_SNAPSHOT_MAX_ENTRIES`); después, append desde el flujo de líneas del watcher existente. El parseo de registros a entradas de feed es del proveedor: `HookProvider.parseFeedEntries?(record)` (opcional), para que el runtime no conozca Claude.
 - **Límites** (en `server/src/constants.ts`): `FEED_SNAPSHOT_MAX_ENTRIES = 200`, `FEED_ENTRY_DETAIL_MAX_BYTES = 64 KiB` (se trunca con marca), sin historial persistido.
 
+## 4b. Conversaciones entre agentes (entrega 4)
+
+Aprobada en conversación el 2026-09-23. Cuando un agente asigna, reporta o le manda un mensaje a otro, su personaje camina hasta el otro y se ve el diálogo completo.
+
+**Detección** (servidor; parseo específico en el proveedor):
+
+| Evento    | Emisor → receptor         | Origen                                                                                                                                                                  | Texto                                     |
+| --------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `assign`  | padre → hijo              | `tool_use` de spawn (`Agent`/`Task`) en el transcript del padre; se emite cuando el hijo se materializa (el `prompt` se guarda al parsear el tool_use, por `toolUseId`) | `input.prompt`                            |
+| `report`  | hijo → padre              | `tool_use` `SubagentHandback` en el transcript del hijo; en transcripts sin handback, el `tool_result` del spawn en el padre                                            | `input.message` / contenido del resultado |
+| `message` | cualquiera → destinatario | `tool_use` `SendMessage`; `to`/`recipient` se resuelve contra `spawnAgentKey` o `agentName` dentro del árbol de la misma raíz                                           | `input.message` / `input.content`         |
+
+Datos reales (todas las sesiones del usuario): 370 `Agent`, 215 `SubagentHandback`, 57 `SendMessage`.
+
+**Escena** (webview, máquina de estados pura + render):
+
+1. El emisor se levanta y camina (BFS) a la casilla libre más cercana al puesto del receptor; se orienta hacia él.
+2. Burbuja pixel grande sobre el emisor: el texto completo aparece como máquina de escribir a `CONVERSATION_TYPE_CPS = 80` caracteres/s, con scroll interno. El receptor muestra "escuchando" (`…`) y lo mira.
+3. Clic en la burbuja → salta a texto completo. Tope `CONVERSATION_MAX_MS = 15000`: la escena cierra con "…ver completo", que abre la pantalla ampliada (§4) del emisor.
+4. El emisor vuelve a su silla.
+5. `assign`: el hijo se materializa en su silla mientras le hablan. `report`: tras la escena el hijo desaparece (su despawn espera a que termine la escena, con tope `CONVERSATION_MAX_MS`).
+
+**Reglas**: una conversación a la vez por personaje (cola FIFO por emisor); si emisor y receptor no comparten la oficina visible, el emisor muestra un sobre ✉ en su puesto sin moverse; escenas de oficinas no visibles no se reproducen al entrar (solo estado actual); el paseo es puramente visual (no cambia `status` del agente).
+
+**Privacidad**: el texto es contenido del transcript. `agentConversation` se difunde a todos, pero la capa de envío por conexión **elimina `text`** en conexiones no privilegiadas (misma regla que el feed); esas ven la escena con `…`. En VS Code (embebido, privilegiado) va completo.
+
 ## 5. Cambios de protocolo (`core/asyncapi.yaml` → regenerar `messages.ts`)
 
-- `AgentCreated` y `AgentMeta` (en `existingAgents`): `parentAgentId?`, `role?`, `label?`, `depth?`.
+- (Entrega 4) ServerMessage `agentConversation { conversationId, fromId, toId?, kind: 'assign' | 'report' | 'message', text? }` (`kind` como esquema nombrado `ConversationKind`; `text` solo en conexiones privilegiadas).
+
+- `AgentCreated` y `AgentMeta` (en `existingAgents`): `parentAgentId?`, `role?`, `label?`, `depth?`, y `nodeKind?: 'agent' | 'workflow'` (esquema nombrado `AgentNodeKind`; ausente = `agent`). La UI dibuja el nodo workflow con el prefijo ⚙ en su etiqueta.
 - ClientMessage nuevos: `subscribeAgentFeed { id }`, `unsubscribeAgentFeed { id }`.
 - ServerMessage nuevos (dirigidos, no broadcast): `agentFeedSnapshot { id, entries, truncated }`, `agentFeedAppend { id, entries }`, `agentFeedDenied { id, reason }`.
-- `FeedEntry`: `{ seq, ts, kind: 'text' | 'tool' | 'toolResult', toolId?, toolName?, summary, status?, detail? }` con `detail` = `{ type: 'diff', hunks } | { type: 'output', text, truncated }`.
+- `FeedEntry`: `{ seq, ts, kind: 'text' | 'tool' | 'toolResult', toolId?, toolName?, summary, isError?, detail? }` con `detail` = `{ type: 'diff', lines: [{ op: 'context' | 'add' | 'remove', text }], truncated? } | { type: 'output', text, truncated? }`. El estado ⟳/✓/✗ de una herramienta lo deriva la UI emparejando `tool` con su `toolResult` por `toolId`.
 - Las cuentas de variantes en `CLAUDE.md` se actualizan (27 → 30 server, 18 → 20 client).
 
 ## 6. Pruebas
@@ -134,6 +170,7 @@ Relevado sobre ~329 sidecars reales en `~/.claude/projects/*/<sesión>/subagents
 1. **Árbol en el servidor + defecto** (§1, §2, §5 parcial: campos de agente). Visible ya en la oficina raíz como personajes derivados sentados (interim, antes de las oficinas).
 2. **Oficinas por scope** (§3).
 3. **Pantalla ampliada** (§4, §5 feed).
+4. **Conversaciones entre agentes** (§4b, §5 conversación). Depende de 1 y 2; puede ir en paralelo con 3.
 
 Cada entrega deja `npm run compile`, `npm test` y el e2e en verde, y actualiza `CLAUDE.md`/`CONTEXT.md` en lo que toca.
 

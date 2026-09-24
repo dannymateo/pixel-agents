@@ -334,6 +334,35 @@ export const FEED_MAX_ENTRIES = 200;
 /** Diff line colors in the agent screen. */
 export const FEED_DIFF_ADD_COLOR = '#4ec96b';
 export const FEED_DIFF_REMOVE_COLOR = '#e05a5a';
+/** Lines a text/diff/output block shows before "ver más". */
+export const FEED_COLLAPSED_LINES = 12;
+/** Characters a collapsed block shows (one gigantic line must not dump whole). */
+export const FEED_COLLAPSED_MAX_CHARS = 4000;
+/** Client-side ceilings, whatever the server sent (defense in depth; the server
+ *  already caps a detail at FEED_ENTRY_DETAIL_MAX_BYTES = 64 KiB). Per text field: */
+export const FEED_FIELD_MAX_CHARS = 131_072;
+/** Per entry, summary + detail + every diff line together. */
+export const FEED_ENTRY_MAX_CHARS = 262_144;
+/** Diff lines per entry. */
+export const FEED_DIFF_MAX_LINES = 2000;
+/** ts / toolId / toolName longer than this are dropped as implausible. */
+export const FEED_IDENTIFIER_MAX_CHARS = 256;
+/** Header fields (role, label, parent) are clipped to this. */
+export const FEED_HEADER_FIELD_MAX_CHARS = 80;
+/** Distance from the bottom (px) that still counts as "following" the feed. */
+export const FEED_STICKY_BOTTOM_PX = 24;
+/** While the server answers unknownAgent for an agent the office still shows
+ *  (no readable transcript yet), the screen asks again this often. */
+export const FEED_UNAVAILABLE_RETRY_MS = 3000;
+/** ...at most this many times in a row (≈1 min). */
+export const FEED_UNAVAILABLE_MAX_RETRIES = 20;
+/** Agent screen backdrop z-index (the dialog is +1). Above Modal's 50. */
+export const AGENT_SCREEN_Z_INDEX = 60;
+/** How often the screen header re-reads the AgentDirectory (a mutable class, not React state). */
+export const AGENT_SCREEN_HEADER_REFRESH_MS = 500;
+/** Diff-line backgrounds in the agent screen. */
+export const FEED_DIFF_ADD_BG = 'rgba(78, 201, 107, 0.12)';
+export const FEED_DIFF_REMOVE_BG = 'rgba(224, 90, 90, 0.12)';
 
 // ── Living office ─────────────────────────────────────────────
 /** The door stays open this long after someone crosses it. */

@@ -93,6 +93,12 @@ export interface AgentState {
   label?: string;
   /** Spawn depth, 1 = spawned by the root session. */
   depth?: number;
+  /** Tree node kind; undefined = 'agent'. A 'workflow' node stands for a
+   *  scripted multi-agent run: no transcript of its own (nothing is watched),
+   *  status derived from its children, removed when the run completes. */
+  nodeKind?: 'agent' | 'workflow';
+  /** Workflow nodes only: the run's transcript directory (its agents live there). */
+  workflowRunDir?: string;
 
   // -- Avatar customization --
   /** Preferred character palette (0-5). If undefined, auto-assigned for diversity. */

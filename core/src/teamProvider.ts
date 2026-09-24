@@ -74,6 +74,28 @@ export interface TeamProvider {
     agentType?: string;
   }>;
 
+  /** A tool result that launched a scripted multi-agent run (Claude: the
+   *  `Workflow` tool). `runDir` is where the run's agents write their
+   *  transcripts; `name` is the run's display name. Null when the result is not
+   *  such a launch. `resultContent` is the raw tool_result content. */
+  extractWorkflowLaunch?(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    resultContent: unknown,
+  ): { runDir: string; name?: string } | null;
+
+  /** Agents of one workflow run. Their sidecars carry no spawn tool id, so the
+   *  host gates them on the run being live instead. `parentAgentKey` is set
+   *  when one of the run's agents spawned another; `label` is a short task
+   *  line for display. */
+  discoverWorkflowAgents?(runDir: string): Array<{
+    jsonlPath: string;
+    agentKey: string;
+    parentAgentKey?: string;
+    agentType: string;
+    label?: string;
+  }>;
+
   /** Detect a teammate spawn from a completed spawn-tool result on the LEAD's
    *  transcript. Some CLI versions never tag the lead's own records with team
    *  metadata; the only lead-side evidence of the team is the spawn tool's

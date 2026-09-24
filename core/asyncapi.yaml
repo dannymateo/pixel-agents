@@ -219,6 +219,8 @@ components:
         depth:
           type: integer
           description: Spawn depth (1 = spawned by a top-level session).
+        nodeKind:
+          $ref: '#/components/schemas/AgentNodeKind'
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -1268,6 +1270,17 @@ components:
           type: integer
         teammateName:
           type: string
+        nodeKind:
+          $ref: '#/components/schemas/AgentNodeKind'
+
+    AgentNodeKind:
+      description: >-
+        What a tree node is. `agent` (the default when absent) is an agent with a
+        transcript; `workflow` is a scripted multi-agent run (Claude's Workflow
+        tool) shown as the parent of the agents it launched, with no transcript
+        of its own.
+      type: string
+      enum: [agent, workflow]
 
     SeatAssignment:
       description: |

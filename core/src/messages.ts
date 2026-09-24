@@ -90,7 +90,10 @@ export interface AgentCreated {
   role?: string;
   label?: string;
   depth?: number;
+  nodeKind?: AgentNodeKind;
 }
+
+export type AgentNodeKind = 'agent' | 'workflow';
 
 export interface AgentClosed {
   type: 'agentClosed';
@@ -119,6 +122,7 @@ export interface AgentSeatMeta {
   label?: string;
   depth?: number;
   teammateName?: string;
+  nodeKind?: AgentNodeKind;
 }
 
 export interface AgentStatus {

@@ -124,3 +124,5 @@ export const FEED_SNAPSHOT_MAX_ENTRIES = 200;
 export const FEED_ENTRY_DETAIL_MAX_BYTES = 65536;
 /** Bytes read from the end of a transcript to build a feed snapshot. */
 export const FEED_TAIL_READ_BYTES = 1_048_576;
+/** Workflow node labels and workflow-agent task lines are clipped to this. */
+export const WORKFLOW_LABEL_MAX_CHARS = 80;

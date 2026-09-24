@@ -124,6 +124,7 @@ components:
         - $ref: '#/components/schemas/AgentFeedDenied'
         # Living office (presence lifecycle)
         - $ref: '#/components/schemas/AgentPresenceChanged'
+        - $ref: '#/components/schemas/LivingOfficeSettings'
       discriminator: type
 
     ClientMessage:
@@ -153,6 +154,7 @@ components:
         - $ref: '#/components/schemas/SubscribeAgentFeed'
         - $ref: '#/components/schemas/UnsubscribeAgentFeed'
         - $ref: '#/components/schemas/SetIdleToLoungeMinutes'
+        - $ref: '#/components/schemas/SetLoungeToLeaveMinutes'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -708,6 +710,9 @@ components:
         idleToLoungeMinutes:
           type: integer
           description: Minutes an available agent waits at its desk before it walks to the lounge.
+        loungeToLeaveMinutes:
+          type: integer
+          description: Minutes an agent rests in the lounge, unused, before it says goodbye and leaves.
 
     HooksStatus:
       description: |
@@ -873,6 +878,22 @@ components:
           type: integer
         reason:
           $ref: '#/components/schemas/AgentFeedDeniedReason'
+
+    LivingOfficeSettings:
+      description: >-
+        The effective living-office timings (after the server clamped them).
+        Sent on connect and broadcast whenever either changes, so every client
+        shows what the server actually applies.
+      type: object
+      additionalProperties: false
+      required: [type, idleToLoungeMinutes, loungeToLeaveMinutes]
+      properties:
+        type:
+          const: livingOfficeSettings
+        idleToLoungeMinutes:
+          type: integer
+        loungeToLeaveMinutes:
+          type: integer
 
     AgentPresenceChanged:
       description: >-
@@ -1190,6 +1211,17 @@ components:
         type:
           const: unsubscribeAgentFeed
         id:
+          type: integer
+
+    SetLoungeToLeaveMinutes:
+      description: Minutes an unused agent rests in the lounge before leaving (clamped by the server; privileged).
+      type: object
+      additionalProperties: false
+      required: [type, minutes]
+      properties:
+        type:
+          const: setLoungeToLeaveMinutes
+        minutes:
           type: integer
 
     SetIdleToLoungeMinutes:

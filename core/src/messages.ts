@@ -42,7 +42,8 @@ export type ServerMessage =
   | AgentFeedSnapshot
   | AgentFeedAppend
   | AgentFeedDenied
-  | AgentPresenceChanged;
+  | AgentPresenceChanged
+  | LivingOfficeSettings;
 
 export type ClientMessage =
   | WebviewReady
@@ -69,7 +70,8 @@ export type ClientMessage =
   | RequestDiagnostics
   | SubscribeAgentFeed
   | UnsubscribeAgentFeed
-  | SetIdleToLoungeMinutes;
+  | SetIdleToLoungeMinutes
+  | SetLoungeToLeaveMinutes;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -305,6 +307,7 @@ export interface SettingsLoaded {
   externalAssetDirectories: string[];
   showAreas: boolean;
   idleToLoungeMinutes?: number;
+  loungeToLeaveMinutes?: number;
 }
 
 export interface HooksStatus {
@@ -399,6 +402,12 @@ export interface AgentPresenceChanged {
   type: 'agentPresence';
   id: number;
   presence: AgentPresence;
+}
+
+export interface LivingOfficeSettings {
+  type: 'livingOfficeSettings';
+  idleToLoungeMinutes: number;
+  loungeToLeaveMinutes: number;
 }
 
 export interface WebviewReady {
@@ -528,5 +537,10 @@ export interface UnsubscribeAgentFeed {
 
 export interface SetIdleToLoungeMinutes {
   type: 'setIdleToLoungeMinutes';
+  minutes: number;
+}
+
+export interface SetLoungeToLeaveMinutes {
+  type: 'setLoungeToLeaveMinutes';
   minutes: number;
 }

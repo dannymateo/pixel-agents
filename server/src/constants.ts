@@ -163,3 +163,8 @@ export const LEAVE_STAGGER_MS = 400;
 export const LEAVE_QUEUE_MAX_MS = 10 * LEAVE_STAGGER_MS;
 /** How often presence timers (available → lounge) are evaluated. */
 export const PRESENCE_TICK_MS = 5000;
+/** Default minutes an unused agent rests in the lounge before it leaves. */
+export const LOUNGE_TO_LEAVE_MS_DEFAULT = 60 * 60_000;
+/** Bounds for the user's lounge-to-leave setting, in minutes. */
+export const LOUNGE_TO_LEAVE_MINUTES_MIN = 1;
+export const LOUNGE_TO_LEAVE_MINUTES_MAX = 480;

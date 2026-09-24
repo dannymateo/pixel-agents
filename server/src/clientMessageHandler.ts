@@ -7,14 +7,16 @@ import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import {
+  clampIdleToLoungeMinutes,
   getHooksConsent,
   getHooksEnabled,
   readConfig,
   setHooksEnabled,
   writeConfig,
 } from './configPersistence.js';
-import { HUE_SHIFT_MAX_DEG, PALETTE_COUNT } from './constants.js';
+import { HUE_SHIFT_MAX_DEG, IDLE_TO_LOUNGE_MS_DEFAULT, PALETTE_COUNT } from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
+import { IDLE_TO_LOUNGE_SETTING_KEY } from './presence.js';
 import type { ConsentEffects } from './providers/hook/consentExecutor.js';
 import { applyConsentChoice } from './providers/hook/consentExecutor.js';
 import { hooksConsentRequest } from './providers/hook/consentGate.js';
@@ -272,6 +274,22 @@ export function handleClientMessage(
       break;
     }
 
+    case 'setIdleToLoungeMinutes': {
+      // Changes how every viewer's office behaves (the server decides who
+      // rests, docs/adr/0003): the operator's tokened connection only.
+      if (!ctx.privileged) {
+        console.warn(
+          '[Pixel Agents] Ignoring setIdleToLoungeMinutes from an untokened client (open the tokened URL the CLI printed).',
+        );
+        break;
+      }
+      const minutes = clampIdleToLoungeMinutes(msg.minutes);
+      if (minutes === undefined) break;
+      if (runtime) runtime.setIdleToLoungeMinutes(minutes);
+      else adapter?.setSetting(IDLE_TO_LOUNGE_SETTING_KEY, minutes);
+      break;
+    }
+
     default:
       // focusAgent, exportLayout, importLayout
       // require IDE-specific handling (not yet implemented for standalone)
@@ -424,6 +442,11 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     hooksInfoShown: adapter?.getSetting(KEY_HOOKS_INFO_SHOWN, false) ?? false,
     externalAssetDirectories: cfg.externalAssetDirectories,
     showAreas,
+    idleToLoungeMinutes: runtime
+      ? runtime.idleToLoungeMs() / 60_000
+      : (clampIdleToLoungeMinutes(
+          adapter?.getSetting(IDLE_TO_LOUNGE_SETTING_KEY, IDLE_TO_LOUNGE_MS_DEFAULT / 60_000),
+        ) ?? IDLE_TO_LOUNGE_MS_DEFAULT / 60_000),
   });
 
   // 4a. Actual install state, distinct from the hooksEnabled preference —

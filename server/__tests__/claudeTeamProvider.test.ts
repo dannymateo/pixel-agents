@@ -906,4 +906,71 @@ describe('claudeTeamProvider', () => {
       expect(claudeTeamProvider.extractTeamMetadataFromRecord({ teamName: 42 })).toBeNull();
     });
   });
+
+  // Living office (docs/adr/0003): the signals that end a spawn for good.
+  describe('extractSpawnStop', () => {
+    it('returns the task id a TaskStop call ends', () => {
+      expect(claudeTeamProvider.extractSpawnStop?.('TaskStop', { task_id: 'a1b2c3' })).toBe(
+        'a1b2c3',
+      );
+    });
+
+    it('trims the task id', () => {
+      expect(claudeTeamProvider.extractSpawnStop?.('TaskStop', { task_id: '  w4eub_x-1 ' })).toBe(
+        'w4eub_x-1',
+      );
+    });
+
+    it('ignores every other tool, even with a task_id input', () => {
+      expect(claudeTeamProvider.extractSpawnStop?.('TaskOutput', { task_id: 'a1b2c3' })).toBeNull();
+      expect(claudeTeamProvider.extractSpawnStop?.('Agent', { task_id: 'a1b2c3' })).toBeNull();
+    });
+
+    it.each([
+      ['missing', {}],
+      ['not a string', { task_id: 42 }],
+      ['empty', { task_id: '' }],
+      ['path-like', { task_id: '../etc/passwd' }],
+      ['with spaces inside', { task_id: 'a b' }],
+      ['too long', { task_id: 'a'.repeat(129) }],
+      ['markup', { task_id: '<task-id>x</task-id>' }],
+    ])('rejects a task_id that is %s', (_label, input) => {
+      expect(claudeTeamProvider.extractSpawnStop?.('TaskStop', input)).toBeNull();
+    });
+  });
+
+  describe('completionStatus', () => {
+    const notice = (status: string): string =>
+      `<task-notification>\n<task-id>aaa</task-id>\n<status>${status}</status>\n<summary>Agent "x" ${status}</summary>\n</task-notification>`;
+
+    it.each(['completed', 'failed', 'killed', 'stopped'] as const)('reads <status>%s', (s) => {
+      expect(claudeTeamProvider.completionStatus?.(notice(s))).toBe(s);
+    });
+
+    it('is undefined without a status tag or with an unknown status', () => {
+      expect(
+        claudeTeamProvider.completionStatus?.(
+          '<task-notification> <tool-use-id>toolu_1</tool-use-id> </task-notification>',
+        ),
+      ).toBeUndefined();
+      expect(claudeTeamProvider.completionStatus?.(notice('exploded'))).toBeUndefined();
+      expect(claudeTeamProvider.completionStatus?.(notice('KILLED'))).toBeUndefined();
+    });
+
+    it('reads the notice status, not a status quoted later inside the summary', () => {
+      const content =
+        '<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>\n' +
+        '<summary>it said <status>killed</status></summary>\n</task-notification>';
+      expect(claudeTeamProvider.completionStatus?.(content)).toBe('completed');
+    });
+
+    it('never takes a status quoted by the model-authored body of a notice without one', () => {
+      for (const body of ['summary', 'result', 'output']) {
+        const content =
+          '<task-notification>\n<task-id>aaa</task-id>\n' +
+          `<${body}>the page said <status>killed</status></${body}>\n</task-notification>`;
+        expect(claudeTeamProvider.completionStatus?.(content)).toBeUndefined();
+      }
+    });
+  });
 });

@@ -61,6 +61,7 @@ import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from '.
 import type { SeededSpawnCandidate } from './transcriptParser.js';
 import {
   getHookProvider,
+  isSpawnFinished,
   processTranscriptLine,
   seedSpawnsFromHistory,
 } from './transcriptParser.js';
@@ -322,7 +323,9 @@ function writtenRecently(file: string, now: number): boolean {
  * - a background spawn or workflow launch needs evidence of its own, whatever
  *   the agent's freshness: its own transcript (found through its sidecar) or,
  *   for a workflow, one of its run's transcripts written recently. The newest
- *   MAX_PENDING_WORKFLOW_LAUNCHES launches are checked, one discovery per run.
+ *   MAX_PENDING_WORKFLOW_LAUNCHES launches are checked, one discovery per run;
+ * - a background agent that already FINISHED (available, docs/adr/0003) writes
+ *   nothing more, so a fresh spawner vouches for it too (the restore rule).
  */
 function freshSeededSpawns(
   agent: AgentState,
@@ -337,7 +340,7 @@ function freshSeededSpawns(
   const workflows: SeededSpawnCandidate[] = [];
   for (const c of candidates) {
     if (c.workflowRunDir !== undefined) workflows.push(c);
-    else if (c.background) background.add(c.toolUseId);
+    else if (c.background && !c.finished) background.add(c.toolUseId);
     else foreground.push(c.toolUseId);
   }
   const kept = restorableSpawnToolIds(
@@ -780,6 +783,9 @@ export function setTeamProvider(provider: TeamProvider): void {
 export interface SpawnTreeCallbacks {
   onDerivedCreated(agent: AgentState): void;
   onDerivedRemoved(agent: AgentState): void;
+  /** `rootId`'s tree is at MAX_DERIVED_AGENTS_PER_TREE and `deferred` spawns
+   *  wait for room. */
+  onTreeFull?(rootId: number, deferred: number): void;
 }
 
 let spawnTreeCallbacks: SpawnTreeCallbacks | null = null;
@@ -996,6 +1002,8 @@ export function scanForTeammateFiles(
  *  on current harnesses, closes with its tool_result). A sidecar only ever
  *  materializes when its toolUseId is one of these on ITS OWN parent. */
 function liveSpawnToolIds(agent: AgentState): Set<string> {
+  // A leaving agent spawns nothing more: nothing new may hang below it.
+  if (agent.presence === 'leaving') return new Set();
   const ids = new Set(agent.backgroundAgentToolIds);
   for (const toolId of agent.activeToolIds) {
     const toolName = agent.activeToolNames.get(toolId);
@@ -1236,6 +1244,8 @@ function derivedAgentShell(id: number, root: AgentState, jsonlFile: string): Age
     seenUnknownRecordTypes: new Set(),
     contextTokens: 0,
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+    // Living office (docs/adr/0003): a derived agent is born at work.
+    presence: 'working',
   };
 }
 
@@ -1255,10 +1265,26 @@ function scanSpawnTreeOnce(
 
   // The tree as it stands: the root plus every derived agent that climbs to it.
   const nodes = new Map<number, SpawnTreeNode>();
+  const members = treeMembers(rootId, agents);
+  // Spawn calls that already have their agent: a finished (available) spawn
+  // stays live for the whole session, and must not keep the disk scan busy.
+  const materialized = new Set<string>();
+  for (const a of members) {
+    if (a.parentAgentId !== undefined && a.spawnToolUseId !== undefined) {
+      materialized.add(spawnCallSlot(a.parentAgentId, a.spawnToolUseId));
+    }
+  }
   let anyLive = false;
-  for (const a of treeMembers(rootId, agents)) {
+  for (const a of members) {
     const live = liveSpawnToolIds(a);
-    if (live.size > 0) anyLive = true;
+    if (!anyLive) {
+      for (const t of live) {
+        if (!materialized.has(spawnCallSlot(a.id, t))) {
+          anyLive = true;
+          break;
+        }
+      }
+    }
     nodes.set(a.id, {
       id: a.id,
       spawnAgentKey: a.spawnAgentKey,
@@ -1267,7 +1293,8 @@ function scanSpawnTreeOnce(
       spawnToolUseId: a.spawnToolUseId,
     });
   }
-  // No node is running a spawn: nothing can materialize, skip the disk scan.
+  // No node runs a spawn still waiting for its agent: nothing can
+  // materialize, skip the disk scan.
   if (!anyLive) return;
 
   const entries: SpawnEntry[] = [];
@@ -1295,6 +1322,7 @@ function scanSpawnTreeOnce(
   const created: AgentState[] = [];
   let derivedCount = nodes.size - 1;
   let capped = false;
+  let deferredByCount = 0;
   for (const { entry, parentId } of plan.create) {
     const parent = agents.get(parentId);
     if (!parent) continue;
@@ -1303,6 +1331,7 @@ function scanSpawnTreeOnce(
     const depth = (parent.parentAgentId === undefined ? 0 : (parent.depth ?? 0)) + 1;
     if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE || depth > MAX_SPAWN_DEPTH) {
       capped = true;
+      if (depth <= MAX_SPAWN_DEPTH) deferredByCount++;
       continue;
     }
     derivedCount++;
@@ -1320,6 +1349,12 @@ function scanSpawnTreeOnce(
       // team-config polling stays away.
       ...(entry.name ? { agentName: entry.name, leadAgentId: parentId } : {}),
     };
+    // Its task finished before it materialized (a completed notice already
+    // read, or seeded from history): it is born available, not working.
+    if (isSpawnFinished(parent, entry.toolUseId)) {
+      agent.presence = 'available';
+      agent.availableSince = Date.now();
+    }
     if (parent.palette !== undefined) {
       agent.palette = parent.palette;
       agent.hueShift = siblingHueShift(parent, parentId, agents);
@@ -1358,6 +1393,9 @@ function scanSpawnTreeOnce(
   }
 
   if (capped) warnSpawnCap(root, rootId);
+  // Working spawns wait while finished (resting) agents fill the tree: the
+  // host lets some of those go to make room (docs/adr/0003).
+  if (deferredByCount > 0) spawnTreeCallbacks?.onTreeFull?.(rootId, deferredByCount);
 
   watchCreated(created, agents, fileWatchers, pollingTimers, waitingTimers, permissionTimers);
 }
@@ -1596,7 +1634,10 @@ function scanWorkflowRunsOnce(
   materializeWorkflowNodes(root, agents, nextAgentIdRef);
 
   const members = treeMembers(rootId, agents);
-  const workflowNodes = members.filter((a) => a.nodeKind === 'workflow' && a.workflowRunDir);
+  // A leaving node's run is over: none of its agents may appear any more.
+  const workflowNodes = members.filter(
+    (a) => a.nodeKind === 'workflow' && a.workflowRunDir && a.presence !== 'leaving',
+  );
   if (workflowNodes.length === 0) return;
 
   let derivedCount = members.length - 1;
@@ -1643,6 +1684,7 @@ function scanWorkflowRunsOnce(
           deferred.push(entry);
           continue;
         }
+        if (parent.presence === 'leaving') continue;
         if (isTaken(entry.jsonlPath) || !isRunTranscript(entry.jsonlPath, runDir)) continue;
         const depth = (parent.depth ?? 0) + 1;
         if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE || depth > MAX_SPAWN_DEPTH) {

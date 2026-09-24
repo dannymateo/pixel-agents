@@ -159,5 +159,7 @@ export const IDLE_TO_LOUNGE_MINUTES_MAX = 240;
 export const LEAVE_ANIMATION_MAX_MS = 6000;
 /** Gap between consecutive departures when a whole subtree leaves. */
 export const LEAVE_STAGGER_MS = 400;
+/** Longest a departure waits its turn; a bigger burst leaves together at the end. */
+export const LEAVE_QUEUE_MAX_MS = 10 * LEAVE_STAGGER_MS;
 /** How often presence timers (available → lounge) are evaluated. */
 export const PRESENCE_TICK_MS = 5000;

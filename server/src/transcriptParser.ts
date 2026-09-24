@@ -57,15 +57,45 @@ export function setBackgroundAgentDetectedCallback(cb: (agentId: number) => void
   backgroundAgentDetectedCallback = cb;
 }
 
-/** Called when a queue-operation record marks a background spawn finished, or
- *  a foreground spawn is dropped at turn end without a tool_result. The host
- *  removes the spawn's derived agent and its subtree. */
+/** Called when a spawn is over for good (docs/adr/0003): a background spawn's
+ *  notice says `killed`/`stopped`, its parent stops it (`TaskStop`), a workflow
+ *  run completes, or a foreground spawn is dropped at turn end without a
+ *  tool_result. The host walks the spawn's derived agent and its subtree out. */
 let backgroundAgentCompletedCallback: ((agentId: number, toolUseId: string) => void) | null = null;
 
 export function setBackgroundAgentCompletedCallback(
   cb: (agentId: number, toolUseId: string) => void,
 ): void {
   backgroundAgentCompletedCallback = cb;
+}
+
+/** Called when a background agent spawn finished its task but is still alive
+ *  (notice `completed`/`failed`, or one without a status): its parent may
+ *  resume it, so the host only marks its derived agent available. */
+let spawnFinishedCallback: ((agentId: number, toolUseId: string) => void) | null = null;
+
+export function setSpawnFinishedCallback(
+  cb: ((agentId: number, toolUseId: string) => void) | null,
+): void {
+  spawnFinishedCallback = cb;
+}
+
+/** Called when a new prompt reaches an agent (a turn starts), with when the
+ *  record was written when it says so. For a derived agent whose task
+ *  finished, a prompt written after that is its parent resuming it. */
+let agentPromptedCallback: ((agentId: number, at: number | undefined) => void) | null = null;
+
+export function setAgentPromptedCallback(
+  cb: ((agentId: number, at: number | undefined) => void) | null,
+): void {
+  agentPromptedCallback = cb;
+}
+
+/** A record's own `timestamp` in ms, when it carries a valid one. */
+function recordTime(record: Record<string, unknown>): number | undefined {
+  if (typeof record.timestamp !== 'string') return undefined;
+  const at = Date.parse(record.timestamp);
+  return Number.isFinite(at) ? at : undefined;
 }
 
 /** Notify the host that a spawn tool finished, so it can remove the spawn's
@@ -238,6 +268,20 @@ export function processTranscriptLine(
             if (!exemptTools().has(toolName)) {
               hasNonExemptTool = true;
             }
+            // The agent stopping one of its own background tasks for good
+            // (Claude: TaskStop). Resolved now (the task id names its spawn),
+            // acted on when its result lands without error: a denied or
+            // failed stop leaves the task running (docs/adr/0003).
+            const stoppedTaskId = hookProvider?.team?.extractSpawnStop?.(
+              toolName,
+              block.input ?? {},
+            );
+            if (stoppedTaskId) {
+              const stopped = spawnOfTaskId(agent, agentId, stoppedTaskId, agents);
+              if (stopped !== undefined && agent.backgroundAgentToolIds.has(stopped)) {
+                notePendingStop(agent, block.id, stopped);
+              }
+            }
             // Detect tmux vs inline team mode from the team provider's spawn predicate.
             if (
               agent.teamName &&
@@ -342,12 +386,27 @@ export function processTranscriptLine(
     } else if (record.type === 'user') {
       const content = record.message?.content ?? record.content;
       if (Array.isArray(content)) {
-        const blocks = content as Array<{ type: string; tool_use_id?: string; content?: unknown }>;
+        const blocks = content as Array<{
+          type: string;
+          tool_use_id?: string;
+          content?: unknown;
+          is_error?: unknown;
+        }>;
         const hasToolResult = blocks.some((b) => b.type === 'tool_result');
         if (hasToolResult) {
           for (const block of blocks) {
             if (block.type === 'tool_result' && block.tool_use_id) {
               const completedToolId = block.tool_use_id;
+              // A stop the CLI carried out ends its spawn for good.
+              const stopped = takePendingStop(agent, completedToolId);
+              if (
+                stopped !== undefined &&
+                block.is_error !== true &&
+                agent.backgroundAgentToolIds.has(stopped)
+              ) {
+                console.log(`[Pixel Agents] Agent ${agentId} stopped background spawn: ${stopped}`);
+                endBackgroundSpawn(agent, agentId, stopped, agents);
+              }
               const completedToolName = agent.activeToolNames.get(completedToolId);
               const openTool = openToolInputs.get(agent)?.get(completedToolId);
               openToolInputs.get(agent)?.delete(completedToolId);
@@ -368,7 +427,9 @@ export function processTranscriptLine(
                   : null;
               if (workflowLaunch && !agent.backgroundAgentToolIds.has(completedToolId)) {
                 agent.backgroundAgentToolIds.add(completedToolId);
-                if (!workflowLaunchedCallback?.(agentId, completedToolId, workflowLaunch)) {
+                if (workflowLaunchedCallback?.(agentId, completedToolId, workflowLaunch)) {
+                  noteWorkflowSpawn(agent, completedToolId);
+                } else {
                   agent.backgroundAgentToolIds.delete(completedToolId);
                 }
               }
@@ -525,12 +586,14 @@ export function processTranscriptLine(
           }
         } else {
           // New user text prompt — new turn starting
+          agentPromptedCallback?.(agentId, recordTime(record));
           cancelWaitingTimer(agentId, waitingTimers);
           clearAgentActivity(agent, agentId, agents, permissionTimers);
           agent.hadToolsInTurn = false;
         }
       } else if (typeof content === 'string' && content.trim()) {
         // New user text prompt — new turn starting
+        agentPromptedCallback?.(agentId, recordTime(record));
         cancelWaitingTimer(agentId, waitingTimers);
         clearAgentActivity(agent, agentId, agents, permissionTimers);
         agent.hadToolsInTurn = false;
@@ -546,34 +609,33 @@ export function processTranscriptLine(
           typeof content === 'string' && content.startsWith('<task-notification>')
             ? completedSpawnToolId(agent, agentId, content, agents)
             : undefined;
-        if (completedToolId !== undefined) {
-          if (agent.backgroundAgentToolIds.has(completedToolId)) {
+        if (completedToolId !== undefined && agent.backgroundAgentToolIds.has(completedToolId)) {
+          // Finishing is not leaving (docs/adr/0003): a completed (or failed)
+          // agent stays, available — its parent may resume it and the same
+          // task notifies again. Only killed/stopped end it, and a workflow's
+          // notice ends its whole run.
+          const status = hookProvider?.team?.completionStatus?.(content);
+          if (
+            status === 'killed' ||
+            status === 'stopped' ||
+            isWorkflowSpawn(agent, agentId, completedToolId, agents)
+          ) {
             console.log(
-              `[Pixel Agents] Agent ${agentId} background agent done: ${completedToolId}`,
+              `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
             );
-            agent.backgroundAgentToolIds.delete(completedToolId);
-            agent.activeSubagentToolIds.delete(completedToolId);
-            agent.activeSubagentToolNames.delete(completedToolId);
-            agents.broadcast({
-              type: 'subagentClear',
-              id: agentId,
-              parentToolId: completedToolId,
-            });
-            agent.activeToolIds.delete(completedToolId);
-            agent.activeToolStatuses.delete(completedToolId);
-            agent.activeToolNames.delete(completedToolId);
-            // Remove the spawn's derived agent and its subtree.
-            backgroundAgentCompletedCallback?.(agentId, completedToolId);
-            if (!agent.hookDelivered) {
-              const toolId = completedToolId;
-              setTimeout(() => {
-                agents.broadcast({
-                  type: 'agentToolDone',
-                  id: agentId,
-                  toolId,
-                });
-              }, TOOL_DONE_DELAY_MS);
-            }
+            endBackgroundSpawn(agent, agentId, completedToolId, agents);
+          } else {
+            console.log(
+              `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
+            );
+            // The parent no longer runs it as a tool; the spawn itself stays
+            // live (backgroundAgentToolIds) so it can be resumed and the tree
+            // gate keeps its agent.
+            const wasRunning = agent.activeToolIds.has(completedToolId);
+            finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
+            markSpawnFinished(agent, completedToolId);
+            spawnFinishedCallback?.(agentId, completedToolId);
+            releaseOldestFinished(agent, agentId, agents);
           }
         }
       }
@@ -926,18 +988,195 @@ function completedSpawnByTaskId(
   agents: AgentStateStore,
 ): string | undefined {
   const taskId = TASK_ID_NOTICE_PATTERN.exec(notice)?.[1];
-  if (taskId === undefined) return undefined;
+  return taskId === undefined ? undefined : spawnOfTaskId(agent, agentId, taskId, agents);
+}
+
+/** The spawn tool call of `agent` a task id names — the one its launch result
+ *  recorded, else its own derived child keyed by it. Only this agent's own
+ *  spawns can match: another agent's (or another root's) task id is inert.
+ *  The record is kept: a finished agent notifies again when it is resumed. */
+function spawnOfTaskId(
+  agent: AgentState,
+  agentId: number,
+  taskId: string,
+  agents: AgentStateStore,
+): string | undefined {
   const recorded = spawnTaskIds.get(agent)?.get(taskId);
-  if (recorded !== undefined) {
-    spawnTaskIds.get(agent)?.delete(taskId);
-    return recorded;
-  }
+  if (recorded !== undefined) return recorded;
   for (const child of agents.values()) {
     if (child.parentAgentId === agentId && child.spawnAgentKey === taskId) {
       return child.spawnToolUseId;
     }
   }
   return undefined;
+}
+
+// ── Spawn lifecycle marks (docs/adr/0003) ────────────────────
+
+/** Per agent: its background spawns that finished (completed/failed) and are
+ *  still alive — a derived agent materialized for one later is born available.
+ *  Bounded like the task ids (oldest dropped). */
+const finishedSpawns = new WeakMap<AgentState, Set<string>>();
+/** Per agent: its live spawns that are workflow launches (their notice ends
+ *  the whole run, whatever its status). */
+const workflowSpawns = new WeakMap<AgentState, Set<string>>();
+
+function addBounded(
+  map: WeakMap<AgentState, Set<string>>,
+  agent: AgentState,
+  id: string,
+  max = TASK_IDS_PER_AGENT_MAX,
+): void {
+  let ids = map.get(agent);
+  if (!ids) {
+    ids = new Set();
+    map.set(agent, ids);
+  }
+  ids.delete(id);
+  ids.add(id);
+  if (ids.size > max) {
+    const oldest = ids.values().next().value;
+    if (oldest !== undefined) ids.delete(oldest);
+  }
+}
+
+/** Per agent: its stop calls awaiting their result → the spawn each stops.
+ *  Bounded like the task ids (oldest dropped). */
+const pendingStops = new WeakMap<AgentState, Map<string, string>>();
+
+function notePendingStop(agent: AgentState, stopToolId: string, spawnToolUseId: string): void {
+  let stops = pendingStops.get(agent);
+  if (!stops) {
+    stops = new Map();
+    pendingStops.set(agent, stops);
+  }
+  stops.delete(stopToolId);
+  stops.set(stopToolId, spawnToolUseId);
+  if (stops.size > TASK_IDS_PER_AGENT_MAX) {
+    const oldest = stops.keys().next().value;
+    if (oldest !== undefined) stops.delete(oldest);
+  }
+}
+
+function takePendingStop(agent: AgentState, stopToolId: string): string | undefined {
+  const stops = pendingStops.get(agent);
+  const spawn = stops?.get(stopToolId);
+  if (spawn !== undefined) stops!.delete(stopToolId);
+  return spawn;
+}
+
+/** Past this many finished-but-live spawns per agent the oldest one is let go
+ *  (its agent walks out): what an agent keeps alive stays bounded. */
+const FINISHED_SPAWNS_PER_AGENT_MAX = TASK_IDS_PER_AGENT_MAX;
+
+function markSpawnFinished(agent: AgentState, toolUseId: string): void {
+  addBounded(finishedSpawns, agent, toolUseId, FINISHED_SPAWNS_PER_AGENT_MAX + 1);
+}
+
+/** End a background spawn of `parentId` for good (its agent walks out):
+ *  a finished one making room in a full tree, or one the user closed. Returns false when it is not a
+ *  live background spawn of that agent. */
+export function releaseBackgroundSpawn(
+  parentId: number,
+  toolUseId: string,
+  agents: AgentStateStore,
+): boolean {
+  const parent = agents.get(parentId);
+  if (!parent || !parent.backgroundAgentToolIds.has(toolUseId)) return false;
+  endBackgroundSpawn(parent, parentId, toolUseId, agents);
+  return true;
+}
+
+/** `parent`'s spawn `toolUseId` was resumed: its agent is working again. */
+export function clearSpawnFinished(parent: AgentState, toolUseId: string): void {
+  finishedSpawns.get(parent)?.delete(toolUseId);
+}
+
+/** Let go of the oldest finished spawns past FINISHED_SPAWNS_PER_AGENT_MAX. */
+function releaseOldestFinished(agent: AgentState, agentId: number, agents: AgentStateStore): void {
+  const finished = finishedSpawns.get(agent);
+  while (finished && finished.size > FINISHED_SPAWNS_PER_AGENT_MAX) {
+    const oldest = finished.values().next().value;
+    if (oldest === undefined) break;
+    finished.delete(oldest);
+    if (agent.backgroundAgentToolIds.has(oldest)) {
+      console.log(
+        `[Pixel Agents] Agent ${agentId} keeps too many finished spawns, letting go of ${oldest}`,
+      );
+      endBackgroundSpawn(agent, agentId, oldest, agents);
+    }
+  }
+}
+
+function noteWorkflowSpawn(agent: AgentState, toolUseId: string): void {
+  addBounded(workflowSpawns, agent, toolUseId);
+}
+
+/** Whether `parent`'s spawn `toolUseId` already finished its task (its agent
+ *  is available, not working). Read when that agent materializes. */
+export function isSpawnFinished(parent: AgentState, toolUseId: string): boolean {
+  return finishedSpawns.get(parent)?.has(toolUseId) === true;
+}
+
+function isWorkflowSpawn(
+  agent: AgentState,
+  agentId: number,
+  toolUseId: string,
+  agents: AgentStateStore,
+): boolean {
+  if (workflowSpawns.get(agent)?.has(toolUseId)) return true;
+  for (const child of agents.values()) {
+    if (
+      child.parentAgentId === agentId &&
+      child.spawnToolUseId === toolUseId &&
+      child.nodeKind === 'workflow'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The parent stops running `toolUseId` as a tool: forget its tool state and
+ *  clear its Subtask sprite. `announce` also tells the clients the tool is done. */
+function finishSpawnTool(
+  agent: AgentState,
+  agentId: number,
+  toolUseId: string,
+  agents: AgentStateStore,
+  announce: boolean,
+): void {
+  agent.activeSubagentToolIds.delete(toolUseId);
+  agent.activeSubagentToolNames.delete(toolUseId);
+  agent.activeToolIds.delete(toolUseId);
+  agent.activeToolStatuses.delete(toolUseId);
+  agent.activeToolNames.delete(toolUseId);
+  if (!announce) return;
+  agents.broadcast({ type: 'subagentClear', id: agentId, parentToolId: toolUseId });
+  if (!agent.hookDelivered) {
+    setTimeout(() => {
+      agents.broadcast({ type: 'agentToolDone', id: agentId, toolId: toolUseId });
+    }, TOOL_DONE_DELAY_MS);
+  }
+}
+
+/** A background spawn of `agent` is over for good: no longer live, and its
+ *  derived agent (with its subtree) walks out. */
+function endBackgroundSpawn(
+  agent: AgentState,
+  agentId: number,
+  toolUseId: string,
+  agents: AgentStateStore,
+): void {
+  agent.backgroundAgentToolIds.delete(toolUseId);
+  finishedSpawns.get(agent)?.delete(toolUseId);
+  workflowSpawns.get(agent)?.delete(toolUseId);
+  const taskIds = spawnTaskIds.get(agent);
+  if (taskIds) {
+    for (const [taskId, id] of taskIds) if (id === toolUseId) taskIds.delete(taskId);
+  }
+  finishSpawnTool(agent, agentId, toolUseId, agents, true);
+  backgroundAgentCompletedCallback?.(agentId, toolUseId);
 }
 
 // ── Seeding live spawns from history (plan T18) ──────────────
@@ -958,10 +1197,19 @@ export interface SeededSpawnCandidate {
   workflowRunDir?: string;
   /** A background launch: kept only on evidence of its own. */
   background?: boolean;
+  /** A background agent that finished its task (completed/failed) and stays
+   *  available: it writes nothing more, so its spawner's freshness vouches too. */
+  finished?: boolean;
 }
 
 type HistorySpawn =
-  | { kind: 'foreground' | 'background'; name: string; status: string; named: boolean }
+  | {
+      kind: 'foreground' | 'background';
+      name: string;
+      status: string;
+      named: boolean;
+      finished?: boolean;
+    }
   | { kind: 'workflow'; launch: { runDir: string; name?: string } };
 
 /** A line holding none of these cannot change which spawns are live, so it is
@@ -1016,8 +1264,13 @@ export function seedSpawnsFromHistory(
     : undefined;
   const persisted = agent.backgroundAgentToolIds;
   const endedPersisted = new Set<string>();
+  /** Stop calls still awaiting their result → the spawn each stops. */
+  const seedStops = new Map<string, string>();
+  /** Persisted live spawns launched before the window that finished in it. */
+  const finishedPersisted = new Set<string>();
   const ended = (id: string): void => {
     live.delete(id);
+    finishedPersisted.delete(id);
     if (persisted.has(id)) endedPersisted.add(id);
   };
   const dropForeground = (): void => {
@@ -1058,6 +1311,22 @@ export function seedSpawnsFromHistory(
           typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
             ? (block.input as Record<string, unknown>)
             : {};
+        // A stop of one of its own background tasks ends that spawn for good
+        // once its result lands without error (a denied stop changes nothing).
+        const stoppedTaskId = team?.extractSpawnStop?.(name, input);
+        if (stoppedTaskId) {
+          const stopped = spawnOfTaskId(agent, agentId, stoppedTaskId, agents);
+          if (stopped !== undefined && (live.get(stopped)?.kind ?? 'background') !== 'foreground') {
+            if (live.has(stopped) || persisted.has(stopped)) {
+              seedStops.delete(id);
+              seedStops.set(id, stopped);
+              if (seedStops.size > SEED_OPEN_INPUTS_MAX) {
+                const oldest = seedStops.keys().next().value;
+                if (oldest !== undefined) seedStops.delete(oldest);
+              }
+            }
+          }
+        }
         if (isSubagentTool(name)) {
           live.delete(id);
           addLive(id, {
@@ -1086,6 +1355,12 @@ export function seedSpawnsFromHistory(
           if (!block || block.type !== 'tool_result') continue;
           const id = block.tool_use_id;
           if (typeof id !== 'string' || !id) continue;
+          const stopped = seedStops.get(id);
+          if (stopped !== undefined) {
+            seedStops.delete(id);
+            if (block.is_error !== true) ended(stopped);
+            continue;
+          }
           const spawn = live.get(id);
           const open = inputs?.get(id);
           inputs?.delete(id);
@@ -1127,18 +1402,37 @@ export function seedSpawnsFromHistory(
         const s = live.get(t);
         return s ? s.kind !== 'foreground' : persisted.has(t);
       });
-      if (id !== undefined && live.get(id)?.kind !== 'foreground') ended(id);
+      if (id === undefined) continue;
+      const spawn = live.get(id);
+      if (spawn?.kind === 'foreground') continue;
+      // Finishing is not leaving (docs/adr/0003): a completed or failed agent
+      // stays alive, available; killed/stopped end it, and so does any notice
+      // of a workflow run.
+      const status = team?.completionStatus?.(notice);
+      if (status === 'killed' || status === 'stopped' || spawn?.kind === 'workflow') {
+        ended(id);
+      } else if (spawn?.kind === 'background') {
+        spawn.finished = true;
+      } else if (!spawn && persisted.has(id)) {
+        // Launched before the window: still live, and finished.
+        finishedPersisted.add(id);
+      }
     }
   }
 
   for (const id of endedPersisted) agent.backgroundAgentToolIds.delete(id);
+  for (const id of finishedPersisted) markSpawnFinished(agent, id);
 
   const candidates: SeededSpawnCandidate[] = [];
   for (const [toolUseId, s] of live) {
     candidates.push(
       s.kind === 'workflow'
         ? { toolUseId, workflowRunDir: s.launch.runDir }
-        : { toolUseId, background: s.kind === 'background' || undefined },
+        : {
+            toolUseId,
+            background: s.kind === 'background' || undefined,
+            finished: s.finished || undefined,
+          },
     );
   }
   const kept = candidates.length > 0 ? keep(candidates) : new Set<string>();
@@ -1162,6 +1456,14 @@ export function seedSpawnsFromHistory(
         had: agent.backgroundAgentToolIds.has(toolUseId),
       });
       agent.backgroundAgentToolIds.add(toolUseId);
+      noteWorkflowSpawn(agent, toolUseId);
+    } else if (s.finished) {
+      // Live but no longer run as a tool: exactly as a finished notice read
+      // live leaves it. Its agent is born available.
+      agent.backgroundAgentToolIds.add(toolUseId);
+      markSpawnFinished(agent, toolUseId);
+      if (s.named) (agent.teammateSpawnToolIds ??= new Set()).add(toolUseId);
+      seededAgentSpawn = true;
     } else {
       agent.activeToolIds.add(toolUseId);
       agent.activeToolStatuses.set(toolUseId, s.status);
@@ -1173,6 +1475,11 @@ export function seedSpawnsFromHistory(
       seededAgentSpawn = true;
     }
     seeded++;
+  }
+
+  // A stop whose result is still to come is settled by the live parser.
+  for (const [stopId, spawnId] of seedStops) {
+    if (agent.backgroundAgentToolIds.has(spawnId)) notePendingStop(agent, stopId, spawnId);
   }
 
   // Hand the still-pending inputs to the live parser (newest few).

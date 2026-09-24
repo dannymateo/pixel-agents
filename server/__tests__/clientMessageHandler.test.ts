@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import {
   type AssetCache,
@@ -10,7 +11,13 @@ import {
   handleClientMessage,
 } from '../src/clientMessageHandler.js';
 import { getHooksEnabled, readConfig, setHooksEnabled } from '../src/configPersistence.js';
+import {
+  IDLE_TO_LOUNGE_MINUTES_MAX,
+  IDLE_TO_LOUNGE_MINUTES_MIN,
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+} from '../src/constants.js';
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
+import { claudeProvider } from '../src/providers/hook/claude/claude.js';
 import { CLAUDE_HOOK_EVENTS } from '../src/providers/hook/claude/constants.js';
 import type { AgentState } from '../src/types.js';
 
@@ -155,6 +162,76 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
 
       handleClientMessage({ type: 'setShowAreas', enabled: false }, (m) => sent.push(m), ctx);
       expect(adapter.getSetting('pixel-agents.showAreas', true)).toBe(false);
+    });
+  });
+
+  // ── setIdleToLoungeMinutes (living office, docs/adr/0003) ────
+
+  describe('setIdleToLoungeMinutes', () => {
+    const minutesOf = (): unknown => readConfig().standalone.idleToLoungeMinutes;
+    const settingsLoaded = (): Record<string, unknown> => {
+      sent = [];
+      handleClientMessage({ type: 'webviewReady' }, (m) => sent.push(m), ctx);
+      return sent.find((m) => m.type === 'settingsLoaded')!;
+    };
+
+    it('defaults to 30 minutes in settingsLoaded', () => {
+      expect(settingsLoaded().idleToLoungeMinutes).toBe(IDLE_TO_LOUNGE_MS_DEFAULT / 60_000);
+    });
+
+    it('persists per namespace, clamped to [MIN, MAX] and rounded', () => {
+      ctx.privileged = true;
+      const set = (minutes: unknown): void =>
+        handleClientMessage({ type: 'setIdleToLoungeMinutes', minutes }, (m) => sent.push(m), ctx);
+      set(5);
+      expect(minutesOf()).toBe(5);
+      expect(settingsLoaded().idleToLoungeMinutes).toBe(5);
+      set(100_000);
+      expect(minutesOf()).toBe(IDLE_TO_LOUNGE_MINUTES_MAX);
+      set(-3);
+      expect(minutesOf()).toBe(IDLE_TO_LOUNGE_MINUTES_MIN);
+      set(2.6);
+      expect(minutesOf()).toBe(3);
+      // Junk changes nothing.
+      for (const junk of ['10', null, undefined, Number.NaN, Infinity, { n: 1 }]) set(junk);
+      expect(minutesOf()).toBe(3);
+      // Only this namespace.
+      expect(readConfig().vscode.idleToLoungeMinutes).toBe(IDLE_TO_LOUNGE_MS_DEFAULT / 60_000);
+    });
+
+    it('updates the running runtime too', () => {
+      const runtime = new AgentRuntime(store, claudeProvider);
+      try {
+        ctx = { store, cache: null, runtime, privileged: true };
+        handleClientMessage(
+          { type: 'setIdleToLoungeMinutes', minutes: 7 },
+          (m) => sent.push(m),
+          ctx,
+        );
+        expect(runtime.idleToLoungeMs()).toBe(7 * 60_000);
+        expect(minutesOf()).toBe(7);
+      } finally {
+        runtime.dispose();
+      }
+    });
+
+    it('is ignored from a connection without the server token', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      ctx.privileged = false;
+      handleClientMessage({ type: 'setIdleToLoungeMinutes', minutes: 1 }, (m) => sent.push(m), ctx);
+      warn.mockRestore();
+      expect(minutesOf()).toBe(IDLE_TO_LOUNGE_MS_DEFAULT / 60_000);
+      expect(fs.existsSync(path.join(tempHome, '.pixel-agents', 'config.json'))).toBe(false);
+    });
+
+    it('a hand-edited config out of range is clamped on read', () => {
+      fs.mkdirSync(path.join(tempHome, '.pixel-agents'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempHome, '.pixel-agents', 'config.json'),
+        JSON.stringify({ standalone: { idleToLoungeMinutes: 99_999 }, vscode: {} }),
+      );
+      expect(minutesOf()).toBe(IDLE_TO_LOUNGE_MINUTES_MAX);
+      expect(settingsLoaded().idleToLoungeMinutes).toBe(IDLE_TO_LOUNGE_MINUTES_MAX);
     });
   });
 
@@ -372,6 +449,7 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
           role: 'desarrollador',
           label: 'Implementa el login',
           depth: 1,
+          presence: 'lounge',
         }),
       );
       const metaOf = (privileged: boolean): Record<string, Record<string, unknown>> => {
@@ -390,8 +468,10 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
         role: 'desarrollador',
         depth: 1,
         label: 'Implementa el login',
+        presence: 'lounge',
       });
       expect(privileged['1'].parentAgentId).toBeUndefined();
+      expect(privileged['1'].presence).toBeUndefined();
 
       const unprivileged = metaOf(false);
       expect(unprivileged['2']).toMatchObject({

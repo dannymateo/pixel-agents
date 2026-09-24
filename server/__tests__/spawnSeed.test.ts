@@ -78,11 +78,11 @@ function asyncLaunchResult(toolId: string, key: string): string {
 }
 
 /** Current CLI completion notice: only the task id, no tool-use id. */
-function taskIdCompletion(taskId: string): string {
+function taskIdCompletion(taskId: string, status = 'completed'): string {
   return JSON.stringify({
     type: 'queue-operation',
     operation: 'enqueue',
-    content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n<summary>Agent "x" completed</summary>\n</task-notification>`,
+    content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>${status}</status>\n<summary>Agent "x" ${status}</summary>\n</task-notification>`,
   });
 }
 
@@ -287,10 +287,10 @@ describe('spawn seeding from history (T18)', () => {
     const root = await adoptRoot();
     expect(root.activeToolIds.has('toolu_F')).toBe(true);
     expect(maybeByKey('aaa1')).toMatchObject({ parentAgentId: 1, role: 'desarrollador', depth: 1 });
-    // Its tool_result arriving live closes it like any spawn.
+    // Its tool_result arriving live closes it like any spawn: it walks out.
     fs.appendFileSync(rootJsonl, toolResult('toolu_F') + '\n');
     readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
-    expect(maybeByKey('aaa1')).toBeUndefined();
+    expect(maybeByKey('aaa1')?.presence).toBe('leaving');
   });
 
   it('(1) the restore path seeds too (standalone restoreExternalAgents)', async () => {
@@ -347,7 +347,7 @@ describe('spawn seeding from history (T18)', () => {
 
   // ── (3) background spawns ──
 
-  it('(3) an async spawn completed by <task-id> in the history does not appear', async () => {
+  it('(3) an async spawn completed by <task-id> in the history comes back available (docs/adr/0003)', async () => {
     writeRootHistory([
       spawnToolUse('toolu_B1'),
       asyncLaunchResult('toolu_B1', 'bbb1'),
@@ -356,19 +356,99 @@ describe('spawn seeding from history (T18)', () => {
     writeSidecar('bbb1', { agentType: 'Explore', toolUseId: 'toolu_B1', spawnDepth: 1 });
     const root = await adoptRoot();
     tick();
+    // Finishing is not leaving: still live on the root, resumable, at its desk.
+    expect(root.backgroundAgentToolIds.has('toolu_B1')).toBe(true);
+    expect(root.activeToolIds.has('toolu_B1')).toBe(false);
+    expect(derived()).toHaveLength(1);
+    expect(maybeByKey('bbb1')).toMatchObject({ parentAgentId: 1, presence: 'available' });
+  });
+
+  it('(3) an async spawn killed or stopped in the history does not appear', async () => {
+    writeRootHistory([
+      spawnToolUse('toolu_K1'),
+      asyncLaunchResult('toolu_K1', 'kil1'),
+      spawnToolUse('toolu_K2'),
+      asyncLaunchResult('toolu_K2', 'kil2'),
+      taskIdCompletion('kil1', 'killed'),
+      taskIdCompletion('kil2', 'completed'),
+      taskIdCompletion('kil2', 'stopped'),
+    ]);
+    writeSidecar('kil1', { agentType: 'Explore', toolUseId: 'toolu_K1', spawnDepth: 1 });
+    writeSidecar('kil2', { agentType: 'Explore', toolUseId: 'toolu_K2', spawnDepth: 1 });
+    const root = await adoptRoot();
+    tick();
     expect(derived()).toEqual([]);
     expect(root.backgroundAgentToolIds.size).toBe(0);
   });
 
-  it('(3) an async spawn without completion appears, and a live <task-id> notice ends it', async () => {
+  it('(3) a spawn its parent stopped with TaskStop in the history does not appear', async () => {
+    writeRootHistory([
+      spawnToolUse('toolu_T1'),
+      asyncLaunchResult('toolu_T1', 'tst1'),
+      taskIdCompletion('tst1'),
+      toolUse('toolu_stop', 'TaskStop', { task_id: 'tst1' }),
+      toolResult('toolu_stop', 'stopped'),
+      spawnToolUse('toolu_T2'),
+      asyncLaunchResult('toolu_T2', 'tst2'),
+      toolUse('toolu_stop2', 'TaskStop', { task_id: 'someone-else' }),
+      toolResult('toolu_stop2', 'stopped'),
+      // A denied stop leaves its task alive.
+      toolUse('toolu_stop3', 'TaskStop', { task_id: 'tst2' }),
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_stop3', is_error: true, content: 'denied' },
+          ],
+        },
+      }),
+    ]);
+    writeSidecar('tst1', { agentType: 'Explore', toolUseId: 'toolu_T1', spawnDepth: 1 });
+    writeSidecar('tst2', { agentType: 'Explore', toolUseId: 'toolu_T2', spawnDepth: 1 }, [
+      userPrompt('trabaja'),
+    ]);
+    const root = await adoptRoot();
+    tick();
+    expect(maybeByKey('tst1')).toBeUndefined();
+    expect(maybeByKey('tst2')).toBeDefined();
+    expect([...root.backgroundAgentToolIds]).toEqual(['toolu_T2']);
+  });
+
+  it('(3) a stop whose result lands after adoption is settled live', async () => {
+    writeRootHistory([
+      spawnToolUse('toolu_P1'),
+      asyncLaunchResult('toolu_P1', 'pst1'),
+      toolUse('toolu_stopP', 'TaskStop', { task_id: 'pst1' }),
+    ]);
+    writeSidecar('pst1', { agentType: 'Explore', toolUseId: 'toolu_P1', spawnDepth: 1 }, [
+      userPrompt('trabaja'),
+    ]);
+    const root = await adoptRoot();
+    tick();
+    expect(maybeByKey('pst1')?.presence).toBe('working');
+    fs.appendFileSync(rootJsonl, toolResult('toolu_stopP', 'stopped') + '\n');
+    readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
+    expect(maybeByKey('pst1')?.presence).toBe('leaving');
+    expect(root.backgroundAgentToolIds.size).toBe(0);
+  });
+
+  it('(3) an async spawn without completion appears; live, completed keeps it and killed ends it', async () => {
     writeRootHistory([spawnToolUse('toolu_B2'), asyncLaunchResult('toolu_B2', 'bbb2'), turnEnd()]);
     writeSidecar('bbb2', { agentType: 'Explore', toolUseId: 'toolu_B2', spawnDepth: 1 });
     const root = await adoptRoot();
     expect(root.backgroundAgentToolIds.has('toolu_B2')).toBe(true);
-    expect(maybeByKey('bbb2')).toMatchObject({ parentAgentId: 1, spawnToolUseId: 'toolu_B2' });
+    expect(maybeByKey('bbb2')).toMatchObject({
+      parentAgentId: 1,
+      spawnToolUseId: 'toolu_B2',
+      presence: 'working',
+    });
     fs.appendFileSync(rootJsonl, taskIdCompletion('bbb2') + '\n');
     readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
-    expect(maybeByKey('bbb2')).toBeUndefined();
+    expect(maybeByKey('bbb2')?.presence).toBe('available');
+    expect(root.backgroundAgentToolIds.size).toBe(1);
+    fs.appendFileSync(rootJsonl, taskIdCompletion('bbb2', 'killed') + '\n');
+    readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
+    expect(maybeByKey('bbb2')?.presence).toBe('leaving');
     expect(root.backgroundAgentToolIds.size).toBe(0);
   });
 
@@ -527,12 +607,46 @@ describe('spawn seeding from history (T18)', () => {
     expect(maybeByKey('iii1')).toBeDefined();
   });
 
-  it('a restored persisted spawn completed while the server was down is dropped', async () => {
+  it('a restored persisted spawn completed while the server was down comes back available', async () => {
     writeRootHistory([
       spawnToolUse('toolu_P'),
       asyncLaunchResult('toolu_P', 'jjj1'),
       turnEnd(),
       taskIdCompletion('jjj1'),
+    ]);
+    writeSidecar('jjj1', { agentType: 'Explore', toolUseId: 'toolu_P', spawnDepth: 1 });
+    const restoredStore = new AgentStateStore();
+    restoredStore.setAdapter(
+      fakeAdapter(() => [
+        {
+          id: 5,
+          sessionId: SESSION,
+          terminalName: '',
+          isExternal: true,
+          jsonlFile: rootJsonl,
+          projectDir: tmpRoot,
+          backgroundAgentToolIds: ['toolu_P'],
+        },
+      ]),
+    );
+    const restoredRuntime = new AgentRuntime(restoredStore, claudeProvider);
+    try {
+      restoredRuntime.restoreExternalAgents();
+      await flush();
+      expect([...restoredStore.get(5)!.backgroundAgentToolIds]).toEqual(['toolu_P']);
+      const kids = [...restoredStore.values()].filter((a) => a.parentAgentId !== undefined);
+      expect(kids.map((k) => k.presence)).toEqual(['available']);
+    } finally {
+      restoredRuntime.dispose();
+    }
+  });
+
+  it('a restored persisted spawn killed while the server was down is dropped', async () => {
+    writeRootHistory([
+      spawnToolUse('toolu_P'),
+      asyncLaunchResult('toolu_P', 'jjj1'),
+      turnEnd(),
+      taskIdCompletion('jjj1', 'killed'),
     ]);
     writeSidecar('jjj1', { agentType: 'Explore', toolUseId: 'toolu_P', spawnDepth: 1 });
     const restoredStore = new AgentStateStore();
@@ -663,9 +777,10 @@ describe('spawn seeding from history (T18)', () => {
     writeSidecar('sss1', { agentType: 'Explore', toolUseId: 'toolu_S1', spawnDepth: 1 });
     writeSidecar('sss2', { agentType: 'Explore', toolUseId: 'toolu_S2', spawnDepth: 1 });
     const root = await adoptRoot();
-    expect(maybeByKey('sss1')).toBeUndefined();
-    expect(maybeByKey('sss2')).toBeDefined();
-    // Live, the same notice shape ends the running one.
+    // Completed (after its SendMessage) = available, not gone (docs/adr/0003).
+    expect(maybeByKey('sss1')?.presence).toBe('available');
+    expect(maybeByKey('sss2')?.presence).toBe('working');
+    // Live, the same notice shape finishes the running one.
     fs.appendFileSync(
       rootJsonl,
       toolUse('toolu_SM2', 'SendMessage', { to: 'sss2' }) +
@@ -676,8 +791,8 @@ describe('spawn seeding from history (T18)', () => {
         '\n',
     );
     readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
-    expect(maybeByKey('sss2')).toBeUndefined();
-    expect(root.backgroundAgentToolIds.size).toBe(0);
+    expect(maybeByKey('sss2')?.presence).toBe('available');
+    expect(root.backgroundAgentToolIds.size).toBe(2);
   });
 
   it('a record half-written at adoption is read whole by the live stream', async () => {
@@ -689,7 +804,7 @@ describe('spawn seeding from history (T18)', () => {
     expect(maybeByKey('mmm1')).toBeDefined();
     fs.appendFileSync(rootJsonl, result.slice(half) + '\n');
     readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
-    expect(maybeByKey('mmm1')).toBeUndefined();
+    expect(maybeByKey('mmm1')?.presence).toBe('leaving');
   });
 
   it('a named spawn is seeded as a teammate spawn and its seat is a Teammate', async () => {

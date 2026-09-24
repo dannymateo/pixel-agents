@@ -242,6 +242,12 @@ describe('workflow nodes (spec §2.1b)', () => {
     return [...store.values()].filter((a) => a.parentAgentId !== undefined);
   }
 
+  /** Derived agents still staying (a leaving one walks out and is removed
+   *  after LEAVE_ANIMATION_MAX_MS — docs/adr/0003, pinned in presence.test.ts). */
+  function staying(): AgentState[] {
+    return derived().filter((a) => a.presence !== 'leaving');
+  }
+
   // ── (a) ───────────────────────────────────────────────────────
 
   it('(a) a "Workflow launched" result creates a workflow node under the caller, with no watcher', () => {
@@ -395,7 +401,9 @@ describe('workflow nodes (spec §2.1b)', () => {
     launch();
     leadLine(workflowCompleted(WF_TOOL));
     tick();
-    expect(derived()).toEqual([]);
+    // Only the node itself, walking out: none of its run's agents appears.
+    expect(staying()).toEqual([]);
+    expect(derived().map((a) => a.nodeKind)).toEqual(['workflow']);
   });
 
   it('(c) run directories on disk without a live launch create nothing', () => {
@@ -446,7 +454,7 @@ describe('workflow nodes (spec §2.1b)', () => {
 
   // ── (d) ───────────────────────────────────────────────────────
 
-  it('(d) the completion queue-operation removes the node and its whole subtree', () => {
+  it('(d) the completion queue-operation walks the node and its whole subtree out', () => {
     launch();
     writeRunAgent('parentkey1', 'orquestador');
     writeRunAgent('childkey1', 'qa', { parentAgentId: 'parentkey1' });
@@ -454,15 +462,16 @@ describe('workflow nodes (spec §2.1b)', () => {
     expect(derived()).toHaveLength(3);
     const ids = derived().map((a) => a.id);
     leadLine(workflowCompleted(WF_TOOL, 'failed'));
-    expect(derived()).toEqual([]);
+    expect(staying()).toEqual([]);
     for (const id of ids) expect(runtime.pollingTimers.has(id)).toBe(false);
     expect(lead.backgroundAgentToolIds.has(WF_TOOL)).toBe(false);
     // Nothing comes back on the next tick.
     tick();
-    expect(derived()).toEqual([]);
+    expect(staying()).toEqual([]);
+    expect(derived()).toHaveLength(3);
   });
 
-  it('(d) a completion notice carrying only <task-id> (current CLI) removes the node', () => {
+  it('(d) a completion notice carrying only <task-id> (current CLI) ends the node', () => {
     // The launch result says "Task ID: w4eubwvnv"; current notices omit
     // <tool-use-id> and name only that task id.
     launch();
@@ -477,15 +486,19 @@ describe('workflow nodes (spec §2.1b)', () => {
           '<task-notification>\n<task-id>w4eubwvnv</task-id>\n<status>completed</status>\n<summary>Dynamic workflow "x" completed</summary>\n</task-notification>',
       }),
     );
-    expect(derived()).toEqual([]);
+    expect(staying()).toEqual([]);
     expect(lead.backgroundAgentToolIds.has(WF_TOOL)).toBe(false);
   });
 
   it('(d) the node dies with its parent', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     launch();
     writeRunAgent('a0939d8552f9f51b5', 'backend-java');
     tick();
     runtime.removeAgent(1);
+    expect(store.get(1)).toBeUndefined();
+    expect(staying()).toEqual([]);
+    vi.advanceTimersByTime(60_000);
     expect(store.size).toBe(0);
   });
 
@@ -498,9 +511,9 @@ describe('workflow nodes (spec §2.1b)', () => {
       session_id: LEAD_SESSION,
       reason: 'exit',
     });
-    expect(derived()).toEqual([]);
+    expect(staying()).toEqual([]);
     tick();
-    expect(derived()).toEqual([]);
+    expect(staying()).toEqual([]);
   });
 
   // ── (e) ───────────────────────────────────────────────────────

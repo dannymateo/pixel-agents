@@ -102,11 +102,12 @@ function asyncLaunchResultRecord(): string {
   });
 }
 
-function queueOpCompletionRecord(): string {
+function queueOpCompletionRecord(status?: string): string {
+  const statusTag = status ? `<status>${status}</status> ` : '';
   return JSON.stringify({
     type: 'queue-operation',
     operation: 'enqueue',
-    content: `<task-notification> <task-id>a4cb86c99458dbe55</task-id> <tool-use-id>${SPAWN_TOOL_ID}</tool-use-id> <output>done</output>`,
+    content: `<task-notification> <task-id>a4cb86c99458dbe55</task-id> <tool-use-id>${SPAWN_TOOL_ID}</tool-use-id> ${statusTag}<output>done</output>`,
   });
 }
 
@@ -346,18 +347,34 @@ describe('background spawns (teams OFF) become derived agents, classified by sid
     );
   });
 
-  it('removes the derived agent when the completion queue-operation lands', () => {
+  it('keeps the derived agent, available, when the completion queue-operation lands', () => {
+    seedSidecar();
+    spawnAndLaunch();
+    const child = children()[0];
+
+    line(queueOpCompletionRecord('completed'));
+
+    // Finishing is not leaving (docs/adr/0003): its parent may resume it.
+    expect(children()).toEqual([child]);
+    expect(child.presence).toBe('available');
+    expect(runtime.pollingTimers.has(child.id)).toBe(true);
+    expect(lead.backgroundAgentToolIds.has(SPAWN_TOOL_ID)).toBe(true);
+  });
+
+  it('walks the derived agent out when the notice says killed, then removes it', () => {
     const jsonlPath = seedSidecar();
     spawnAndLaunch();
     const child = children()[0];
     expect(runtime.pollingTimers.has(child.id)).toBe(true);
 
-    line(queueOpCompletionRecord());
+    line(queueOpCompletionRecord('killed'));
 
-    expect(children()).toEqual([]);
-    expect([...agents.values()].some((a) => a.jsonlFile === jsonlPath)).toBe(false);
+    expect(child.presence).toBe('leaving');
     expect(runtime.pollingTimers.has(child.id)).toBe(false);
     expect(lead.backgroundAgentToolIds.size).toBe(0);
+    runtime.removeAgent(child.id); // its walk out is over (presence.test.ts pins the timing)
+    expect(children()).toEqual([]);
+    expect([...agents.values()].some((a) => a.jsonlFile === jsonlPath)).toBe(false);
   });
 
   it('does not create a second derived agent on a re-scan', () => {
@@ -396,14 +413,14 @@ describe('background spawns (teams OFF) become derived agents, classified by sid
     expect(lead.backgroundAgentToolIds.size).toBe(0);
   });
 
-  it('removes the foreground derived agent when the spawn tool completes', () => {
+  it('walks the foreground derived agent out when the spawn tool completes', () => {
     seedSidecar();
     line(agentSpawnRecord());
     expect(children()).toHaveLength(1);
 
     line(foregroundResultRecord());
 
-    expect(children()).toEqual([]);
+    expect(children().map((c) => c.presence)).toEqual(['leaving']);
     expect(
       messages.some((m) => m.type === 'subagentClear' && m.parentToolId === SPAWN_TOOL_ID),
     ).toBe(true);
@@ -489,15 +506,30 @@ describe('background spawns (teams OFF) become derived agents, classified by sid
     );
   });
 
-  it('removes the teammate when the completion queue-operation lands and drops the badge', () => {
+  it('keeps a completed teammate (available) and its lead badge', () => {
     seedSidecar({ name: 'ghost-writer' });
     spawnAndLaunch();
-    expect([...agents.values()].some((a) => a.leadAgentId === 1)).toBe(true);
 
     line(queueOpCompletionRecord());
 
-    expect([...agents.values()].some((a) => a.leadAgentId === 1)).toBe(false);
+    const teammate = [...agents.values()].find((a) => a.leadAgentId === 1);
+    expect(teammate?.presence).toBe('available');
+    expect(lead.isTeamLead).toBe(true);
+  });
+
+  it('walks a killed teammate out and drops the badge once it is gone', () => {
+    seedSidecar({ name: 'ghost-writer' });
+    spawnAndLaunch();
+    const teammate = [...agents.values()].find((a) => a.leadAgentId === 1)!;
+
+    line(queueOpCompletionRecord('killed'));
+
+    expect(teammate.presence).toBe('leaving');
     expect(lead.backgroundAgentToolIds.size).toBe(0);
+    // Still walking out: still its lead.
+    expect(lead.isTeamLead).toBe(true);
+    runtime.removeAgent(teammate.id); // its walk out is over
+    expect([...agents.values()].some((a) => a.leadAgentId === 1)).toBe(false);
     expect(lead.isTeamLead).toBeUndefined();
   });
 

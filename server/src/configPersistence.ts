@@ -2,7 +2,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { CONFIG_FILE_NAME, LAYOUT_FILE_DIR } from './constants.js';
+import {
+  CONFIG_FILE_NAME,
+  IDLE_TO_LOUNGE_MINUTES_MAX,
+  IDLE_TO_LOUNGE_MINUTES_MIN,
+  IDLE_TO_LOUNGE_MS_DEFAULT,
+  LAYOUT_FILE_DIR,
+} from './constants.js';
 
 export interface AdapterSettings {
   soundEnabled: boolean;
@@ -13,6 +19,8 @@ export interface AdapterSettings {
   hooksInfoShown: boolean;
   showAreas: boolean;
   areaMappings: Record<string, string[]>;
+  /** Minutes an available agent waits at its desk before the lounge (docs/adr/0003). */
+  idleToLoungeMinutes: number;
 }
 
 /** All keys in AdapterSettings. Used by adapters to map `pixel-agents.foo` → `foo`.
@@ -28,6 +36,7 @@ export const ADAPTER_SETTING_KEYS = [
   'hooksInfoShown',
   'showAreas',
   'areaMappings',
+  'idleToLoungeMinutes',
 ] as const;
 
 export type AdapterSettingKey = (typeof ADAPTER_SETTING_KEYS)[number];
@@ -64,7 +73,19 @@ const DEFAULT_ADAPTER_SETTINGS: AdapterSettings = {
   hooksInfoShown: false,
   showAreas: false,
   areaMappings: {},
+  idleToLoungeMinutes: IDLE_TO_LOUNGE_MS_DEFAULT / 60_000,
 };
+
+/** The idle-to-lounge setting as the server accepts it: a finite number,
+ *  rounded and clamped to [IDLE_TO_LOUNGE_MINUTES_MIN, IDLE_TO_LOUNGE_MINUTES_MAX].
+ *  Undefined for anything that is not a number (the caller keeps what it had). */
+export function clampIdleToLoungeMinutes(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(
+    IDLE_TO_LOUNGE_MINUTES_MAX,
+    Math.max(IDLE_TO_LOUNGE_MINUTES_MIN, Math.round(value)),
+  );
+}
 
 function getConfigFilePath(): string {
   return path.join(os.homedir(), LAYOUT_FILE_DIR, CONFIG_FILE_NAME);
@@ -145,6 +166,9 @@ function parseAdapterSettings(raw: unknown): AdapterSettings {
     showAreas:
       typeof obj.showAreas === 'boolean' ? obj.showAreas : DEFAULT_ADAPTER_SETTINGS.showAreas,
     areaMappings: parseAreaMappings(obj.areaMappings),
+    idleToLoungeMinutes:
+      clampIdleToLoungeMinutes(obj.idleToLoungeMinutes) ??
+      DEFAULT_ADAPTER_SETTINGS.idleToLoungeMinutes,
   };
 }
 

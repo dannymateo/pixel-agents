@@ -298,6 +298,17 @@ const SESSION_FILE_PATTERN =
 
 const TEAMMATE_SPAWN_TOOLS: ReadonlySet<string> = new Set(['Agent']);
 
+/** The tool a parent ends one of its background tasks with. */
+const SPAWN_STOP_TOOL = 'TaskStop';
+/** Task ids as the CLI mints them (agent keys, workflow task ids). */
+const TASK_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/** The first `<status>` of a task notice (it precedes the model-authored summary). */
+const NOTICE_STATUS_PATTERN = /<status>([a-z]{1,16})<\/status>/;
+/** Where a notice's model-authored body starts (its header ends). */
+const NOTICE_BODY_TAGS = ['<summary>', '<result>', '<output>'];
+const NOTICE_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'killed', 'stopped']);
+type NoticeStatus = 'completed' | 'failed' | 'killed' | 'stopped';
+
 export const claudeTeamProvider: TeamProvider = {
   providerId: 'claude',
 
@@ -322,6 +333,28 @@ export const claudeTeamProvider: TeamProvider = {
     const match = AGENT_ID_RESULT_PATTERN.exec(toolResultText(resultContent));
     if (!match) return null;
     return { teammateName: match[1], teamName: match[2] };
+  },
+
+  extractSpawnStop(toolName, toolInput) {
+    if (toolName !== SPAWN_STOP_TOOL) return null;
+    const raw = toolInput.task_id;
+    if (typeof raw !== 'string') return null;
+    const taskId = raw.trim();
+    return TASK_ID_PATTERN.test(taskId) ? taskId : null;
+  },
+
+  completionStatus(noticeContent) {
+    // Only the notice's own header counts: the summary and result that follow
+    // are model-authored and may quote a status tag of their own.
+    let headEnd = noticeContent.length;
+    for (const tag of NOTICE_BODY_TAGS) {
+      const at = noticeContent.indexOf(tag);
+      if (at !== -1 && at < headEnd) headEnd = at;
+    }
+    const status = NOTICE_STATUS_PATTERN.exec(noticeContent.slice(0, headEnd))?.[1];
+    return status !== undefined && NOTICE_STATUSES.has(status)
+      ? (status as NoticeStatus)
+      : undefined;
   },
 
   extractWorkflowLaunch: extractClaudeWorkflowLaunch,

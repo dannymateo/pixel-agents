@@ -83,11 +83,12 @@ function asyncLaunchResult(toolId: string): string {
   return toolResult(toolId, 'Async agent launched successfully.\nagentId: aaa (internal)');
 }
 
-function queueOpCompletion(toolId: string): string {
+function queueOpCompletion(toolId: string, status?: string): string {
+  const statusTag = status ? `<status>${status}</status> ` : '';
   return JSON.stringify({
     type: 'queue-operation',
     operation: 'enqueue',
-    content: `<task-notification> <tool-use-id>${toolId}</tool-use-id> <output>done</output>`,
+    content: `<task-notification> <tool-use-id>${toolId}</tool-use-id> ${statusTag}<output>done</output>`,
   });
 }
 
@@ -160,6 +161,20 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
 
   function maybeByKey(key: string): AgentState | undefined {
     return [...store.values()].find((a) => a.spawnAgentKey === key);
+  }
+
+  /** Out of the office, or walking out (docs/adr/0003: a leaving agent is
+   *  removed once its walk is over — presence.test.ts pins that timing). */
+  function gone(key: string): boolean {
+    const a = maybeByKey(key);
+    return a === undefined || a.presence === 'leaving';
+  }
+
+  /** Derived agents still staying in the office (not leaving). */
+  function staying(): AgentState[] {
+    return [...store.values()].filter(
+      (a) => a.parentAgentId !== undefined && a.presence !== 'leaving',
+    );
   }
 
   function scan(rootId = 1): void {
@@ -362,7 +377,7 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
       session_id: LEAD_SESSION,
       reason: 'exit',
     });
-    expect([...store.values()].filter((a) => a.parentAgentId !== undefined)).toEqual([]);
+    expect(staying()).toEqual([]);
   });
 
   it('C2: /clear moves the root to a new session and ends the old spawn tree', () => {
@@ -386,7 +401,7 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
       cwd: tmpRoot,
     });
     expect(store.get(1)?.sessionId).toBe('new-session');
-    expect([...store.values()].filter((a) => a.parentAgentId !== undefined)).toEqual([]);
+    expect(staying()).toEqual([]);
     // The old session's key routing is gone too: a late keyed hook reaches no one.
     messages.length = 0;
     runtime.handleHookEvent('claude', {
@@ -468,12 +483,12 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     expect(messages.some((m) => m.id === 1)).toBe(false);
   });
 
-  it('D: a foreground spawn closing removes its node and subtree', () => {
+  it('D: a foreground spawn closing walks its node and subtree out', () => {
     buildDepthThree();
     leadLine(toolResult('toolu_L'));
-    expect(maybeByKey('aaa')).toBeUndefined();
-    expect(maybeByKey('bbb')).toBeUndefined();
-    expect(maybeByKey('ccc')).toBeUndefined();
+    expect(gone('aaa')).toBe(true);
+    expect(gone('bbb')).toBe(true);
+    expect(gone('ccc')).toBe(true);
     expect(store.get(1)).toBe(lead);
   });
 
@@ -482,12 +497,12 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     const aaaId = byKey('aaa').id;
     appendLine('aaa', toolResult('toolu_A'));
     readNewLines(aaaId, store, runtime.waitingTimers, runtime.permissionTimers);
-    expect(maybeByKey('bbb')).toBeUndefined();
-    expect(maybeByKey('ccc')).toBeUndefined();
-    expect(maybeByKey('aaa')).toBeDefined();
+    expect(gone('bbb')).toBe(true);
+    expect(gone('ccc')).toBe(true);
+    expect(gone('aaa')).toBe(false);
   });
 
-  it('D3: a background spawn survives its async-launch result and dies on completion', () => {
+  it('D3: a background spawn survives its async-launch result and its completion (docs/adr/0003)', () => {
     leadLine(spawnToolUse('toolu_L'));
     writeSidecar('aaa', { agentType: 'Explore', toolUseId: 'toolu_L', spawnDepth: 1 });
     scan();
@@ -498,11 +513,17 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
       (m) => m.type === 'agentToolStart' && m.toolId === 'toolu_L' && m.runInBackground === true,
     );
     expect(ghost).toEqual([]);
+    // Finishing is not leaving: available, resumable, still live.
     leadLine(queueOpCompletion('toolu_L'));
-    expect(maybeByKey('aaa')).toBeUndefined();
+    expect(maybeByKey('aaa')?.presence).toBe('available');
+    expect(lead.backgroundAgentToolIds.has('toolu_L')).toBe(true);
+    // Killed: it walks out and the spawn is over.
+    leadLine(queueOpCompletion('toolu_L', 'killed'));
+    expect(gone('aaa')).toBe(true);
+    expect(lead.backgroundAgentToolIds.has('toolu_L')).toBe(false);
   });
 
-  it('D4: a completion notice keyed by <task-id> (no <tool-use-id>) removes its node', () => {
+  it('D4: a notice keyed by <task-id> (no <tool-use-id>) reaches its node', () => {
     // Current Claude Code writes the notice without <tool-use-id>; <task-id> is
     // the spawned agent's key (the <key> of agent-<key>.jsonl). Seen live on
     // 2026-09-24: derived agents never left the office.
@@ -519,7 +540,16 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
           '<task-notification>\n<task-id>aaa</task-id>\n<output-file>x.output</output-file>\n<status>completed</status>\n<summary>Agent "x" finished</summary>\n</task-notification>',
       }),
     );
-    expect(maybeByKey('aaa')).toBeUndefined();
+    expect(maybeByKey('aaa')?.presence).toBe('available');
+    leadLine(
+      JSON.stringify({
+        type: 'queue-operation',
+        operation: 'enqueue',
+        content:
+          '<task-notification>\n<task-id>aaa</task-id>\n<status>killed</status>\n</task-notification>',
+      }),
+    );
+    expect(gone('aaa')).toBe(true);
   });
 
   it('D5: a <task-id> notice only completes a spawn of the agent that received it', () => {
@@ -669,7 +699,9 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     runtime.scanTree(1);
 
     expect(store.get(1)).toBe(lead);
-    expect([...store.values()].filter((a) => a.parentAgentId !== undefined)).toEqual([]);
+    expect(staying()).toEqual([]);
+    // Nothing new was materialized while they walk out.
+    expect([...store.values()].filter((a) => a.parentAgentId !== undefined)).toHaveLength(2);
     expect(lead.backgroundAgentToolIds.size).toBe(0);
   });
 
@@ -681,7 +713,7 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     // The prompt alone does not kill the running spawn.
     expect(maybeByKey('aaa')).toBeDefined();
     leadLine(toolResult('toolu_L'));
-    expect(maybeByKey('aaa')).toBeUndefined();
+    expect(gone('aaa')).toBe(true);
   });
 
   it('a new sibling never repeats the hue of a live one', () => {
@@ -691,7 +723,8 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     writeSidecar('s2', { agentType: 'Explore', toolUseId: 'toolu_2', spawnDepth: 1 });
     scan();
     leadLine(toolResult(byKey('s1').spawnToolUseId!));
-    expect(maybeByKey('s1')).toBeUndefined();
+    expect(gone('s1')).toBe(true);
+    runtime.removeAgent(byKey('s1').id); // its walk out is over
     leadLine(spawnToolUse('toolu_3'));
     writeSidecar('s3', { agentType: 'Explore', toolUseId: 'toolu_3', spawnDepth: 1 });
     scan();
@@ -709,6 +742,11 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
       tick();
       expect(maybeByKey('aaa')).toBeDefined();
       leadLine(toolResult('toolu_L'));
+      tick();
+      tick();
+      expect([...store.values()].filter((a) => a.id !== 1)).toEqual([maybeByKey('aaa')]);
+      expect(gone('aaa')).toBe(true);
+      runtime.removeAgent(byKey('aaa').id); // its walk out is over
       tick();
       tick();
       expect([...store.values()].filter((a) => a.id !== 1)).toEqual([]);
@@ -878,6 +916,7 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
       const before = new Set(derived.map((a) => a.spawnAgentKey));
       const victim = derived[0];
       leadLine(toolResult(victim.spawnToolUseId!));
+      runtime.removeAgent(victim.id); // its walk out is over (docs/adr/0003)
       scan();
       const after = [...store.values()].filter((a) => a.parentAgentId !== undefined);
       expect(after).toHaveLength(MAX_DERIVED_AGENTS_PER_TREE);

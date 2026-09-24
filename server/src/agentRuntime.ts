@@ -14,7 +14,8 @@ import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
-import { DEFAULT_MAX_CONTEXT_TOKENS } from './constants.js';
+import { clampIdleToLoungeMinutes } from './configPersistence.js';
+import { DEFAULT_MAX_CONTEXT_TOKENS, IDLE_TO_LOUNGE_MS_DEFAULT } from './constants.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -42,13 +43,18 @@ import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
+import { IDLE_TO_LOUNGE_SETTING_KEY, PresenceTracker } from './presence.js';
 import { SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
+  clearSpawnFinished,
+  releaseBackgroundSpawn,
+  setAgentPromptedCallback,
   setBackgroundAgentCompletedCallback,
   setBackgroundAgentDetectedCallback,
   setHookProvider,
+  setSpawnFinishedCallback,
   setSpawnToolClosedCallback,
   setTeamSwitchCallback,
   setWorkflowLaunchedCallback,
@@ -108,6 +114,10 @@ export class AgentRuntime {
     this.refreshWorkflowStatus(child.nodeId);
   };
   private disposed = false;
+  /** Living-office presence of every derived agent (docs/adr/0003). */
+  readonly presence: PresenceTracker;
+  /** The user's idle-to-lounge setting, read from the adapter on first use. */
+  private idleToLoungeMinutes: number | undefined;
 
   constructor(
     private readonly store: AgentStateStore,
@@ -120,22 +130,42 @@ export class AgentRuntime {
     if (provider.team) {
       setTeamProvider(provider.team);
     }
+    this.presence = new PresenceTracker(store, {
+      idleToLoungeMs: () => this.idleToLoungeMs(),
+      // A departed agent goes for good once its walk out is over.
+      remove: (id) => this.removeAgent(id),
+    });
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
     // New-style teammates run their own sessions; registering routes their hook
     // events (PreToolUse, Stop, SessionEnd) directly to the teammate agent.
     setTeammateRegisterCallback((sessionId, agentId) => this.registerAgent(sessionId, agentId));
     // Spawn tree (docs/adr/0002): any node opening a spawn tool (or a spawn
-    // turning out to be a background launch) scans its whole tree; the spawn
-    // ending — foreground tool_result, background completion queue-operation,
-    // or a foreground spawn dropped at turn end — removes its derived subtree.
+    // turning out to be a background launch) scans its whole tree. Living
+    // office (docs/adr/0003): a background agent that finishes stays,
+    // available; the spawn ending for good — killed/stopped notice, TaskStop,
+    // workflow completion, foreground tool_result, or a foreground spawn
+    // dropped at turn end — walks its derived subtree out.
     setBackgroundAgentDetectedCallback((agentId) => this.scanTree(rootOf(agentId, this.store)));
     setBackgroundAgentCompletedCallback((agentId, toolUseId) =>
-      this.removeSpawnChild(agentId, toolUseId, 'background-complete'),
+      this.leaveSpawnChild(agentId, toolUseId, 'spawn-ended'),
     );
     setSpawnToolClosedCallback((agentId, toolUseId) =>
-      this.removeSpawnChild(agentId, toolUseId, 'spawn-closed'),
+      this.leaveSpawnChild(agentId, toolUseId, 'spawn-closed'),
     );
+    setSpawnFinishedCallback((agentId, toolUseId) => {
+      const child = this.spawnChild(agentId, toolUseId);
+      if (child) this.presence.markFinished(child.id);
+    });
+    // A prompt written after a derived agent finished is its parent resuming
+    // it (SendMessage): back to work, and its spawn no longer counts as done.
+    setAgentPromptedCallback((agentId, at) => {
+      if (!this.presence.markPrompted(agentId, at)) return;
+      const agent = this.store.get(agentId);
+      const parent =
+        agent?.parentAgentId !== undefined ? this.store.get(agent.parentAgentId) : undefined;
+      if (parent && agent?.spawnToolUseId) clearSpawnFinished(parent, agent.spawnToolUseId);
+    });
     // A Workflow launch becomes a node of the tree (spec §2.1b); it leaves
     // through the background-completion path above, like any background spawn.
     setWorkflowLaunchedCallback((agentId, toolUseId, launch) =>
@@ -152,6 +182,7 @@ export class AgentRuntime {
       onDerivedRemoved: (a) => {
         if (a.spawnAgentKey) this.hookEventHandler.unregisterSpawn(a.sessionId, a.spawnAgentKey);
       },
+      onTreeFull: (rootId, deferred) => this.makeRoomInTree(rootId, deferred),
     });
     // A resumed lead that spawns again belongs to a freshly minted implicit
     // team; its previous team's teammates are defunct. Promoted anonymous
@@ -244,7 +275,7 @@ export class AgentRuntime {
         const previous = this.store.get(agentId);
         if (previous) {
           this.forgetSpawns(previous, agentId);
-          this.removeSpawnedChildren(agentId);
+          this.leaveSubtree(agentId, false);
           this.hookEventHandler.clearSpawns(previous.sessionId);
         }
         if (newTranscriptPath) {
@@ -301,13 +332,14 @@ export class AgentRuntime {
         if (!agent) return;
         this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
         this.dismissalTracker.dismiss(agent.jsonlFile);
+        // Every agent it spawned leaves with the session, whole subtrees,
+        // leaves first — even when the session agent itself stays (terminal
+        // agents).
+        this.forgetSpawns(agent, agentId);
+        this.leaveSubtree(agentId, false);
         // Covers real team leads AND leads of background teammates (which
         // have children but no teamName). No-op when childless.
         this.removeTeammates(agentId);
-        // Every agent it spawned dies with the session, whole subtrees, leaves
-        // first — even when the session agent itself stays (terminal agents).
-        this.forgetSpawns(agent, agentId);
-        this.removeSpawnedChildren(agentId);
         this.hookEventHandler.clearSpawns(agent.sessionId);
         if (agent.isExternal) {
           this.unregisterAgent(agent.sessionId);
@@ -341,11 +373,26 @@ export class AgentRuntime {
 
   // ── Agent removal (shared cleanup) ──
 
-  /** Remove an agent and every agent it spawned (its whole spawn subtree,
-   *  leaves first): stop watchers, cancel timers, delete from store. Unknown
-   *  ids are a no-op. */
+  /**
+   * Remove an agent: stop watchers, cancel timers, delete from store. Unknown
+   * ids are a no-op.
+   *
+   * - A session root goes now (it keeps its own effect); every agent below it
+   *   walks out through the living office's exit (docs/adr/0003), leaves
+   *   first and staggered, and is removed once its walk is over.
+   * - A derived agent goes now with its whole spawn subtree, leaves first.
+   *   This is the forced path (the end of a walk out, a vanished transcript,
+   *   shutdown); an exit the user should see goes through closeAgent.
+   */
   removeAgent(id: number): void {
-    if (!this.store.get(id)) return;
+    const target = this.store.get(id);
+    if (!target) return;
+    if (target.parentAgentId === undefined && !this.disposed) {
+      this.leaveSubtree(id, false);
+      this.removeSingleAgent(id);
+      this.store.persist();
+      return;
+    }
     const parentOf = new Map<number, number | undefined>();
     for (const [aid, a] of this.store) parentOf.set(aid, a.parentAgentId);
     const leads = new Set<number>();
@@ -405,15 +452,141 @@ export class AgentRuntime {
     );
   }
 
-  /** Remove the derived agent a spawn tool call of `parentId` started, if any.
-   *  Named ones leave as teammates (dismissal, adapter callback, lead badge). */
-  private removeSpawnChild(parentId: number, toolUseId: string, source: string): void {
-    for (const [id, a] of this.store) {
-      if (a.parentAgentId !== parentId || a.spawnToolUseId !== toolUseId) continue;
-      if (a.leadAgentId !== undefined) this.removeTeammate(id, source);
-      else this.removeAgent(id);
+  /** The user closed an agent. A derived one walks out with its subtree
+   *  (docs/adr/0003) and its transcript is dismissed, so the live spawn that
+   *  started it cannot bring it back; a session root is removed now, its tree
+   *  walking out behind it. */
+  closeAgent(id: number): void {
+    const agent = this.store.get(id);
+    if (!agent) return;
+    if (agent.parentAgentId === undefined) {
+      this.removeAgent(id);
       return;
     }
+    if (agent.jsonlFile) this.dismissalTracker.dismiss(agent.jsonlFile);
+    // A background spawn ends with it here too, so its parent stops holding
+    // it live (and the tree scan stops looking for it).
+    if (
+      agent.spawnToolUseId !== undefined &&
+      releaseBackgroundSpawn(agent.parentAgentId, agent.spawnToolUseId, this.store)
+    ) {
+      return;
+    }
+    this.leaveSubtree(id, true);
+  }
+
+  /** The derived agent a spawn tool call of `parentId` started, if any. */
+  private spawnChild(parentId: number, toolUseId: string): AgentState | undefined {
+    for (const a of this.store.values()) {
+      if (a.parentAgentId === parentId && a.spawnToolUseId === toolUseId) return a;
+    }
+    return undefined;
+  }
+
+  /** The spawn ended for good: its derived agent (and subtree) walks out. */
+  private leaveSpawnChild(parentId: number, toolUseId: string, source: string): void {
+    const child = this.spawnChild(parentId, toolUseId);
+    if (!child) return;
+    if (child.leadAgentId !== undefined) {
+      console.log(`[Pixel Agents] Teammate ${child.id} leaving (source: ${source})`);
+    }
+    this.leaveSubtree(child.id, true);
+  }
+
+  /**
+   * Walk every derived agent below `id` (and `id` itself when `includeSelf`)
+   * out of the office, leaves first. Each stops being read and spawns nothing
+   * more right away; the PresenceTracker removes it once its walk is over.
+   * Agents already leaving keep their place in the queue.
+   */
+  private leaveSubtree(id: number, includeSelf: boolean): void {
+    const parentOf = new Map<number, number | undefined>();
+    for (const [aid, a] of this.store) parentOf.set(aid, a.parentAgentId);
+    const leaving: number[] = [];
+    for (const victim of subtreeRemovalOrder(id, parentOf)) {
+      if (victim === id && !includeSelf) continue;
+      const a = this.store.get(victim);
+      if (!a || a.parentAgentId === undefined || a.presence === 'leaving') continue;
+      this.quiesce(victim, a);
+      leaving.push(victim);
+    }
+    if (leaving.length > 0) this.presence.beginLeave(leaving);
+  }
+
+  /** A leaving agent stops: no more transcript reading, no pending status
+   *  timers, no live spawns (nothing new may hang below it). */
+  private quiesce(id: number, agent: AgentState): void {
+    const pt = this.pollingTimers.get(id);
+    if (pt) clearInterval(pt);
+    this.pollingTimers.delete(id);
+    this.fileWatchers.get(id)?.close();
+    this.fileWatchers.delete(id);
+    cancelWaitingTimer(id, this.waitingTimers);
+    cancelPermissionTimer(id, this.permissionTimers);
+    this.forgetSpawns(agent, id, false);
+  }
+
+  /**
+   * `rootId`'s tree is full while `wanted` spawns wait. Finished background
+   * agents resting at the bottom of the tree (lounge first, then the longest
+   * available) are let go — their spawn ends and they walk out — so working
+   * spawns get their place once the walk is over. Agents already leaving
+   * count as room on its way; only background spawns are released (a
+   * workflow's agents leave with their run).
+   */
+  private makeRoomInTree(rootId: number, wanted: number): void {
+    const inTree: AgentState[] = [];
+    const hasChildren = new Set<number>();
+    for (const a of this.store.values()) {
+      if (a.parentAgentId === undefined || rootOf(a.id, this.store) !== rootId) continue;
+      inTree.push(a);
+      hasChildren.add(a.parentAgentId);
+    }
+    let need = wanted - inTree.filter((a) => a.presence === 'leaving').length;
+    if (need <= 0) return;
+    const resting = inTree
+      .filter(
+        (a) =>
+          (a.presence === 'lounge' || a.presence === 'available') &&
+          a.spawnToolUseId !== undefined &&
+          !hasChildren.has(a.id),
+      )
+      .sort(
+        (x, y) =>
+          (x.presence === 'lounge' ? 0 : 1) - (y.presence === 'lounge' ? 0 : 1) ||
+          (x.availableSince ?? 0) - (y.availableSince ?? 0),
+      );
+    for (const a of resting) {
+      if (need <= 0) break;
+      if (releaseBackgroundSpawn(a.parentAgentId!, a.spawnToolUseId!, this.store)) {
+        console.log(`[Pixel Agents] Spawn tree of Agent ${rootId} is full: Agent ${a.id} leaves`);
+        need--;
+      }
+    }
+  }
+
+  // ── Living office settings ──
+
+  /** How long an available agent waits before the lounge, in ms. */
+  idleToLoungeMs(): number {
+    if (this.idleToLoungeMinutes === undefined) {
+      const fallback = IDLE_TO_LOUNGE_MS_DEFAULT / 60_000;
+      this.idleToLoungeMinutes =
+        clampIdleToLoungeMinutes(
+          this.store.getAdapter()?.getSetting(IDLE_TO_LOUNGE_SETTING_KEY, fallback),
+        ) ?? fallback;
+    }
+    return this.idleToLoungeMinutes * 60_000;
+  }
+
+  /** Set (clamped) and persist, per adapter namespace, the idle-to-lounge
+   *  minutes. Returns the value kept; a non-number changes nothing. */
+  setIdleToLoungeMinutes(minutes: number): number {
+    const clamped = clampIdleToLoungeMinutes(minutes);
+    if (clamped === undefined) return this.idleToLoungeMs() / 60_000;
+    this.idleToLoungeMinutes = clamped;
+    this.store.getAdapter()?.setSetting(IDLE_TO_LOUNGE_SETTING_KEY, clamped);
+    return clamped;
   }
 
   /** The session ended: none of its spawns is live any more. Forget them on
@@ -421,7 +594,7 @@ export class AgentRuntime {
    *  periodic scan's live-spawn gate can't re-materialize the children just
    *  removed — the CLI exiting kills background agents, whose completion
    *  queue-operation then never comes. Their Subtask sprites go too. */
-  private forgetSpawns(agent: AgentState, agentId: number): void {
+  private forgetSpawns(agent: AgentState, agentId: number, persist = true): void {
     const spawnTools = this.provider.subagentToolNames;
     const dropped = new Set(agent.backgroundAgentToolIds);
     for (const toolId of agent.activeToolIds) {
@@ -438,16 +611,7 @@ export class AgentRuntime {
       this.store.broadcast({ type: 'subagentClear', id: agentId, parentToolId: toolId });
     }
     agent.backgroundAgentToolIds.clear();
-    this.store.persist();
-  }
-
-  /** Remove every derived agent `parentId` spawned, with their subtrees. */
-  private removeSpawnedChildren(parentId: number): void {
-    const children: number[] = [];
-    for (const [id, a] of this.store) {
-      if (a.parentAgentId === parentId) children.push(id);
-    }
-    for (const id of children) this.removeAgent(id);
+    if (persist) this.store.persist();
   }
 
   /** Remove exactly one agent (no cascade). Returns it, or undefined when the
@@ -487,10 +651,19 @@ export class AgentRuntime {
     return agent;
   }
 
-  /** Remove a single teammate agent. */
+  /** Remove a single teammate agent. A derived teammate (docs/adr/0002) walks
+   *  out instead; its lead badge drops once it is actually gone. */
   removeTeammate(teammateId: number, source: string): void {
     const agent = this.store.get(teammateId);
     if (!agent) return;
+    if (agent.parentAgentId !== undefined) {
+      if (agent.presence === 'leaving') return;
+      console.log(`[Pixel Agents] Teammate ${teammateId} leaving (source: ${source})`);
+      this.dismissalTracker.dismiss(agent.jsonlFile);
+      this.lifecycleCallbacks.onTeammateRemoved?.(teammateId, agent, source);
+      this.leaveSubtree(teammateId, true);
+      return;
+    }
     console.log(`[Pixel Agents] Removing teammate ${teammateId} (source: ${source})`);
     this.dismissalTracker.dismiss(agent.jsonlFile);
     // Background teammates (spawnToolUseId set) share the LEAD's session id;
@@ -536,7 +709,10 @@ export class AgentRuntime {
     }
     for (const id of teammates) {
       const agent = this.store.get(id);
-      if (agent) {
+      if (agent?.parentAgentId !== undefined) {
+        // A derived teammate walks out with its spawner's tree.
+        this.leaveSubtree(id, true);
+      } else if (agent) {
         console.log(`[Pixel Agents] Removing teammate ${id} (lead ${leadId} closed)`);
         this.dismissalTracker.dismiss(agent.jsonlFile);
         if (!agent.spawnToolUseId) {
@@ -717,6 +893,7 @@ export class AgentRuntime {
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
     this.disposed = true;
+    this.presence.dispose();
     this.pendingTreeScans.clear();
     this.store.off('broadcast', this.onStoreBroadcast);
     this.store.off('agentRemoved', this.onStoreAgentRemoved);

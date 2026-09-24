@@ -122,6 +122,8 @@ components:
         - $ref: '#/components/schemas/AgentFeedSnapshot'
         - $ref: '#/components/schemas/AgentFeedAppend'
         - $ref: '#/components/schemas/AgentFeedDenied'
+        # Living office (presence lifecycle)
+        - $ref: '#/components/schemas/AgentPresenceChanged'
       discriminator: type
 
     ClientMessage:
@@ -150,6 +152,7 @@ components:
         - $ref: '#/components/schemas/RequestDiagnostics'
         - $ref: '#/components/schemas/SubscribeAgentFeed'
         - $ref: '#/components/schemas/UnsubscribeAgentFeed'
+        - $ref: '#/components/schemas/SetIdleToLoungeMinutes'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -221,6 +224,8 @@ components:
           description: Spawn depth (1 = spawned by a top-level session).
         nodeKind:
           $ref: '#/components/schemas/AgentNodeKind'
+        presence:
+          $ref: '#/components/schemas/AgentPresence'
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -700,6 +705,9 @@ components:
             type: string
         showAreas:
           type: boolean
+        idleToLoungeMinutes:
+          type: integer
+          description: Minutes an available agent waits at its desk before it walks to the lounge.
 
     HooksStatus:
       description: |
@@ -865,6 +873,22 @@ components:
           type: integer
         reason:
           $ref: '#/components/schemas/AgentFeedDeniedReason'
+
+    AgentPresenceChanged:
+      description: >-
+        An agent's place in the living office changed: working at its desk,
+        available (done, may be resumed), resting in the lounge, or leaving
+        through the entrance. The server decides; clients animate.
+      type: object
+      additionalProperties: false
+      required: [type, id, presence]
+      properties:
+        type:
+          const: agentPresence
+        id:
+          type: integer
+        presence:
+          $ref: '#/components/schemas/AgentPresence'
 
     # ── Client message variants ────────────────────────────────────
 
@@ -1168,6 +1192,17 @@ components:
         id:
           type: integer
 
+    SetIdleToLoungeMinutes:
+      description: Minutes an available agent waits before walking to the lounge (clamped by the server).
+      type: object
+      additionalProperties: false
+      required: [type, minutes]
+      properties:
+        type:
+          const: setIdleToLoungeMinutes
+        minutes:
+          type: integer
+
     # ── Supporting schemas ─────────────────────────────────────────
 
     FeedEntry:
@@ -1272,6 +1307,8 @@ components:
           type: string
         nodeKind:
           $ref: '#/components/schemas/AgentNodeKind'
+        presence:
+          $ref: '#/components/schemas/AgentPresence'
 
     AgentNodeKind:
       description: >-
@@ -1281,6 +1318,15 @@ components:
         of its own.
       type: string
       enum: [agent, workflow]
+
+    AgentPresence:
+      description: >-
+        Where an agent is in its living-office lifecycle. Absent means working.
+        `available` = finished but still alive (its parent can resume it);
+        `lounge` = available long enough to go rest; `leaving` = walking out
+        for good (stopped, closed, or its session ended).
+      type: string
+      enum: [working, available, lounge, leaving]
 
     SeatAssignment:
       description: |

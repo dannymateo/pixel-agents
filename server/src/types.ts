@@ -100,6 +100,13 @@ export interface AgentState {
   /** Workflow nodes only: the run's transcript directory (its agents live there). */
   workflowRunDir?: string;
 
+  // -- Living office (docs/adr/0003) --
+  /** Where the agent is in its office lifecycle; undefined = working. Decided
+   *  here (single source of truth for every client), animated by the webview. */
+  presence?: 'working' | 'available' | 'lounge' | 'leaving';
+  /** When the agent last became available (ms since epoch); drives the lounge timer. */
+  availableSince?: number;
+
   // -- Avatar customization --
   /** Preferred character palette (0-5). If undefined, auto-assigned for diversity. */
   palette?: number;

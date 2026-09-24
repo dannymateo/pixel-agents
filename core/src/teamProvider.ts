@@ -102,6 +102,20 @@ export interface TeamProvider {
     label?: string;
   }>;
 
+  /** The task id a stop tool call ends (Claude: `TaskStop` with
+   *  `input.task_id`), resolved by the host like a completion notice's task id.
+   *  Null when the call is not a stop. The living office walks the stopped
+   *  agent out (docs/adr/0003). */
+  extractSpawnStop?(toolName: string, toolInput: Record<string, unknown>): string | null;
+
+  /** The outcome a `<task-notification>`-style completion notice reports.
+   *  `completed`/`failed` leave the spawned agent alive and available (its
+   *  parent may resume it); `killed`/`stopped` end it. Undefined when the
+   *  notice carries no recognizable status. */
+  completionStatus?(
+    noticeContent: string,
+  ): 'completed' | 'failed' | 'killed' | 'stopped' | undefined;
+
   /** Detect a teammate spawn from a completed spawn-tool result on the LEAD's
    *  transcript. Some CLI versions never tag the lead's own records with team
    *  metadata; the only lead-side evidence of the team is the spawn tool's

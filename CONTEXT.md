@@ -34,7 +34,7 @@ A character drawn translucent because its agent is headless — the visual short
 _Avoid_: faded, dimmed, transparent, inactive (that's a status)
 
 **Sub-agent**:
-An unnamed agent spawned by another agent. A derived agent: no session of its own, never persisted, alive for the duration of its task (which may outlive the parent's turn). It can spawn sub-agents and teammates of its own, to any depth. Having no name is what makes it a sub-agent rather than a teammate; both sit in their spawner's scope office (see docs/adr/0002).
+An unnamed agent spawned by another agent. A derived agent: no session of its own, never persisted. It stays in the office after finishing its task — available, since its spawner can resume it — until its spawner stops it, the user closes it, or its session ends (see docs/adr/0003). It can spawn sub-agents and teammates of its own, to any depth. Having no name is what makes it a sub-agent rather than a teammate; both sit in their spawner's team module (see docs/adr/0002).
 _Avoid_: subtask (UI label prefix only, for legacy transcripts without spawn metadata)
 
 **Team**:
@@ -51,9 +51,21 @@ _Avoid_: inline teammate, tmux teammate, session teammate (former run-style dist
 **Scope**:
 An agent together with the agents it spawned directly. Every agent with children owns one scope; a scope's children may own scopes of their own, to any depth.
 
-**Scope office**:
-The office that shows one scope: its owner and its direct children, in a generated room. The root office is the user's editable office and shows top-level agents; the scopes below it are entered from there.
-_Avoid_: room, sub-office
+**Team module**:
+The generated block of desks a team gets beside the user's own office, named with an Area label (the team owner's task, e.g. "Fase 1 · Auth"). A team is a session's direct child that has children of its own (or a workflow run); everyone below it sits in its module, reviewers next to the member they review. Modules are composed in memory, never saved into the user's layout, and freed once the team has left.
+_Avoid_: scope office, room, sub-office
+
+**Presence**:
+Where an agent is in its office life: working at its desk, available (finished but resumable), resting in the lounge (available long enough), or leaving (stopped, closed, or its session ended). Decided by the server, animated by the office.
+_Avoid_: status (that's active vs waiting), state
+
+**Lounge**:
+Where available agents go to rest after a while without work — the user's Area named "Descanso", or a generated one with an arcade and beanbags. Any new work walks them back to their desk.
+_Avoid_: break room, idle area
+
+**Entrance**:
+The door derived agents enter through when they spawn and leave through, saying goodbye, when they are done for good. The user's door if they placed one; otherwise a default one the office adds without saving it.
+_Avoid_: spawn point, exit
 
 ## Agent Lifecycle
 

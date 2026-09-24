@@ -41,7 +41,8 @@ export type ServerMessage =
   | AgentDiagnostics
   | AgentFeedSnapshot
   | AgentFeedAppend
-  | AgentFeedDenied;
+  | AgentFeedDenied
+  | AgentPresenceChanged;
 
 export type ClientMessage =
   | WebviewReady
@@ -67,7 +68,8 @@ export type ClientMessage =
   | SetShowAreas
   | RequestDiagnostics
   | SubscribeAgentFeed
-  | UnsubscribeAgentFeed;
+  | UnsubscribeAgentFeed
+  | SetIdleToLoungeMinutes;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -91,9 +93,12 @@ export interface AgentCreated {
   label?: string;
   depth?: number;
   nodeKind?: AgentNodeKind;
+  presence?: AgentPresence;
 }
 
 export type AgentNodeKind = 'agent' | 'workflow';
+
+export type AgentPresence = 'working' | 'available' | 'lounge' | 'leaving';
 
 export interface AgentClosed {
   type: 'agentClosed';
@@ -123,6 +128,7 @@ export interface AgentSeatMeta {
   depth?: number;
   teammateName?: string;
   nodeKind?: AgentNodeKind;
+  presence?: AgentPresence;
 }
 
 export interface AgentStatus {
@@ -297,6 +303,7 @@ export interface SettingsLoaded {
   hooksInfoShown: boolean;
   externalAssetDirectories: string[];
   showAreas: boolean;
+  idleToLoungeMinutes?: number;
 }
 
 export interface HooksStatus {
@@ -386,6 +393,12 @@ export interface AgentFeedDenied {
 }
 
 export type AgentFeedDeniedReason = 'unprivileged' | 'unknownAgent';
+
+export interface AgentPresenceChanged {
+  type: 'agentPresence';
+  id: number;
+  presence: AgentPresence;
+}
 
 export interface WebviewReady {
   type: 'webviewReady';
@@ -510,4 +523,9 @@ export interface SubscribeAgentFeed {
 export interface UnsubscribeAgentFeed {
   type: 'unsubscribeAgentFeed';
   id: number;
+}
+
+export interface SetIdleToLoungeMinutes {
+  type: 'setIdleToLoungeMinutes';
+  minutes: number;
 }

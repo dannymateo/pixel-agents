@@ -332,3 +332,22 @@ export const FEED_MAX_ENTRIES = 200;
 /** Diff line colors in the agent screen. */
 export const FEED_DIFF_ADD_COLOR = '#4ec96b';
 export const FEED_DIFF_REMOVE_COLOR = '#e05a5a';
+
+// ── Living office ─────────────────────────────────────────────
+/** The door stays open this long after someone crosses it. */
+export const DOOR_OPEN_HOLD_MS = 900;
+/** How long the goodbye bubble shows before an agent walks out. */
+export const GOODBYE_BUBBLE_MS = 1500;
+/** Area label the user gives their own lounge in the Areas editor. */
+export const LOUNGE_AREA_LABEL = 'Descanso';
+/** Empty columns between the user's office and the first team module (and between modules). */
+export const MODULE_GAP_COLS = 1;
+/** Team module area colors, assigned deterministically per module owner. */
+export const MODULE_AREA_COLORS = [
+  '#6c8cff',
+  '#4ec9a0',
+  '#e0a84e',
+  '#c77ddb',
+  '#e06c6c',
+  '#5ec4e0',
+];

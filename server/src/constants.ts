@@ -148,3 +148,16 @@ export const RESTORED_SPAWN_MAX_IDLE_MS = 10 * 60_000;
 export const SPAWN_SEED_MAX_BYTES = 8 * 1024 * 1024;
 /** Chunk size of that history read (bounds the memory held at once). */
 export const SPAWN_SEED_READ_CHUNK_BYTES = 1024 * 1024;
+
+// ── Living office (docs/adr/0003) ───────────────────────────
+/** Default minutes an available agent waits at its desk before the lounge. */
+export const IDLE_TO_LOUNGE_MS_DEFAULT = 30 * 60_000;
+/** Bounds for the user's idle-to-lounge setting, in minutes. */
+export const IDLE_TO_LOUNGE_MINUTES_MIN = 1;
+export const IDLE_TO_LOUNGE_MINUTES_MAX = 240;
+/** A leaving agent is removed after this even if no client animated it. */
+export const LEAVE_ANIMATION_MAX_MS = 6000;
+/** Gap between consecutive departures when a whole subtree leaves. */
+export const LEAVE_STAGGER_MS = 400;
+/** How often presence timers (available → lounge) are evaluated. */
+export const PRESENCE_TICK_MS = 5000;

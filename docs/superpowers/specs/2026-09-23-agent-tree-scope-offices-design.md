@@ -151,7 +151,7 @@ Reemplaza el diseño anterior de oficinas navegables por scope (doble clic, miga
   - `Edit`/`MultiEdit`/`Write` → diff coloreado (calculado en el servidor a partir de `old_string`/`new_string`/`content`);
   - `Bash` → comando + salida (ANSI eliminado);
   - resultados largos colapsados, expandibles.
-- **Seguridad**: el feed expone código y salidas de comandos. **No se difunde por broadcast.** Solo conexiones **privilegiadas** (mismo criterio que `setHooksEnabled`: Bearer en embebido, `?token=` en standalone) pueden suscribirse; en conexiones sin privilegio el botón aparece deshabilitado con la explicación.
+- **Seguridad**: el feed expone código y salidas de comandos. **No se difunde por broadcast.** Solo conexiones **privilegiadas** (mismo criterio que `setHooksEnabled`: Bearer en embebido, `?token=` en standalone) pueden suscribirse; en conexiones sin privilegio el botón abre la pantalla y esta muestra la denegación con la explicación (desviación aceptada 2026-09-24: deshabilitar el botón exigiría que el cliente conozca su privilegio, un mensaje nuevo; el resultado visible es equivalente).
 - **Protocolo** (AsyncAPI, ver §5): suscripción por agente, respuesta dirigida solo a esa conexión.
 - **Fuente**: el `.jsonl` del agente. Al suscribirse, lectura de cola (últimas `FEED_SNAPSHOT_MAX_ENTRIES`); después, append desde el flujo de líneas del watcher existente. El parseo de registros a entradas de feed es del proveedor: `HookProvider.parseFeedEntries?(record)` (opcional), para que el runtime no conozca Claude.
 - **Límites** (en `server/src/constants.ts`): `FEED_SNAPSHOT_MAX_ENTRIES = 200`, `FEED_ENTRY_DETAIL_MAX_BYTES = 64 KiB` (se trunca con marca), sin historial persistido.

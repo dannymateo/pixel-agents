@@ -27,6 +27,8 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     providers/hook/claude/           Reference HookProvider — only place that knows Claude specifics
       claude.ts                      normalizeHookEvent for 11 Claude events, formatToolStatus, file fallback
       claudeTeamProvider.ts          TeamProvider: reads ~/.claude/teams/<name>/config.json
+      claudeWorkflow.ts              Workflow tool: launch detection, run agents under subagents/workflows/wf_*
+      claudeFeed.ts                  Transcript record -> agent screen feed entries
       claudeHookInstaller.ts         Consent-gated install/uninstall in ~/.claude/settings.json (abort on unparseable file or non-array hooks.<Event>; one-time .pixel-agents.backup, exclusive-create, no backup ⇒ no write — but skipped when the replaced content is entirely our own install's output, since backing up our own file masquerades as the user's original (`settingsHoldOnlyOurHooks`, compared against makeHookEntry — the WRITER — so a field added to what we write can't silently revive the bug; only `command`/`timeout` may differ, they vary across installs); every write failure THROWS; mode preserved, 0600 on create; re-read verify immediately before rename + retry; hook identity = `/.pixel-agents/hooks/claude-hook.js` suffix anchored at both ends of the command's first token, case-insensitive; `areHooksInstalled` = ANY of our commands on ANY event)
       consentCopy.ts                 Claude's first-run consent disclosure text (scope/data/undo), served through consentDisclosure()
       constants.ts                   Claude hook event names, script path
@@ -35,6 +37,11 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     providers/hook/consentExecutor.ts Provider-agnostic consent EXECUTION: applyConsentChoice(providerId, choice, ConsentEffects) runs the six actions in one order for both surfaces, and SERIALIZES answers per process across ALL providers
     providers/index.ts               Provider registry (claudeProvider + the hookProviders list the consent gate loops over)
     agentRuntime.ts                  Lifecycle core: timers, scanners, HookEventHandler, SessionRouter, DismissalTracker
+    spawnTree.ts                     Pure spawn-tree planner (which sidecars become derived agents, cascade order)
+    presence.ts                      PresenceTracker: working/available/lounge/leaving lifecycle (docs/adr/0003)
+    agentFeed.ts                     AgentFeedHub: privileged point-to-point agent screen feed
+    agentMessages.ts                 agentCreated / existingAgents wire shapes (label stripped when unprivileged)
+    feedDiff.ts                      Snippet diffs, ANSI/control stripping, byte caps for the feed
     agentStateStore.ts               EventEmitter-backed single source of truth (typed mutations + events)
     sessionRouter.ts                 session_id → agent_id mapping, event buffering, pending external sessions
     dismissalTracker.ts              Unified dismissal state (replaces four legacy globals)
@@ -90,6 +97,8 @@ webview-ui/                          React 19 + Canvas UI (depends only on core/
       introTourState.ts              Intro tour wire-state machine (pure reducer, Node-runner tested)
       useIntroTour.ts                Wires the reducer to React + transport (snapshot, verdict, choices)
     office/
+      living/                        Living office: composeOffice (modules, door, lounge), moduleSeating, livingOfficeController
+      scope/                         AgentDirectory (agent tree), scopeLayoutGenerator (module rooms), treeDisplay
       types.ts                       OfficeLayout, Character, etc. + re-exports constants
       toolUtils.ts                   STATUS_TO_TOOL mapping, extractToolName (DOM-free; defaultZoom lives in useEditorActions)
       projection.ts                  World→screen math shared by renderer + DOM overlays (mapOffset, overlayProjection)
@@ -196,8 +205,8 @@ Adding a new CLI integration is one subdirectory under `server/src/providers/hoo
 
 `core/asyncapi.yaml` is the contract. Pinned to **3.0.0** because `@asyncapi/modelina@5.10.1` declares `supportedVersions: ['3.0.0']` only; bumping to 3.1.0 produces `export type Root = any`. Revisit when Modelina ships 3.1.0 support.
 
-- **27 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + context usage, assets, settings + workspace, diagnostics.
-- **18 ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
+- **36 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + context usage, assets, settings + workspace, diagnostics, living office (`agentPresence`, `livingOfficeSettings`), agent screen feed (`agentFeedSnapshot/Append/Denied`, point-to-point).
+- **26 ClientMessage variants** (client → server), including `setIdleToLoungeMinutes`/`setLoungeToLeaveMinutes` and `subscribeAgentFeed`/`unsubscribeAgentFeed` (privileged); lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
 
 Both unions use `oneOf` with `discriminator: type`. Every concrete message sets `additionalProperties: false`.
 
@@ -248,12 +257,13 @@ Newer harnesses (Claude 5) never tag the LEAD's records with team metadata and n
 
 **Team generations on resume (last-wins latch)**: every CLI run of a session mints a FRESH implicit team, so a resumed lead's transcript carries spawn tool_results from several `session-<8hex>` generations. A tag-less lead re-latches to the newest spawn's team (`setTeamSwitchCallback` removes the defunct team's teammates); tag-derived identity (`teamNameFromTags`, set by the record-tags branch) is authoritative and never overwritten by spawn results. `linkTeammates` never badges a named teammate as LEAD — if only teammates are tracked, linking waits until the real lead is detected (prevents a phantom LEAD character when a teammate session is adopted before/without its lead). Restore drops `isTeamLead` from persisted agents that carry an `agentName`.
 
-**Background spawns without a CLI team (sidecar-backed)**: `Agent(...)` spawns that never register a team take the async path — result "Async agent launched successfully. agentId: \<hex>" (no team anywhere), transcript + sidecar under `<projectDir>/<leadSessionId>/subagents/` (sidecar carries `agentType`/`description`/`toolUseId`, plus `name` when the spawn was named), completion via `queue-operation`. `scanForBackgroundAgentFiles` classifies them by the sidecar `name` — the domain model's sole Sub-agent vs Teammate distinction (see CONTEXT.md):
+**Spawn tree (docs/adr/0002)**: every agent spawned inside a session — foreground or background, at any depth, any orchestration (`/equipo`, `Explore`, forks, workflows) — is a **derived Agent** in the main store: `parentAgentId`, `spawnAgentKey` (the `<key>` of `<projectDir>/<sessionId>/subagents/agent-<key>.jsonl`, equal to the hook `agent_id`), `role` (sidecar `agentType`), `label` (sidecar `description`), `depth` (parent's + 1, never trusted from the sidecar). Sidecars are flat: nesting comes from the sidecar's `parentAgentId` (from depth 2 on). `scanSpawnTree(rootId)` (`fileWatcher.ts`, pure planner in `spawnTree.ts`) creates a node only when its sidecar `toolUseId` is a LIVE spawn of ITS OWN parent (anti-spurious, recursive); a node whose parent does not exist yet is deferred, never hung off the root. Caps: `MAX_DERIVED_AGENTS_PER_TREE`, `MAX_SPAWN_DEPTH`. Named spawns keep the Teammate identity (`agentName`, `leadAgentId`) — the name is still the Sub-agent vs Teammate distinction (CONTEXT.md), but both are seated characters. The old shadow store (`subagentWatch.ts`) is gone; the Task-era Subtask sub-character only remains for transcripts without sidecars (`agent_progress`).
 
-- **Named → Teammate**: its own seated character, `agentName` from the sidecar `name`; the spawner gets `isTeamLead` + an `agentTeamInfo` broadcast (derived team — NO `teamName`, so config polling stays away) and the transient Subtask is ghost-killed via `subagentClear`. The child has `leadAgentId` + `spawnToolUseId`; it's removed on the completion queue-operation or lead sessionEnd (`removeTeammate` must NOT unregister its session — it shares the lead's).
-- **Unnamed → Sub-agent**: the Subtask sub-character stays; the spawn's transcript is watched in a **shadow `AgentStateStore`** (`server/src/subagentWatch.ts`, owned by `AgentRuntime`, ids from 1 000 000 up) whose broadcasts are translated onto the main store as `subagentToolStart/Done/Permission` keyed `(leadId, spawnToolUseId)` — live activity on the sub-character, no protocol change. `agentToolsClear` on the shadow agent synthesizes `subagentToolDone` for still-live tools so the sub idles between turns. Never persisted, never announced.
-
-The gate for both: the sidecar `toolUseId` must match a LIVE entry in the lead's `backgroundAgentToolIds` (anti-spurious; no teamName involved). `scanForTeammateFiles` skips sidecars carrying a live `toolUseId` so it can't race the classification. The lead's `backgroundAgentToolIds` are persisted (children never are — they're derived state the 1 s scan re-materializes after a reload; restore skips stale entries with `leadAgentId` but no `teamName`). The turn-end background-tool re-sends (transcriptParser, hookEventHandler, timerManager's `clearAgentActivity`) must include `toolName` + `runInBackground` (or the webview can't recreate the Subtask after `agentToolsClear`) and must skip tools whose spawn became a teammate character (`hasPromotedBackgroundAgent`, or a ghost Subtask appears next to it).
+- **Hooks**: a derived agent's hook events carry the ROOT's `session_id` plus `agent_id`; `SessionRouter` resolves `(sessionId, agentKey)` and a keyed event that does not resolve is buffered, **never** applied to the root (that was the "sub-agent animates its parent" bug). On `subagentStart`/`subagentEnd` the key names the CHILD and the event goes to its spawner.
+- **Workflows**: a `Workflow` tool launch becomes a `nodeKind: 'workflow'` node (no transcript, label = script `meta.name`, status derived from its children); its run's agents (`subagents/workflows/wf_*/`) are its children. `isWorkflowRunDirOfSession` (provider) gates every run dir.
+- **Completion notices come in THREE shapes** (`isTaskNotice`, `transcriptParser.ts`): a `queue-operation` enqueue (a session's own transcript), an `attachment` `queued_command` with `commandMode: 'task-notification'` (a sub-agent's transcript, notice queued while it was busy), and a `user` turn opening with `[SYSTEM NOTIFICATION - NOT USER INPUT]` (delivered while it was idle). Current CLIs omit `<tool-use-id>`; `<task-id>` (the child's key, or a workflow's `Task ID:`) resolves the spawn. Missing a shape leaves children `working` forever.
+- **Adoption mid-session**: a root adopted/restored at EOF seeds its live spawns from its history once (`seedSpawnsFromHistory`, bounded by `SPAWN_SEED_MAX_BYTES`), so a running team appears when the office opens late.
+- Derived agents are never persisted or registered as sessions; only the root's `backgroundAgentToolIds` are persisted (filtered by `restorableSpawnToolIds`).
 
 Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` is authoritative; members with `isActive: false` are treated as departed), by the teammate's own `sessionEnd` (own-session teammates), and by `sessionEnd` on the lead.
 
@@ -306,6 +316,8 @@ Fastify v5 with `@fastify/cors`, `@fastify/websocket`, and (in standalone) `@fas
 
 1. **Connection** (`isAllowedWebSocketOrigin`): embedded requires the Bearer token; standalone requires a same-origin handshake. A missing Origin still connects (non-browser clients send none). This tier is weak by design — a DNS-rebound page sends `Origin` and `Host` as the same attacker-chosen name and IS accepted (`httpServerWs.test.ts` pins that).
 2. **Privileged messages** (`standaloneTokenValid`, `ClientMessageContext.privileged`): proved by an out-of-band secret — embedded via its Bearer token, standalone via the server token in the `/ws` `?token=` query, which the CLI prints in the local URL and the SPA forwards (`webview-ui/src/transport/index.ts`). **Never a network position**: peer address, `Host` and `Origin` all ride the channel a proxy speaks, so a LAN-bound forwarder piping bytes to 127.0.0.1 satisfies all three. The token is a replayable bearer capability, not evidence of locality — it also reaches browser history and Fastify's request log, so the printed URL is documented to the user as a secret. An untokened client still watches the office; it just cannot change `~/.claude/settings.json`.
+
+**Transcript-derived content is privileged too.** The agent screen feed (`AgentFeedHub`, `server/src/agentFeed.ts`) answers `subscribeAgentFeed` only on privileged connections (`agentFeedDenied{unprivileged}` otherwise, without touching disk), replies point-to-point to the subscribing socket (server-minted `connId`, never broadcast), dedups records by `uuid`, caps subscriptions per connection and subscribe rate. A derived agent's `label` (its task line — for a workflow agent, the start of its prompt) is stripped from `agentCreated`/`existingAgents` for unprivileged connections (`server/src/agentMessages.ts`). The token therefore also unlocks agents' code and command output; the request log masks `?token=`.
 
 The **hooks preference is persisted only after the install/uninstall settled and the on-disk result agrees** — writing it first strands the user when an uninstall fails: entries still firing, but a persisted hooks-off makes the next startup skip the consent/install path entirely.
 
@@ -371,7 +383,7 @@ Every agent's context gauge. Fed from `message.usage` on assistant records by `p
 - **Sidechain rule**: a lead's sidechain records are its sub-agents' turns and must not move its gauge; a teammate's own transcript is sidechain top to bottom and would otherwise never report. Positional latch (`sawMainChainUsage`): once a file produces a main-chain turn, later sidechain records belong to someone else.
 - **The window comes from the provider**, not from the runtime: `HookProvider.contextWindowForModel(model)` (Claude: 1M for the current line, 200k for Haiku and the older models, `undefined` for ids it can't place). Transcripts state usage but never the limit, and guessing 200k for a 1M model reads five times too full. `widenContextWindow` is the backstop for unrecognized models and unknown-larger windows — it only ever widens, since a context that doesn't fit disproves the assumption while a shrinking one proves nothing.
 - **`seedContextUsage` runs once per agent in `startFileWatching`** — the single seam every watched agent passes through. Agents adopted or restored mid-session start at end-of-file, so without a tail read they'd have no gauge until their next turn.
-- Sub-agents get no gauge: no session of their own, and the shadow store never forwards `agentContextUsage`.
+- Derived agents (sub-agents, teammates, workflow agents) get their gauge from their own transcript like any agent; only legacy Subtask sub-characters have none.
 
 ## Office UI
 
@@ -394,6 +406,14 @@ Custom ESLint rules (`eslint-rules/pixel-agents-rules.mjs`) enforce: `no-inline-
 **Sound notifications**: Ascending two-note chime (E5 → E6) via Web Audio API plays when waiting bubble appears (`agentStatus: 'waiting'`). `notificationSound.ts` manages AudioContext lifecycle; `unlockAudio()` on canvas mousedown resumes the context (webviews start suspended). Toggled via Settings modal. Persisted per-namespace in `~/.pixel-agents/config.json`.
 
 **Seats**: Derived from chair furniture. `layoutToSeats()` creates a seat at every footprint tile of every chair. Multi-tile chairs produce multiple seats keyed `uid` / `uid:1` / `uid:2`. Facing direction priority: 1) chair `orientation` from catalog (front→DOWN, back→UP, left→LEFT, right→RIGHT), 2) adjacent desk direction, 3) forward (DOWN). Click character → select (white outline) → click available seat → reassign.
+
+### Living office (docs/adr/0003)
+
+One office, composed in memory (`webview-ui/src/office/living/`): the user's editable `layout.json` plus a generated **team module** per team (a root's direct child that has children, or a workflow node) to its right, named with an Area label (owner's task; role when unprivileged). A default **entrance** door and **lounge** (arcade, console, beanbags) are added when the user placed none; nothing generated is ever saved — the editor edits and saves only the user's part (`savableLayout`).
+
+- **Presence** (server-owned, `server/src/presence.ts`, broadcast as `agentPresence`): `working` → `available` on `completed`/`failed` (finishing is NOT leaving: the parent may resume it) → `lounge` after `IDLE_TO_LOUNGE_MS` (30 min) → `leaving` after `LOUNGE_TO_LEAVE_MS` (60 min) unused, or at once on `killed`/`stopped`, a parent's `TaskStop`, the user closing it, its foreground spawn's result, a workflow's completion, or the root session ending (subtree leaves-first, staggered). Timings are user settings (`livingOfficeSettings`). Adoption only revives agents finished within both windows, placed by their real finish time.
+- **Engine** (`officeState.ts`): derived agents enter through the door and walk to their seat, rest in the lounge, walk back on new work, and walk out waving goodbye. An `available` agent waits seated at its desk (never wanders off the module). Roots keep the matrix effect.
+- **Agent screen**: clicking a desk's monitor (`monitorOwner.ts`) or "Ver pantalla" opens `AgentScreenModal` — live feed of text, tools, coloured diffs and command output, rendered strictly as text.
 
 ## Layout Editor
 
@@ -471,7 +491,7 @@ Three tiers, each with its own framework.
 | `httpServerWs.test.ts`         | `/ws` gate: standalone same-origin, embedded Bearer                                                                                            |
 | `mockClaudeRunner.test.ts`     | E2E scenario runner sanity                                                                                                                     |
 
-Run: `npm run test:server` (or `npm test` for all).
+Run: `npm run test:server` (or `npm test` for all). Always run vitest from `server/` (the npm scripts do): `server/vitest.config.ts` isolates HOME/USERPROFILE to a tmp dir and aborts if a test resolves the real home — running vitest from the repo root skips that guard. Never run a branch build of the CLI against the real home: it reuses a live `npx pixel-agents` and overwrites `~/.pixel-agents/hooks/claude-hook.js`.
 
 ### Webview unit (Vitest, Node runner)
 
@@ -599,6 +619,10 @@ Use `console.log`/`error`/`warn` with prefixed context:
 - **runInBackground sub-character gate**: in webview `agentToolStart`, `runInBackground=true` Agent tools are gated out of sub-character creation when the parent has a `teamName` (teammate path handles it). With no `teamName`, the gate must be bypassed so the basic Subtask sub-character still renders. `addSubagent` dedups via `subagentIdMap`, so the bypass is safe even if a teammate is detected later. `subagentToolStart` creates the sub lazily when it's missing — covering teamed leads' unnamed background spawns and post-reload recreation.
 - **Allure HTML report**: viewing via `file://` fails (browsers block `fetch()` from local files). Use `npx allure open allure-report/allure` or `npm run test:report:open`.
 - **Context usage is a snapshot against a provider-declared window**, and both halves are easy to get wrong: cumulative sums measure spend rather than occupancy, `input_tokens` without the cache counters measures almost nothing, and a 200k window assumed for a 1M model reads five times too full (the number to check it against is Claude Code's own statusline `context_window.used_percentage`).
+
+- **Finishing is not leaving**: a completed background agent is resumable (`SendMessage`); only `killed`/`stopped`/`TaskStop`/close/session end/lounge timeout remove it (docs/adr/0003).
+- **Model real transcript shapes in tests**: three bugs in this area passed every test because fixtures used the root transcript's notice shape; sub-agent transcripts use `attachment` and system-notification user turns instead of `queue-operation`.
+- **Hooks are synchronous**: every PreToolUse/PostToolUse spawns `node` (~0.3–0.6 s on Windows) and Claude Code waits for it, even when no office is open.
 
 ## Manual Hook Testing
 

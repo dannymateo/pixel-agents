@@ -7,9 +7,15 @@ import path from 'node:path';
 import { expect, type Page } from '@playwright/test';
 
 import { type HookServerConfig, waitForHookServer } from './hooks';
+import {
+  applyMockHomeEnv,
+  arrangeNextClaudeInvocation,
+  type ClaudeMockScenario,
+} from './mock-claude';
 
 const REPO_ROOT = path.join(__dirname, '../..');
 const STANDALONE_CLI = path.resolve(REPO_ROOT, 'dist', 'cli.js');
+const MOCK_CLAUDE_RUNNER = path.resolve(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude-runner.cjs');
 
 export interface RecordedServerMessage {
   type: string;
@@ -302,4 +308,38 @@ export async function launchStandalone(
     if (ownsWorkspace) fs.rmSync(workspaceDir, { recursive: true, force: true });
     throw error;
   }
+}
+
+/**
+ * Run a mocked `claude` session next to a standalone server: the same scenario
+ * runner the mock-claude wrapper execs, as its own process, in the server's
+ * workspace and isolated HOME. It writes its own append-only transcripts under
+ * `<tmpHome>/.claude/projects/`, where the CLI's scanner adopts it — the
+ * process boundary of e2e/README.md → "Mocking model & rules". The standalone
+ * surface has no terminal to host the wrapper, and a wrapper resolved relative
+ * to a tmp HOME would land in the shared temp dir, so the runner is spawned
+ * directly. Kill the returned process when the test ends.
+ */
+export async function spawnStandaloneClaudeScenario(
+  session: Pick<StandaloneSession, 'tmpHome' | 'workspaceDir'>,
+  scenario: ClaudeMockScenario,
+  sessionId: string,
+): Promise<ChildProcessWithoutNullStreams> {
+  await arrangeNextClaudeInvocation(session.tmpHome, scenario);
+  const child = spawn(process.execPath, [MOCK_CLAUDE_RUNNER, '--session-id', sessionId], {
+    cwd: session.workspaceDir,
+    env: { ...applyMockHomeEnv(process.env, session.tmpHome), PIXEL_AGENTS_MOCK_EXTERNAL: '1' },
+    stdio: 'pipe',
+  });
+  // Drained so a chatty runner never blocks on a full pipe.
+  child.stdout.resume();
+  child.stderr.resume();
+  return child;
+}
+
+/** Stop a process started by spawnStandaloneClaudeScenario. */
+export async function stopStandaloneClaudeScenario(
+  child: ChildProcessWithoutNullStreams,
+): Promise<void> {
+  await stopProcess(child);
 }

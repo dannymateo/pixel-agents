@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
+import { AgentFeedHub } from './agentFeed.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import { clampIdleToLoungeMinutes, clampLoungeToLeaveMinutes } from './configPersistence.js';
 import {
@@ -39,6 +40,7 @@ import {
   setTeammateRegisterCallback,
   setTeammateRemovalCallback,
   setTeamProvider,
+  setTranscriptLineListener,
   startExternalSessionScanning,
   startFileWatching,
   startStaleExternalAgentCheck,
@@ -124,6 +126,10 @@ export class AgentRuntime {
   private disposed = false;
   /** Living-office presence of every derived agent (docs/adr/0003). */
   readonly presence: PresenceTracker;
+  /** The agent screen feed (spec §4): directed, per-connection subscriptions
+   *  to an agent's transcript. Hosts route `subscribeAgentFeed` here with a
+   *  server-minted connection id and the connection's handshake privilege. */
+  readonly feedHub: AgentFeedHub;
   /** The user's idle-to-lounge setting, read from the adapter on first use. */
   private idleToLoungeMinutes: number | undefined;
   /** The user's lounge-to-leave setting, read from the adapter on first use. */
@@ -140,6 +146,10 @@ export class AgentRuntime {
     if (provider.team) {
       setTeamProvider(provider.team);
     }
+    // The watcher hands records only for agents someone watches (the gate is
+    // required: without it every line of every agent would be parsed twice).
+    this.feedHub = new AgentFeedHub(store, provider);
+    setTranscriptLineListener(this.feedHub.onRecord, this.feedHub.hasSubscribers);
     this.presence = new PresenceTracker(store, {
       idleToLoungeMs: () => this.idleToLoungeMs(),
       loungeToLeaveMs: () => this.loungeToLeaveMs(),
@@ -974,6 +984,8 @@ export class AgentRuntime {
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
     this.disposed = true;
+    setTranscriptLineListener(null);
+    this.feedHub.dispose();
     this.presence.dispose();
     this.pendingTreeScans.clear();
     this.store.off('broadcast', this.onStoreBroadcast);

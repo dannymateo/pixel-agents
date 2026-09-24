@@ -23,6 +23,7 @@ import type {
 } from '../engine/renderer.js';
 import { renderFrame } from '../engine/renderer.js';
 import { getCatalogEntry, isRotatable } from '../layout/furnitureCatalog.js';
+import { monitorOwnerAt } from '../layout/monitorOwner.js';
 import { EditTool, TILE_SIZE } from '../types.js';
 import { computeNormalModeCursor } from './officeCanvasCursor.js';
 
@@ -45,6 +46,41 @@ interface OfficeCanvasProps {
   showAreas: boolean;
   /** Currently-selected area label in the editor (alpha-bumped overlay). null otherwise. */
   activeAreaLabel: string | null;
+  /** Open an agent's screen (clicking the monitor at its desk). Never called
+   *  in edit mode; absent = monitors are not clickable. */
+  onOpenScreen?: (agentId: number) => void;
+  /** Whether an agent has a screen (a workflow node's monitor opens nothing
+   *  and takes no click). Absent = every seated agent has one. */
+  canOpenScreen?: (agentId: number) => boolean;
+}
+
+/** Catalog footprint of a furniture type (for monitor hit-testing). */
+function catalogFootprint(type: string): { w: number; h: number } | undefined {
+  const entry = getCatalogEntry(type);
+  return entry ? { w: entry.footprintW, h: entry.footprintH } : undefined;
+}
+
+/** The agent whose desk monitor covers (col, row), if any. */
+function monitorOwner(
+  officeState: OfficeState,
+  col: number,
+  row: number,
+  canOpenScreen?: (agentId: number) => boolean,
+): number | null {
+  const owner = monitorOwnerAt(
+    col,
+    row,
+    officeState.getLayout().furniture,
+    officeState.seats.values(),
+    (seatId) => {
+      for (const ch of officeState.characters.values()) {
+        if (ch.seatId === seatId && !ch.isSubagent) return ch.id;
+      }
+      return null;
+    },
+    catalogFootprint,
+  );
+  return owner !== null && (canOpenScreen?.(owner) ?? true) ? owner : null;
 }
 
 export function OfficeCanvas({
@@ -64,6 +100,8 @@ export function OfficeCanvas({
   panRef,
   showAreas,
   activeAreaLabel,
+  onOpenScreen,
+  canOpenScreen,
 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -509,7 +547,7 @@ export function OfficeCanvas({
       officeState.hoveredTile = tile;
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.style.cursor = computeNormalModeCursor({
+        const cursor = computeNormalModeCursor({
           hitId,
           petId,
           selectedAgentId: officeState.selectedAgentId,
@@ -518,6 +556,14 @@ export function OfficeCanvas({
           getSeat: (seatId) => officeState.seats.get(seatId),
           getCharacter: (id) => officeState.characters.get(id),
         });
+        // An agent's monitor opens its screen: point at it.
+        const onMonitor =
+          cursor === 'default' &&
+          petId === null &&
+          onOpenScreen !== undefined &&
+          tile !== null &&
+          monitorOwner(officeState, tile.col, tile.row, canOpenScreen) !== null;
+        canvas.style.cursor = onMonitor ? 'pointer' : cursor;
       }
       officeState.hoveredAgentId = hitId;
     },
@@ -533,6 +579,8 @@ export function OfficeCanvas({
       hitTestDeleteButton,
       hitTestRotateButton,
       clampPan,
+      onOpenScreen,
+      canOpenScreen,
     ],
   );
 
@@ -752,6 +800,16 @@ export function OfficeCanvas({
         return;
       }
 
+      // The monitor at an agent's desk opens that agent's screen.
+      if (onOpenScreen) {
+        const tile = screenToTile(e.clientX, e.clientY);
+        const owner = tile ? monitorOwner(officeState, tile.col, tile.row, canOpenScreen) : null;
+        if (owner !== null) {
+          onOpenScreen(owner);
+          return;
+        }
+      }
+
       // No agent hit — check seat click while agent is selected
       if (officeState.selectedAgentId !== null) {
         const selectedCh = officeState.characters.get(officeState.selectedAgentId);
@@ -790,7 +848,7 @@ export function OfficeCanvas({
         officeState.cameraFollowId = null;
       }
     },
-    [officeState, onClick, screenToWorld, screenToTile, isEditMode],
+    [officeState, onClick, onOpenScreen, canOpenScreen, screenToWorld, screenToTile, isEditMode],
   );
 
   const handleMouseLeave = useCallback(() => {

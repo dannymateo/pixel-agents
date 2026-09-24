@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import type { StateAdapter } from '../../core/src/adapter.js';
 import type { HookProvider } from '../../core/src/provider.js';
 import { buildAgentDiagnostics } from '../../server/src/agentDiagnostics.js';
+import type { FeedSend } from '../../server/src/agentFeed.js';
 import { agentCreatedMessage } from '../../server/src/agentMessages.js';
 import { AgentRuntime } from '../../server/src/agentRuntime.js';
 import { AgentStateStore } from '../../server/src/agentStateStore.js';
@@ -64,6 +65,7 @@ import {
 import {
   CONFIG_KEY_AUTO_SHOW_PANEL,
   CONFIG_KEY_AUTO_SPAWN_AGENT,
+  FEED_CONN_ID_PREFIX,
   GLOBAL_KEY_ALWAYS_SHOW_LABELS,
   GLOBAL_KEY_GHOST_HEADLESS_AGENTS,
   GLOBAL_KEY_HOOKS_INFO_SHOWN,
@@ -110,6 +112,12 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   // Pixel Agents Server (hook event reception)
   private pixelAgentsServer: PixelAgentsServer | null = null;
   private adapter: StateAdapter;
+
+  // Agent screen feed: the embedded webview's connection id. Minted by us per
+  // resolved view (a fresh iframe is a fresh connection); the previous one's
+  // subscriptions are dropped when it is replaced, reloaded or disposed.
+  private feedConnId: string | null = null;
+  private feedConnSeq = 0;
 
   // Auto-spawn guard: ensures the startup spawn fires at most once per VS Code
   // session, even though webviewReady fires on every panel focus.
@@ -405,6 +413,26 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = getWebviewContent(webviewView.webview, this.extensionUri);
 
+    // The feed goes to THIS iframe only (never through sendOrBuffer's broadcast
+    // path). The embedded webview is privileged by construction.
+    if (this.feedConnId) this.runtime.feedHub.dropConnection(this.feedConnId);
+    const feedConnId = `${FEED_CONN_ID_PREFIX}${++this.feedConnSeq}`;
+    this.feedConnId = feedConnId;
+    const feedWebview = webviewView.webview;
+    const feedSend: FeedSend = (m) => {
+      // A disposed view rejects; the drop on dispose follows.
+      feedWebview.postMessage(m).then(undefined, () => undefined);
+    };
+    // Hidden without retainContextWhenHidden = the iframe is gone; it reloads
+    // (and re-subscribes) when shown again.
+    webviewView.onDidChangeVisibility(() => {
+      if (!webviewView.visible) this.runtime.feedHub.dropConnection(feedConnId);
+    });
+    webviewView.onDidDispose(() => {
+      this.runtime.feedHub.dropConnection(feedConnId);
+      if (this.feedConnId === feedConnId) this.feedConnId = null;
+    });
+
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === 'launchAgent') {
         const prevAgentIds = new Set(this.store.keys());
@@ -534,6 +562,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
         }
       } else if (message.type === 'webviewReady') {
+        // A (re)loaded page holds no feed subscriptions: forget the old page's.
+        this.runtime.feedHub.dropConnection(feedConnId);
         // Flush any messages buffered while the iframe was loading. Mark
         // ready BEFORE flush so re-entrant broadcasts (triggered by handlers
         // below) go directly. Order is preserved: buffered first, new second.
@@ -830,6 +860,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
         })();
         sendExistingAgents(this.store, this.adapter, this.webview);
+      } else if (message.type === 'subscribeAgentFeed') {
+        if (Number.isSafeInteger(message.id)) {
+          this.runtime.feedHub.subscribe(feedConnId, message.id as number, true, feedSend);
+        }
+      } else if (message.type === 'unsubscribeAgentFeed') {
+        if (Number.isSafeInteger(message.id)) {
+          this.runtime.feedHub.unsubscribe(feedConnId, message.id as number);
+        }
       } else if (message.type === 'requestDiagnostics') {
         // Send connection diagnostics for all agents to the Debug View
         this.webview?.postMessage({

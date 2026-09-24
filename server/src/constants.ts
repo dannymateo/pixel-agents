@@ -133,6 +133,12 @@ export const FEED_MAX_SUBSCRIPTIONS_PER_CONNECTION = 8;
 export const FEED_SEEN_UUIDS_MAX = 2048;
 /** A record uuid longer than this is not remembered (no dedup for it). */
 export const FEED_UUID_MAX_CHARS = 128;
+/** Feed subscriptions one /ws connection may make per window: a subscribe can
+ *  cost a transcript tail read (FEED_TAIL_READ_BYTES), so a looping client is
+ *  cut off; the rest are dropped unanswered. The webview's own retry pace
+ *  (FEED_UNAVAILABLE_RETRY_MS, 3 s) stays far below it. */
+export const FEED_SUBSCRIBE_RATE_MAX = 20;
+export const FEED_SUBSCRIBE_RATE_WINDOW_MS = 10_000;
 /** Workflow node labels and workflow-agent task lines are clipped to this. */
 export const WORKFLOW_LABEL_MAX_CHARS = 80;
 /** Spawn-tree guards against a runaway or hostile transcript: derived agents

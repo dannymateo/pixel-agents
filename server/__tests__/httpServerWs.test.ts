@@ -4,7 +4,11 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 
-import { WS_CLOSE_FORBIDDEN_ORIGIN, WS_CLOSE_UNAUTHORIZED } from '../src/constants.js';
+import {
+  FEED_SUBSCRIBE_RATE_MAX,
+  WS_CLOSE_FORBIDDEN_ORIGIN,
+  WS_CLOSE_UNAUTHORIZED,
+} from '../src/constants.js';
 
 // Isolated temp HOME: the server writes ~/.pixel-agents/{server.json,servers/}
 // and the consent assertions below read ~/.pixel-agents/config.json.
@@ -18,6 +22,9 @@ vi.mock('os', async () => {
 const { PixelAgentsServer } = await import('../src/server.js');
 const { AgentStateStore } = await import('../src/agentStateStore.js');
 const { grantHooksConsent } = await import('../src/configPersistence.js');
+const { AgentRuntime } = await import('../src/agentRuntime.js');
+const { claudeProvider } = await import('../src/providers/hook/claude/claude.js');
+const { readNewLines } = await import('../src/fileWatcher.js');
 
 /** How long to wait, after the handshake, for a server-side rejection close.
  *  The gate runs synchronously in the route handler, so a rejection lands
@@ -550,5 +557,255 @@ describe('/ws transcript-derived text gate', () => {
       depth: 1,
     });
     expect(unprivileged).not.toHaveProperty('label');
+  });
+});
+
+// The agent screen feed (spec §4) exposes code and command output. It is
+// answered on the subscribing socket only, and only to a connection that proved
+// the server token on its handshake — never through the broadcast stream every
+// connected viewer receives.
+describe('/ws agent screen feed gate', () => {
+  let server: InstanceType<typeof PixelAgentsServer>;
+  let store: InstanceType<typeof AgentStateStore>;
+  let runtime: InstanceType<typeof AgentRuntime>;
+  const sockets: WebSocket[] = [];
+
+  const AGENT_ID = 7;
+  const SECRET_LINE = 'const secret = "feed-only";';
+
+  beforeEach(() => {
+    tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-ws-feed-'));
+    fs.mkdirSync(path.join(tmpBase, '.pixel-agents'), { recursive: true });
+    server = new PixelAgentsServer();
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+  });
+
+  afterEach(() => {
+    for (const socket of sockets) socket.terminate();
+    sockets.length = 0;
+    runtime.dispose();
+    server?.stop();
+    try {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  function editRecord(uuid: string, newString: string): Record<string, unknown> {
+    return {
+      type: 'assistant',
+      uuid,
+      timestamp: '2026-09-24T10:00:00.000Z',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: `toolu_${uuid}`,
+            name: 'Edit',
+            input: { file_path: '/repo/a.ts', old_string: 'old', new_string: newString },
+          },
+        ],
+      },
+    };
+  }
+
+  /** An agent whose transcript already holds one Edit, read up to its end. */
+  function seedAgent(): void {
+    const jsonlFile = path.join(tmpBase, 'agent.jsonl');
+    fs.writeFileSync(jsonlFile, JSON.stringify(editRecord('u1', SECRET_LINE)) + '\n');
+    store.set(AGENT_ID, {
+      id: AGENT_ID,
+      sessionId: 's',
+      isExternal: true,
+      projectDir: tmpBase,
+      jsonlFile,
+      fileOffset: fs.statSync(jsonlFile).size,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      lastDataAt: 0,
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      hookDelivered: false,
+      contextTokens: 0,
+      maxContextTokens: 200_000,
+    });
+  }
+
+  /** Every JSON message a socket receives from now on. */
+  function recordMessages(socket: WebSocket): Array<Record<string, unknown>> {
+    const got: Array<Record<string, unknown>> = [];
+    socket.on('message', (data: Buffer) => {
+      try {
+        got.push(JSON.parse(data.toString()) as Record<string, unknown>);
+      } catch {
+        /* ignore non-JSON frames */
+      }
+    });
+    return got;
+  }
+
+  const feedMessages = (got: Array<Record<string, unknown>>) =>
+    got.filter((m) => typeof m.type === 'string' && m.type.startsWith('agentFeed'));
+
+  async function waitUntil(cond: () => boolean, ms = 2_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!cond() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function startWithSockets(): Promise<{
+    tokened: WebSocket;
+    untokened: WebSocket;
+    bystander: WebSocket;
+  }> {
+    const config = await server.start({ embedded: false, store, runtime });
+    const base = `ws://127.0.0.1:${config.port.toString()}/ws`;
+    const withToken = `${base}?token=${encodeURIComponent(config.token)}`;
+    const [tokened, untokened, bystander] = await Promise.all([
+      connectTo(withToken),
+      connectTo(base),
+      connectTo(withToken),
+    ]);
+    sockets.push(tokened.socket, untokened.socket, bystander.socket);
+    expect(tokened.accepted && untokened.accepted && bystander.accepted).toBe(true);
+    return { tokened: tokened.socket, untokened: untokened.socket, bystander: bystander.socket };
+  }
+
+  it('denies an untokened subscriber and sends it no snapshot', async () => {
+    seedAgent();
+    const { untokened } = await startWithSockets();
+    const got = recordMessages(untokened);
+
+    untokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id: AGENT_ID }));
+    await waitUntil(() => feedMessages(got).length > 0);
+    await pause(300);
+
+    expect(feedMessages(got)).toEqual([
+      { type: 'agentFeedDenied', id: AGENT_ID, reason: 'unprivileged' },
+    ]);
+    expect(JSON.stringify(got)).not.toContain('feed-only');
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(false);
+  });
+
+  it('snapshots and appends to the tokened subscriber alone', async () => {
+    seedAgent();
+    const { tokened, untokened, bystander } = await startWithSockets();
+    const gotTokened = recordMessages(tokened);
+    const gotUntokened = recordMessages(untokened);
+    const gotBystander = recordMessages(bystander);
+
+    tokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id: AGENT_ID }));
+    await waitUntil(() => feedMessages(gotTokened).length > 0);
+    const [snapshot] = feedMessages(gotTokened);
+    expect(snapshot).toMatchObject({ type: 'agentFeedSnapshot', id: AGENT_ID, truncated: false });
+    expect(JSON.stringify(snapshot)).toContain('feed-only');
+
+    // The transcript grows and the runtime's watcher reads it: the record
+    // reaches the hub through the listener the runtime registered.
+    const agent = store.get(AGENT_ID)!;
+    const later = JSON.stringify(editRecord('u2', 'const later = 1;'));
+    fs.appendFileSync(agent.jsonlFile, `${later}\n`);
+    readNewLines(AGENT_ID, store, new Map(), new Map());
+    await waitUntil(() => feedMessages(gotTokened).length > 1);
+    expect(feedMessages(gotTokened)[1]).toMatchObject({ type: 'agentFeedAppend', id: AGENT_ID });
+    expect(JSON.stringify(feedMessages(gotTokened)[1])).toContain('const later = 1;');
+
+    await pause(300);
+    expect(feedMessages(gotTokened)).toHaveLength(2);
+    expect(feedMessages(gotBystander)).toEqual([]);
+    expect(feedMessages(gotUntokened)).toEqual([]);
+    expect(JSON.stringify([...gotBystander, ...gotUntokened])).not.toContain('feed-only');
+  });
+
+  it('drops the subscription when its socket closes', async () => {
+    seedAgent();
+    const { tokened } = await startWithSockets();
+    const got = recordMessages(tokened);
+    tokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id: AGENT_ID }));
+    await waitUntil(() => feedMessages(got).length > 0);
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(true);
+
+    tokened.close();
+    await waitUntil(() => !runtime.feedHub.hasSubscribers(AGENT_ID));
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(false);
+  });
+
+  it('unsubscribes only its own connection', async () => {
+    seedAgent();
+    const { tokened, bystander } = await startWithSockets();
+    const got = recordMessages(tokened);
+    tokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id: AGENT_ID }));
+    await waitUntil(() => feedMessages(got).length > 0);
+
+    // Another connection cannot name this one: its unsubscribe is its own.
+    bystander.send(JSON.stringify({ type: 'unsubscribeAgentFeed', id: AGENT_ID }));
+    await pause(200);
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(true);
+
+    tokened.send(JSON.stringify({ type: 'unsubscribeAgentFeed', id: AGENT_ID }));
+    await waitUntil(() => !runtime.feedHub.hasSubscribers(AGENT_ID));
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(false);
+  });
+
+  it('ignores a subscription whose id is not an integer', async () => {
+    seedAgent();
+    const { tokened } = await startWithSockets();
+    const got = recordMessages(tokened);
+    for (const id of ['7', 7.5, null, { n: 7 }]) {
+      tokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id }));
+    }
+    await pause(300);
+    expect(feedMessages(got)).toEqual([]);
+    expect(runtime.feedHub.hasSubscribers(AGENT_ID)).toBe(false);
+  });
+
+  it('rate-limits subscriptions per connection', async () => {
+    seedAgent();
+    const { untokened } = await startWithSockets();
+    const got = recordMessages(untokened);
+    for (let i = 0; i < FEED_SUBSCRIBE_RATE_MAX + 5; i++) {
+      untokened.send(JSON.stringify({ type: 'subscribeAgentFeed', id: AGENT_ID }));
+    }
+    await waitUntil(() => feedMessages(got).length >= FEED_SUBSCRIBE_RATE_MAX);
+    await pause(300);
+    expect(feedMessages(got)).toHaveLength(FEED_SUBSCRIBE_RATE_MAX);
+  });
+});
+
+// The server token rides `/ws?token=` and unlocks consent and every agent's
+// screen, so the request log must never carry it.
+describe('request log redaction', () => {
+  it('masks every token query value and keeps the rest', async () => {
+    const { redactTokenInUrl, redactedRequest } = await import('../src/httpServer.js');
+    expect(redactTokenInUrl('/ws?token=abc')).toBe('/ws?token=[redacted]');
+    expect(redactTokenInUrl('/ws?a=1&token=abc&token=def')).toBe(
+      '/ws?a=1&token=[redacted]&token=[redacted]',
+    );
+    expect(redactTokenInUrl('/ws?TOKEN=abc')).toBe('/ws?token=[redacted]');
+    expect(redactTokenInUrl('/ws?tokens=x')).toBe('/ws?tokens=x');
+    expect(redactTokenInUrl('/api/health')).toBe('/api/health');
+    expect(
+      redactedRequest({ method: 'GET', url: '/ws?token=secret', host: 'h', ip: '127.0.0.1' }),
+    ).toEqual({
+      method: 'GET',
+      url: '/ws?token=[redacted]',
+      host: 'h',
+      remoteAddress: '127.0.0.1',
+      remotePort: undefined,
+    });
   });
 });

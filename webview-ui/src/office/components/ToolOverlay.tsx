@@ -40,6 +40,12 @@ interface ToolOverlayProps {
   panRef: React.RefObject<{ x: number; y: number }>;
   onCloseAgent: (id: number) => void;
   alwaysShowOverlay: boolean;
+  /** Open the selected agent's screen (the "Ver pantalla" button). Absent =
+   *  no button (edit mode). */
+  onOpenScreen?: (id: number) => void;
+  /** Whether an agent has a screen to open (not a workflow node, not a
+   *  transient Subtask sprite). */
+  canOpenScreen?: (id: number) => boolean;
 }
 
 /** Derive a short human-readable activity string from tools/status */
@@ -92,6 +98,8 @@ export function ToolOverlay({
   panRef,
   onCloseAgent,
   alwaysShowOverlay,
+  onOpenScreen,
+  canOpenScreen,
 }: ToolOverlayProps) {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -260,6 +268,21 @@ export function ToolOverlay({
                   </span>
                 )}
               </div>
+              {isSelected && !isSub && onOpenScreen && canOpenScreen?.(id) && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenScreen(id);
+                  }}
+                  title="Ver la pantalla del agente"
+                  className="ml-2 shrink-0 leading-none"
+                  data-testid="agent-screen-open"
+                >
+                  Ver pantalla
+                </Button>
+              )}
               {isSelected && !isSub && (
                 <Button
                   variant="ghost"

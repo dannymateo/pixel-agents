@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { toMajorMinor } from './changelogData.js';
+import { AgentScreenModal } from './components/AgentScreenModal.js';
 import { BottomToolbar } from './components/BottomToolbar.js';
 import { ChangelogModal } from './components/ChangelogModal.js';
 import { ConnectionIndicator } from './components/ConnectionIndicator.js';
@@ -23,11 +24,13 @@ import { EditorState } from './office/editor/editorState.js';
 import { EditorToolbar } from './office/editor/EditorToolbar.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { exportLayoutToFile } from './office/layout/exportLayout.js';
-import { isRotatable } from './office/layout/furnitureCatalog.js';
+import { getCatalogEntry, isRotatable } from './office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from './office/layout/layoutSerializer.js';
+import { isMonitorType, monitorSeat } from './office/layout/monitorOwner.js';
 import { LivingOfficeController } from './office/living/livingOfficeController.js';
+import { overlayProjection } from './office/projection.js';
 import { getPetCount } from './office/sprites/petSpriteData.js';
-import { EditTool, type OfficeLayout } from './office/types.js';
+import { EditTool, type OfficeLayout, TILE_SIZE } from './office/types.js';
 import { isBrowserRuntime, isE2E } from './runtime.js';
 import { installTestHooks } from './testHooks.js';
 import { transport } from './transport/index.js';
@@ -51,6 +54,22 @@ function getOfficeState(): OfficeState {
 // The living office (docs/adr/0003): shared by the message handler (tree,
 // composition, derived agents' lives) and the editor (edits the user's layout only).
 const livingOffice = new LivingOfficeController(getOfficeState);
+
+/** The agent's last known context usage, the screen header's first value. */
+function screenContext(id: number): { tokens: number; max: number } | undefined {
+  const ch = getOfficeState().characters.get(id);
+  return ch && ch.contextTokens > 0 && ch.maxContextTokens > 0
+    ? { tokens: ch.contextTokens, max: ch.maxContextTokens }
+    : undefined;
+}
+
+/** Whether an agent has a screen to open: a real agent (not a transient
+ *  Subtask sprite) that is not a workflow node — those have no transcript. */
+function canOpenAgentScreen(id: number): boolean {
+  const ch = getOfficeState().characters.get(id);
+  if (!ch || ch.isSubagent) return false;
+  return livingOffice.directory.get(id)?.nodeKind !== 'workflow';
+}
 
 function App() {
   // Browser runtime (dev or static dist): dispatch mock messages after the
@@ -115,6 +134,19 @@ function App() {
   const [hooksTooltipDismissed, setHooksTooltipDismissed] = useState(false);
   const [isDebugMode, setIsDebugMode] = useState(false);
   const [alwaysShowOverlay, setAlwaysShowOverlay] = useState(false);
+
+  // The agent screen (spec §4): the agent whose screen is open, if any. Never
+  // open while editing the layout — entering edit mode closes it.
+  const [screenAgentId, setScreenAgentId] = useState<number | null>(null);
+  if (editor.isEditMode && screenAgentId !== null) setScreenAgentId(null);
+  const handleOpenScreen = useCallback(
+    (id: number) => {
+      if (editor.isEditMode || !canOpenAgentScreen(id)) return;
+      setScreenAgentId(id);
+    },
+    [editor.isEditMode],
+  );
+  const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
 
   const currentMajorMinor = toMajorMinor(extensionVersion);
 
@@ -218,7 +250,55 @@ function App() {
     hooks.editorTileAction = (col, row) => editor.handleEditorTileAction(col, row);
     hooks.editorEraseAction = (col, row) => editor.handleEditorEraseAction(col, row);
     hooks.getShowAreas = () => effectiveShowAreas;
-  }, [editor.handleEditorTileAction, editor.handleEditorEraseAction, effectiveShowAreas]);
+    hooks.monitorClientPoint = (agentId) => {
+      const os = getOfficeState();
+      const ch = os.characters.get(agentId);
+      const seat = ch?.seatId ? os.seats.get(ch.seatId) : undefined;
+      const container = containerRef.current;
+      if (!ch || !seat || !container) return null;
+      // Only once it sits: a character still walking in may pass in front of
+      // the monitor and take the click.
+      const seated =
+        ch.path.length === 0 && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+      if (!seated) return null;
+      const footprintOf = (type: string) => {
+        const entry = getCatalogEntry(type);
+        return entry ? { w: entry.footprintW, h: entry.footprintH } : undefined;
+      };
+      const layout = os.getLayout();
+      const monitor = layout.furniture.find(
+        (f) => isMonitorType(f.type) && monitorSeat(f, os.seats.values(), footprintOf) === seat,
+      );
+      const fp = monitor ? footprintOf(monitor.type) : undefined;
+      if (!monitor || !fp) return null;
+      // The footprint tile farthest from the seat: the seated sprite never covers it.
+      let best = { col: monitor.col, row: monitor.row, d: -1 };
+      for (let r = monitor.row; r < monitor.row + fp.h; r++) {
+        for (let c = monitor.col; c < monitor.col + fp.w; c++) {
+          const d = Math.abs(c - seat.seatCol) + Math.abs(r - seat.seatRow);
+          if (d > best.d) best = { col: c, row: r, d };
+        }
+      }
+      const rect = container.getBoundingClientRect();
+      const project = overlayProjection(
+        layout,
+        rect,
+        editor.zoom,
+        editor.panRef.current,
+        window.devicePixelRatio || 1,
+      );
+      return {
+        x: rect.left + project.toScreenX((best.col + 0.5) * TILE_SIZE),
+        y: rect.top + project.toScreenY((best.row + 0.5) * TILE_SIZE),
+      };
+    };
+  }, [
+    editor.handleEditorTileAction,
+    editor.handleEditorEraseAction,
+    effectiveShowAreas,
+    editor.zoom,
+    editor.panRef,
+  ]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -372,6 +452,8 @@ function App() {
         panRef={editor.panRef}
         showAreas={effectiveShowAreas}
         activeAreaLabel={activeAreaLabel}
+        onOpenScreen={editor.isEditMode ? undefined : handleOpenScreen}
+        canOpenScreen={canOpenAgentScreen}
       />
 
       {!isDebugMode ? (
@@ -458,6 +540,8 @@ function App() {
             panRef={editor.panRef}
             onCloseAgent={handleCloseAgent}
             alwaysShowOverlay={alwaysShowOverlay}
+            onOpenScreen={editor.isEditMode ? undefined : handleOpenScreen}
+            canOpenScreen={canOpenAgentScreen}
           />
         </>
       ) : (
@@ -603,6 +687,16 @@ function App() {
 
       {showMigrationNotice && (
         <MigrationNotice onDismiss={() => setMigrationNoticeDismissed(true)} />
+      )}
+
+      {screenAgentId !== null && !editor.isEditMode && (
+        <AgentScreenModal
+          agentId={screenAgentId}
+          directory={livingOffice.directory}
+          transport={transport}
+          onClose={handleCloseScreen}
+          context={screenContext(screenAgentId)}
+        />
       )}
 
       {intro && (

@@ -2,6 +2,7 @@ import type { AgentSeatMeta } from '../../core/src/messages.js';
 import type { HookProvider } from '../../core/src/provider.js';
 import { resendAgentActivity } from './agentActivityResend.js';
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
+import type { AgentFeedHub, FeedSend } from './agentFeed.js';
 import { agentTreeMeta } from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
@@ -70,6 +71,16 @@ export interface ClientMessageContext {
    * to false so a caller that forgets to pass it gets the safe answer.
    */
   privileged?: boolean;
+  /**
+   * This connection's identity for directed replies (the agent screen feed).
+   * Minted by the HOST — a server-side random UUID per socket, a fixed id for
+   * the embedded webview — never taken from a client message, so one
+   * connection can never subscribe, unsubscribe or drop in another's name.
+   */
+  connId?: string;
+  /** The agent screen feed hub (the runtime's). Absent = the feed is
+   *  unavailable on this server; subscriptions are answered with a denial. */
+  feedHub?: AgentFeedHub;
 }
 
 // ── Setting key constants (mirror adapters/vscode/constants.ts) ──
@@ -113,6 +124,33 @@ export function handleClientMessage(
         if (agent.jsonlFile) runtime.dismissalTracker.dismiss(agent.jsonlFile);
         runtime.closeAgent(id);
       }
+      break;
+    }
+
+    case 'subscribeAgentFeed': {
+      // The feed exposes code and command output: it is answered ONLY on this
+      // connection's `send` (never store.broadcast), and the hub denies an
+      // unprivileged connection before looking anything up.
+      const id = msg.id;
+      if (typeof id !== 'number' || !Number.isSafeInteger(id)) break;
+      const feedSend: FeedSend = (m) => send(m as unknown as Record<string, unknown>);
+      const { feedHub, connId } = ctx;
+      if (!feedHub || typeof connId !== 'string' || connId.length === 0) {
+        feedSend({
+          type: 'agentFeedDenied',
+          id,
+          reason: ctx.privileged === true ? 'unknownAgent' : 'unprivileged',
+        });
+        break;
+      }
+      feedHub.subscribe(connId, id, ctx.privileged === true, feedSend);
+      break;
+    }
+
+    case 'unsubscribeAgentFeed': {
+      const id = msg.id;
+      if (typeof id !== 'number' || !Number.isSafeInteger(id)) break;
+      if (ctx.feedHub && typeof ctx.connId === 'string') ctx.feedHub.unsubscribe(ctx.connId, id);
       break;
     }
 

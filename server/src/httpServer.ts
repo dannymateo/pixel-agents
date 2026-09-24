@@ -15,6 +15,8 @@ import type {
 } from './clientMessageHandler.js';
 import { handleClientMessage } from './clientMessageHandler.js';
 import {
+  FEED_SUBSCRIBE_RATE_MAX,
+  FEED_SUBSCRIBE_RATE_WINDOW_MS,
   HOOK_API_PREFIX,
   MAX_HOOK_BODY_SIZE,
   WS_CLOSE_FORBIDDEN_ORIGIN,
@@ -64,7 +66,9 @@ const startTime = Date.now();
  */
 export async function createHttpServer(options: HttpServerOptions): Promise<HttpServerHandle> {
   const app = Fastify({
-    logger: !options.embedded,
+    // The request log never carries the server token: it rides `/ws?token=`
+    // and unlocks consent and every agent's screen (code, command output).
+    logger: options.embedded ? false : { serializers: { req: redactedRequest } },
     bodyLimit: MAX_HOOK_BODY_SIZE,
   });
 
@@ -169,6 +173,13 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
 
     const { store } = options;
 
+    // This socket's identity for directed replies (the agent screen feed).
+    // Minted here, never read from the client, so a connection can only ever
+    // act on its own subscriptions.
+    const connId = crypto.randomUUID();
+    const feedHub = options.runtime?.feedHub;
+    const allowFeedSubscribe = feedSubscribeLimiter();
+
     // Pipe store events to WebSocket client
     const onAgentAdded = (_id: number, agent: AgentState) => {
       safeSend(socket, agentCreatedMessage(agent, privileged));
@@ -193,6 +204,8 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
         if (!options.embedded && msg.type) {
           console.log('[Pixel Agents] WS client message:', msg.type);
         }
+        if (msg.type === 'subscribeAgentFeed' && !allowFeedSubscribe()) return;
+        // Replies (the feed included) go to THIS socket only.
         handleClientMessage(msg, (m) => safeSend(socket, m), {
           store,
           runtime: options.runtime,
@@ -200,17 +213,24 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
           onSetHooksEnabled: options.onSetHooksEnabled,
           onReloadAssets: options.onReloadAssets,
           privileged,
+          connId,
+          feedHub,
         });
       } catch {
         // Malformed JSON, ignore
       }
     });
 
-    socket.on('close', () => {
+    // Every way a socket ends frees its store listeners and feed
+    // subscriptions (idempotent: `error` is followed by `close`).
+    const release = (): void => {
       store.off('agentAdded', onAgentAdded);
       store.off('agentRemoved', onAgentRemoved);
       store.off('broadcast', onBroadcast);
-    });
+      feedHub?.dropConnection(connId);
+    };
+    socket.on('close', release);
+    socket.on('error', release);
   });
 }
 
@@ -309,6 +329,47 @@ function bearerAuth(expectedToken: string) {
 }
 
 // ── Utilities ──────────────────────────────────────────────────
+
+/** Fastify's default request log fields, with any `token` query value masked. */
+export function redactedRequest(req: {
+  method?: string;
+  url?: string;
+  host?: string;
+  ip?: string;
+  socket?: { remotePort?: number };
+}): Record<string, unknown> {
+  return {
+    method: req.method,
+    url: redactTokenInUrl(req.url ?? ''),
+    host: req.host,
+    remoteAddress: req.ip,
+    remotePort: req.socket?.remotePort,
+  };
+}
+
+/** `url` with every `token` query value replaced by `[redacted]`. */
+export function redactTokenInUrl(url: string): string {
+  const q = url.indexOf('?');
+  if (q === -1) return url;
+  const query = url
+    .slice(q + 1)
+    .split('&')
+    .map((part) => (/^token(=|$)/i.test(part) ? 'token=[redacted]' : part))
+    .join('&');
+  return `${url.slice(0, q)}?${query}`;
+}
+
+/** Per-connection sliding-window limit on feed subscriptions: true = allowed. */
+function feedSubscribeLimiter(): () => boolean {
+  const recent: number[] = [];
+  return () => {
+    const now = Date.now();
+    while (recent.length > 0 && now - recent[0] >= FEED_SUBSCRIBE_RATE_WINDOW_MS) recent.shift();
+    if (recent.length >= FEED_SUBSCRIBE_RATE_MAX) return false;
+    recent.push(now);
+    return true;
+  };
+}
 
 function safeSend(
   socket: { send: (data: string) => void; readyState: number },

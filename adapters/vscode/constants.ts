@@ -40,3 +40,7 @@ export const CONFIG_KEY_AUTO_SPAWN_AGENT = 'pixel-agents.autoSpawnAgent';
 export const VIEW_ID = 'pixel-agents.panelView';
 export const COMMAND_SHOW_PANEL = 'pixel-agents.showPanel';
 export const COMMAND_EXPORT_DEFAULT_LAYOUT = 'pixel-agents.exportDefaultLayout';
+
+/** Prefix of the embedded webview's agent-screen-feed connection id (one per
+ *  resolved view: `<prefix><n>`). */
+export const FEED_CONN_ID_PREFIX = 'vscode-webview-';

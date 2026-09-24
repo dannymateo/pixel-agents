@@ -66,6 +66,11 @@ declare global {
       /** Drive the real edit-mode tile paint/erase handlers by (col,row),
        *  bypassing only canvas pixel→tile geometry (mirrors petClick). */
       editorTileAction?: (col: number, row: number) => void;
+      /** Viewport point on the monitor at an agent's desk (its footprint tile
+       *  farthest from the seat, clear of the seated sprite), for a real mouse
+       *  click; null while the agent is not sitting at its desk, or has no
+       *  monitor. */
+      monitorClientPoint?: (agentId: number) => { x: number; y: number } | null;
       editorEraseAction?: (col: number, row: number) => void;
       getPets?: () => Array<{
         id: string;

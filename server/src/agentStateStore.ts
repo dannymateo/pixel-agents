@@ -152,10 +152,12 @@ export class AgentStateStore {
     }
     const persisted: PersistedAgent[] = [];
     for (const agent of this.agents.values()) {
-      // Background-spawn children are derived state: the 1s scan re-materializes
-      // them from sidecars after a restore. Persisting them would resurrect
-      // immortal characters whose completion signal never comes.
-      if (agent.spawnToolUseId) continue;
+      // Derived agents (every node of a spawn tree below its session root,
+      // docs/adr/0002) are never persisted: the 1s scan re-materializes them
+      // from sidecars while their spawn is live. Persisting them would
+      // resurrect immortal characters whose completion signal never comes.
+      // parentAgentId also covers derived nodes without a spawn tool id.
+      if (agent.spawnToolUseId || agent.parentAgentId !== undefined) continue;
       persisted.push({
         id: agent.id,
         sessionId: agent.sessionId,

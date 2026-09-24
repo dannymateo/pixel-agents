@@ -126,3 +126,25 @@ export const FEED_ENTRY_DETAIL_MAX_BYTES = 65536;
 export const FEED_TAIL_READ_BYTES = 1_048_576;
 /** Workflow node labels and workflow-agent task lines are clipped to this. */
 export const WORKFLOW_LABEL_MAX_CHARS = 80;
+/** Spawn-tree guards against a runaway or hostile transcript: derived agents
+ *  past these are deferred (one warning), never materialized. */
+export const MAX_DERIVED_AGENTS_PER_TREE = 200;
+export const MAX_SPAWN_DEPTH = 16;
+/** Workflow launches of one agent allowed to wait for their node while a
+ *  tree cap defers them; past this a launch is refused outright. */
+export const MAX_PENDING_WORKFLOW_LAUNCHES = 16;
+/** On restore, a root whose transcript has not been written for this long is
+ *  assumed dead (the CLI died without SessionEnd): its persisted live spawn ids
+ *  are dropped so its tree does not come back immortal. */
+export const RESTORED_SPAWN_MAX_IDLE_MS = 10 * 60_000;
+/** History read, once, when an agent is watched from the END of its transcript
+ *  (adopted or restored mid-session), to seed the spawns still live there:
+ *  without it a tree already running before adoption never materializes. A
+ *  longer transcript is read from its last SPAWN_SEED_MAX_BYTES only (a spawn
+ *  opened before that stays unseen, as before seeding). 8 MiB covers a whole
+ *  multi-hour orchestrating lead (a real `/equipo` lead measured 6.2 MB) and
+ *  costs ~40 ms of synchronous reading once per adoption; a bigger window
+ *  would let one pathological transcript stall the event loop longer. */
+export const SPAWN_SEED_MAX_BYTES = 8 * 1024 * 1024;
+/** Chunk size of that history read (bounds the memory held at once). */
+export const SPAWN_SEED_READ_CHUNK_BYTES = 1024 * 1024;

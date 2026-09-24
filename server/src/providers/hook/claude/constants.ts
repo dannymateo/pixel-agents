@@ -89,6 +89,10 @@ export const CLAUDE_SMALL_CONTEXT_MODEL_PATTERN = /haiku|claude-[123]|-4-[01]\b/
 // ── Spawn tree + agent screen feed ──
 /** Real sidecars are well under 1 KB; anything past this is not one of ours. */
 export const SIDECAR_MAX_BYTES = 64 * 1024;
+/** Sidecars opened (not answered from cache) per discovery call. Opening a
+ *  freshly written file costs milliseconds on Windows, synchronously; this caps
+ *  one call at a few hundred ms however large the backlog (newest read first). */
+export const SIDECAR_COLD_READS_PER_SCAN = 48;
 /** Shape of a Claude spawn key (`<key>` of `agent-<key>.jsonl`, the hook
  *  `agent_id`). Every key -- from a hook payload, a sidecar filename or a
  *  sidecar's `parentAgentId` -- must match it before it may identify an agent:

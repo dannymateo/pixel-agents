@@ -40,15 +40,30 @@ import {
   FILE_WATCHER_POLL_INTERVAL_MS,
   GLOBAL_SCAN_ACTIVE_MAX_AGE_MS,
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
+  MAX_DERIVED_AGENTS_PER_TREE,
+  MAX_PENDING_WORKFLOW_LAUNCHES,
+  MAX_SPAWN_DEPTH,
   PROJECT_SCAN_INTERVAL_MS,
+  RESTORED_SPAWN_MAX_IDLE_MS,
+  SPAWN_SEED_MAX_BYTES,
+  SPAWN_SEED_READ_CHUNK_BYTES,
+  SPAWN_SIBLING_HUE_STEP_DEG,
 } from './constants.js';
 import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
-import { pathsMatch } from './pathKey.js';
-import type { SubagentWatch } from './subagentWatch.js';
+import { PathSet, pathsMatch } from './pathKey.js';
+// The one Claude-specific import of the runtime: the run-directory ↔ session
+// binding the workflow launch gate needs (TeamProvider exposes no such check).
+import type { SpawnEntry, SpawnTreeNode } from './spawnTree.js';
+import { planSpawnTree } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
-import { getHookProvider, processTranscriptLine } from './transcriptParser.js';
+import type { SeededSpawnCandidate } from './transcriptParser.js';
+import {
+  getHookProvider,
+  processTranscriptLine,
+  seedSpawnsFromHistory,
+} from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
 /** Dismissal tracker instance. Set once at startup via setDismissalTracker().
@@ -113,6 +128,9 @@ export function startFileWatching(
   // give an agent adopted or restored mid-session a context gauge without
   // replaying its whole transcript.
   seedContextUsage(agentId, agents, getHookProvider());
+  // Same seam, same reason: the spawns it left running before watching starts
+  // would otherwise never join its spawn tree (plan T18).
+  seedLiveSpawns(agentId, agents);
 
   // Single polling approach: reliable on all platforms (macOS, Linux, WSL2, Windows).
   // Previously used triple-redundant fs.watch + fs.watchFile + setInterval, but
@@ -198,6 +216,165 @@ export function startFileWatching(
     }
   }, FILE_WATCHER_POLL_INTERVAL_MS);
   pollingTimers.set(agentId, interval);
+}
+
+/** Agents already seeded, with the transcript they were seeded from: watching
+ *  restarted on the same file never pays for (or re-applies) the history twice. */
+const spawnSeededFiles = new WeakMap<AgentState, string>();
+
+/**
+ * Seed the live spawns of an agent watched from the END of its transcript
+ * (adopted or restored mid-session) from one bounded read of its history. An
+ * agent watched from the start replays everything and needs none of this —
+ * derived agents are watched that way, so their subtrees come back as their
+ * replay reaches each spawn.
+ */
+function seedLiveSpawns(agentId: number, agents: AgentStateStore): void {
+  const agent = agents.get(agentId);
+  if (!agent || !agent.jsonlFile || agent.nodeKind === 'workflow' || agent.fileOffset <= 0) return;
+  if (spawnSeededFiles.get(agent) === agent.jsonlFile) return;
+  spawnSeededFiles.set(agent, agent.jsonlFile);
+  const end = agent.fileOffset;
+  const start = Math.max(0, end - SPAWN_SEED_MAX_BYTES);
+  const seedWindow = { lastLineEnd: -1 };
+  try {
+    seedSpawnsFromHistory(
+      agentId,
+      readTranscriptWindow(agent.jsonlFile, start, end, seedWindow),
+      agents,
+      (candidates) => freshSeededSpawns(agent, candidates, agents),
+    );
+    // A record still being written at adoption: let the live stream read it
+    // whole from its start instead of a headless fragment it would drop (a
+    // spawn's tool_result lost that way would keep the spawn alive).
+    if (
+      seedWindow.lastLineEnd > start &&
+      seedWindow.lastLineEnd < end &&
+      agent.fileOffset === end
+    ) {
+      agent.fileOffset = seedWindow.lastLineEnd;
+      agent.lineBuffer = '';
+    }
+  } catch (e) {
+    console.log(`[Pixel Agents] Watcher: Agent ${agentId} - spawn seeding skipped: ${e}`);
+  }
+}
+
+/**
+ * The complete lines of `file` between byte `start` and `end`, streamed in
+ * SPAWN_SEED_READ_CHUNK_BYTES chunks. A window opening mid-record drops that
+ * fragment; an unterminated last line is a record still being written, left
+ * to the live stream (seedLiveSpawns rewinds the offset to its start).
+ */
+function* readTranscriptWindow(
+  file: string,
+  start: number,
+  end: number,
+  /** Out: file position right after the window's last newline, or -1. */
+  out: { lastLineEnd: number },
+): Generator<string> {
+  const fd = fs.openSync(file, 'r');
+  try {
+    // Start one byte early: when that byte is a newline the window opens on a
+    // record boundary and the dropped "fragment" is empty.
+    let pos = start > 0 ? start - 1 : 0;
+    let skipFirst = start > 0;
+    const chunk = Buffer.alloc(Math.max(1, Math.min(SPAWN_SEED_READ_CHUNK_BYTES, end - pos)));
+    let carry = Buffer.alloc(0);
+    while (pos < end) {
+      const n = fs.readSync(fd, chunk, 0, Math.min(chunk.length, end - pos), pos);
+      if (n <= 0) break;
+      const dataStart = pos - carry.length;
+      pos += n;
+      const data =
+        carry.length > 0 ? Buffer.concat([carry, chunk.subarray(0, n)]) : chunk.subarray(0, n);
+      let from = 0;
+      for (let nl = data.indexOf(0x0a); nl !== -1; nl = data.indexOf(0x0a, from)) {
+        if (skipFirst) skipFirst = false;
+        else if (nl > from) yield data.toString('utf8', from, nl);
+        from = nl + 1;
+      }
+      if (from > 0) out.lastLineEnd = dataStart + from;
+      // Copied: `chunk` is reused by the next read.
+      carry = Buffer.from(data.subarray(from));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Whether `file` was written within RESTORED_SPAWN_MAX_IDLE_MS of `now`. */
+function writtenRecently(file: string, now: number): boolean {
+  try {
+    return now - fs.statSync(file).mtimeMs <= RESTORED_SPAWN_MAX_IDLE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The seeded spawns worth keeping. A history can say a spawn never finished
+ * only because the CLI died (or exited and was resumed later, writing on in
+ * the same transcript), so:
+ *
+ * - a foreground spawn follows the restore rule (restorableSpawnToolIds): a
+ *   fresh transcript keeps it — it ends with its turn anyway;
+ * - a background spawn or workflow launch needs evidence of its own, whatever
+ *   the agent's freshness: its own transcript (found through its sidecar) or,
+ *   for a workflow, one of its run's transcripts written recently. The newest
+ *   MAX_PENDING_WORKFLOW_LAUNCHES launches are checked, one discovery per run.
+ */
+function freshSeededSpawns(
+  agent: AgentState,
+  candidates: readonly SeededSpawnCandidate[],
+  agents: AgentStateStore,
+): Set<string> {
+  const root = sessionRootOf(agent.id, agents);
+  if (!root) return new Set();
+  const now = Date.now();
+  const foreground: string[] = [];
+  const background = new Set<string>();
+  const workflows: SeededSpawnCandidate[] = [];
+  for (const c of candidates) {
+    if (c.workflowRunDir !== undefined) workflows.push(c);
+    else if (c.background) background.add(c.toolUseId);
+    else foreground.push(c.toolUseId);
+  }
+  const kept = restorableSpawnToolIds(
+    { jsonlFile: agent.jsonlFile, projectDir: root.projectDir, sessionId: root.sessionId },
+    foreground,
+    now,
+  );
+  if (background.size > 0 && teamProvider) {
+    for (const t of teamProvider.discoverTeammates(root.projectDir, root.sessionId)) {
+      if (t.toolUseId && background.has(t.toolUseId) && writtenRecently(t.jsonlPath, now)) {
+        kept.add(t.toolUseId);
+      }
+    }
+  }
+  const runFresh = new PathSet();
+  const runChecked = new PathSet();
+  for (const { toolUseId, workflowRunDir: runDir } of workflows.slice(
+    -MAX_PENDING_WORKFLOW_LAUNCHES,
+  )) {
+    if (!runChecked.has(runDir!)) {
+      runChecked.add(runDir!);
+      if (workflowRunWrittenRecently(runDir!, root, now)) runFresh.add(runDir!);
+    }
+    if (runFresh.has(runDir!)) kept.add(toolUseId);
+  }
+  return kept;
+}
+
+/** Whether a run of `root`'s session has a transcript written recently. The
+ *  directory comes from transcript text: it is checked against the session
+ *  before anything in it is read. */
+function workflowRunWrittenRecently(runDir: string, root: AgentState, now: number): boolean {
+  if (!isWorkflowRunDirOfSession(runDir, root.projectDir, root.sessionId)) return false;
+  const entries = teamProvider?.discoverWorkflowAgents?.(runDir) ?? [];
+  return entries.some(
+    (e) => isRunTranscript(e.jsonlPath, runDir) && writtenRecently(e.jsonlPath, now),
+  );
 }
 
 export function readNewLines(
@@ -566,6 +743,12 @@ let teammateRemovalCallback: ((teammateAgentId: number) => void) | null = null;
  *  by the time they're called. */
 let teamProvider: TeamProvider | null = null;
 
+/** A workflow run directory counts only when the active provider vouches for
+ *  it; a provider without the check gets no workflow nodes (fail closed). */
+function isWorkflowRunDirOfSession(runDir: string, projectDir: string, sessionId: string): boolean {
+  return teamProvider?.isWorkflowRunDirOfSession?.(runDir, projectDir, sessionId) === true;
+}
+
 /** Hook provider: supplies non-team capabilities fileWatcher needs (all-session
  *  roots for global discovery, launch command, etc.). Set once at startup. */
 let hookProvider: HookProvider | null = null;
@@ -592,14 +775,24 @@ export function setTeamProvider(provider: TeamProvider): void {
   teamProvider = provider;
 }
 
-/** Shadow-store watcher for UNNAMED background spawns (sub-agents). Owned by
- *  AgentRuntime; registered once at startup. When unset (tests wiring only the
- *  scanners), unnamed spawns are simply not watched. */
-let subagentWatch: SubagentWatch | null = null;
+/** Lifecycle hooks for derived agents (docs/adr/0002). The runtime registers
+ *  them to route hook events by `(sessionId, agentKey)`. */
+export interface SpawnTreeCallbacks {
+  onDerivedCreated(agent: AgentState): void;
+  onDerivedRemoved(agent: AgentState): void;
+}
 
-/** Register the SubagentWatch that mirrors unnamed background spawns' transcripts. */
-export function setSubagentWatch(watch: SubagentWatch | null): void {
-  subagentWatch = watch;
+let spawnTreeCallbacks: SpawnTreeCallbacks | null = null;
+
+/** Register the derived-agent lifecycle callbacks (null to clear). */
+export function setSpawnTreeCallbacks(cbs: SpawnTreeCallbacks | null): void {
+  spawnTreeCallbacks = cbs;
+}
+
+/** Tell the registered callbacks a derived agent left the store. Called by the
+ *  runtime's removal path, the only place derived agents are removed. */
+export function notifyDerivedRemoved(agent: AgentState): void {
+  spawnTreeCallbacks?.onDerivedRemoved(agent);
 }
 
 /** Register the active HookProvider for non-team capabilities (session roots, etc.). */
@@ -649,17 +842,26 @@ export function scanForTeammateFiles(
   // top-level sessions tagged with the team, not files under the lead's dir.
   const teammates = teamProvider.discoverTeammates(projectDir, sessionId, parentAgent?.teamName);
 
-  const parentLiveSpawnIds = parentAgent ? liveSpawnToolIds(parentAgent) : null;
-  for (const { jsonlPath: file, teammateName, sessionId: ownSessionId, toolUseId } of teammates) {
-    // Live-spawn sidecars (they carry the lead's spawn toolUseId) belong to
-    // scanForBackgroundAgentFiles, which classifies them by name: named
-    // background -> teammate, everything else -> watched sub-agent. Adopting
-    // them here would race that classification and mint a spurious teammate.
-    if (toolUseId && parentLiveSpawnIds?.has(toolUseId)) continue;
+  const treeLiveSpawnIds = parentAgent ? liveSpawnToolIdsOfTree(parentAgentId, agents) : null;
+  for (const {
+    jsonlPath: file,
+    teammateName,
+    sessionId: ownSessionId,
+    toolUseId,
+    parentAgentKey,
+  } of teammates) {
+    // A sidecar spawned by another spawned agent (depth >= 2) is never an Agent
+    // Teams teammate of the lead: it belongs to scanSpawnTree under its parent.
+    if (parentAgentKey !== undefined) continue;
+    // Live-spawn sidecars (they carry the toolUseId of a spawn some node of
+    // this tree is running) belong to scanSpawnTree, which materializes them
+    // as derived agents under the right parent. Adopting them here would race
+    // it and mint a spurious teammate of the lead.
+    if (toolUseId && treeLiveSpawnIds?.has(toolUseId)) continue;
     if (knownTeammateFiles.has(file)) continue;
 
     // Also check if any existing agent already tracks this file
-    let alreadyTracked = subagentWatch?.isWatching(file) ?? false;
+    let alreadyTracked = false;
     for (const a of agents.values()) {
       if (pathsMatch(a.jsonlFile, file)) {
         alreadyTracked = true;
@@ -675,6 +877,9 @@ export function scanForTeammateFiles(
     // (Claude may restart a teammate, creating a new .jsonl for the same role).
     let existingTeammate: AgentState | undefined;
     for (const a of agents.values()) {
+      // Derived agents (docs/adr/0002) are keyed by their own sidecar; a
+      // same-named historical transcript must never take one over.
+      if (a.spawnAgentKey !== undefined || a.parentAgentId !== undefined) continue;
       if (a.leadAgentId === parentAgentId && a.agentName === teammateName) {
         existingTeammate = a;
         break;
@@ -683,7 +888,7 @@ export function scanForTeammateFiles(
     if (existingTeammate) {
       if (debug)
         console.log(
-          `[Pixel Agents] Teammate "${teammateName}" already exists (Agent ${existingTeammate.id}), reassigning to ${path.basename(file)}`,
+          `[Pixel Agents] Teammate ${JSON.stringify(teammateName)} already exists (Agent ${existingTeammate.id}), reassigning to ${path.basename(file)}`,
         );
       // Reassign to new JSONL file -- stop old polling, start new
       const oldTimer = pollingTimers.get(existingTeammate.id);
@@ -760,7 +965,7 @@ export function scanForTeammateFiles(
     persistAgents();
 
     console.log(
-      `[Pixel Agents] Teammate detected: "${teammateName}" (Agent ${id}) for parent Agent ${parentAgentId} (${path.basename(file)})`,
+      `[Pixel Agents] Teammate detected: ${JSON.stringify(teammateName)} (Agent ${id}) for parent Agent ${parentAgentId} (${path.basename(file)})`,
     );
 
     // Own-session teammates get registered so their hook events route directly
@@ -785,15 +990,15 @@ export function scanForTeammateFiles(
   }
 }
 
-/** All of a lead's LIVE spawn tool ids: background spawns (kept alive past
+/** All of an agent's LIVE spawn tool ids: background spawns (kept alive past
  *  their tool_result, until the completion queue-operation) plus still-open
  *  foreground spawn tools (Agent run_in_background:false — same sidecar shape
- *  on current harnesses, closes with its tool_result). Sidecars matching any
- *  of these belong to the background-agent flow, not teammate discovery. */
-function liveSpawnToolIds(lead: AgentState): Set<string> {
-  const ids = new Set(lead.backgroundAgentToolIds);
-  for (const toolId of lead.activeToolIds) {
-    const toolName = lead.activeToolNames.get(toolId);
+ *  on current harnesses, closes with its tool_result). A sidecar only ever
+ *  materializes when its toolUseId is one of these on ITS OWN parent. */
+function liveSpawnToolIds(agent: AgentState): Set<string> {
+  const ids = new Set(agent.backgroundAgentToolIds);
+  for (const toolId of agent.activeToolIds) {
+    const toolName = agent.activeToolNames.get(toolId);
     if (toolName && hookProvider?.subagentToolNames.has(toolName)) {
       ids.add(toolId);
     }
@@ -801,155 +1006,679 @@ function liveSpawnToolIds(lead: AgentState): Set<string> {
   return ids;
 }
 
+/** The root and every agent below it, found in one O(n) pass over a
+ *  parent→children index (BFS; cycle-safe via the visited set). */
+function treeMembers(rootId: number, agents: AgentStateStore): AgentState[] {
+  const root = agents.get(rootId);
+  if (!root) return [];
+  const children = new Map<number, AgentState[]>();
+  for (const a of agents.values()) {
+    if (a.parentAgentId === undefined) continue;
+    const list = children.get(a.parentAgentId);
+    if (list) list.push(a);
+    else children.set(a.parentAgentId, [a]);
+  }
+  const out: AgentState[] = [root];
+  const visited = new Set<number>([rootId]);
+  for (let i = 0; i < out.length; i++) {
+    for (const child of children.get(out[i].id) ?? []) {
+      if (visited.has(child.id)) continue;
+      visited.add(child.id);
+      out.push(child);
+    }
+  }
+  return out;
+}
+
+/** Union of the live spawn tool ids of every node in `rootId`'s tree. */
+function liveSpawnToolIdsOfTree(rootId: number, agents: AgentStateStore): Set<string> {
+  const ids = new Set<string>();
+  for (const a of treeMembers(rootId, agents)) {
+    for (const t of liveSpawnToolIds(a)) ids.add(t);
+  }
+  return ids;
+}
+
 /**
- * Classify background spawns (teams OFF) by their sidecar `name`.
- *
- * When a lead's Agent tool_result reports an async launch ("Async agent
- * launched successfully"), the spawned agent runs in-process with its
- * transcript under `<projectDir>/<leadSessionId>/subagents/` and a sidecar
- * carrying agentType/description/toolUseId (+ `name` when the spawn was
- * named) — but NO team registry anywhere, so the teammate flow never engages
- * on its own. Per the domain model (CONTEXT.md) the name is the sole
- * classifier:
- *
- * - NAMED spawn → Teammate: its own seated character, named from the sidecar
- *   `name`; the spawner becomes its Lead (derived team — no teamName is set,
- *   so team-config polling stays away).
- * - UNNAMED spawn → Sub-agent: the transient Subtask character stays, and the
- *   spawn's transcript is watched in the SHADOW store so its live activity
- *   reaches the sub-character via subagentToolStart/Done translation.
- *
- * The anti-spurious gate is the sidecar's toolUseId matching one of the
- * lead's LIVE backgroundAgentToolIds (instead of the teamName gate real teams
- * use): only transcripts belonging to a currently-running background spawn
- * are adopted. Completion (queue-operation on the lead) removes both kinds.
+ * The session root of an agent's spawn tree: climbs `parentAgentId` until an
+ * agent without one. Cycle-safe: a corrupt chain stops at the first repeat and
+ * returns an agent that still has a parent, which no caller treats as a root.
+ * A dangling parent id is returned as-is, so it matches no live root either.
  */
-export function scanForBackgroundAgentFiles(
-  leadId: number,
+export function rootOf(agentId: number, agents: AgentStateStore): number {
+  const seen = new Set<number>();
+  let id = agentId;
+  for (;;) {
+    const a = agents.get(id);
+    if (!a || a.parentAgentId === undefined || seen.has(id)) return id;
+    seen.add(id);
+    id = a.parentAgentId;
+  }
+}
+
+/**
+ * The persisted live spawn ids a restored root may keep. When the CLI dies
+ * without SessionEnd its background agents die too and their completion
+ * queue-operation never comes, so restoring every id would bring the tree back
+ * immortal. Activity decides, per spawn:
+ *
+ * - root transcript written within RESTORED_SPAWN_MAX_IDLE_MS → all kept;
+ * - otherwise a spawn is kept only while ITS OWN transcript (found through its
+ *   sidecar) was written within the window — a lead that ended its turn and
+ *   waits on a long background agent writes nothing, but the agent does.
+ *
+ * An unreadable root transcript keeps nothing.
+ */
+export function restorableSpawnToolIds(
+  root: { jsonlFile: string; projectDir: string; sessionId?: string },
+  persisted: readonly string[] | undefined,
+  now = Date.now(),
+): Set<string> {
+  if (!persisted || persisted.length === 0) return new Set();
+  const isFresh = (file: string): boolean => writtenRecently(file, now);
+  try {
+    fs.statSync(root.jsonlFile);
+  } catch {
+    return new Set();
+  }
+  if (isFresh(root.jsonlFile)) return new Set(persisted);
+  if (!teamProvider || !root.sessionId || !root.projectDir) return new Set();
+  const wanted = new Set(persisted);
+  const kept = new Set<string>();
+  for (const t of teamProvider.discoverTeammates(root.projectDir, root.sessionId)) {
+    if (t.toolUseId && wanted.has(t.toolUseId) && isFresh(t.jsonlPath)) kept.add(t.toolUseId);
+  }
+  return kept;
+}
+
+/** Hue for a new child of `parent`: the parent's hue rotated by the first
+ *  multiple of SPAWN_SIBLING_HUE_STEP_DEG no live sibling uses, so a sibling
+ *  born after another one left never repeats a hue still on screen. */
+function siblingHueShift(parent: AgentState, parentId: number, agents: AgentStateStore): number {
+  const base = parent.hueShift ?? 0;
+  const used = new Set<number>();
+  let siblings = 0;
+  for (const a of agents.values()) {
+    if (a.parentAgentId !== parentId) continue;
+    siblings++;
+    if (a.hueShift !== undefined) used.add(a.hueShift);
+  }
+  const steps = Math.floor(360 / SPAWN_SIBLING_HUE_STEP_DEG);
+  for (let k = 1; k <= steps; k++) {
+    const hue = (base + SPAWN_SIBLING_HUE_STEP_DEG * k) % 360;
+    if (!used.has(hue)) return hue;
+  }
+  // Every step is taken (more siblings than hues): repeats are unavoidable.
+  return (base + SPAWN_SIBLING_HUE_STEP_DEG * (siblings + 1)) % 360;
+}
+
+/** Re-entrancy guard: creating a node reads its transcript, which may open a
+ *  spawn tool and ask for another scan mid-pass. Nested requests are queued
+ *  and run once the current pass is done. */
+let spawnScanActive = false;
+const spawnRescanRoots = new Set<number>();
+/** Roots already warned about hitting a spawn-tree cap (one warning each).
+ *  Keyed by the agent object, so an id reused by a later root warns again and
+ *  a removed root is garbage-collected with its entry. */
+const spawnCapWarnedRoots = new WeakSet<AgentState>();
+
+/**
+ * Materialize the spawn tree under a session root (docs/adr/0002). Every
+ * sidecar-backed spawn whose toolUseId is a live spawn of its own parent node
+ * becomes a derived agent, named or not; a name only adds the Teammate
+ * identity (agentName + leadAgentId, the spawner badged as Lead). Children of
+ * a node that does not exist yet wait for a later scan. Recursion is natural:
+ * a new node's own spawn tools make its children eligible on the next scan.
+ *
+ * Derived agents are never persisted and never registered as sessions; the
+ * registered SpawnTreeCallbacks route their hook events by agent key.
+ */
+export function scanSpawnTree(
+  rootId: number,
   agents: AgentStateStore,
   nextAgentIdRef: { current: number },
   fileWatchers: Map<number, fs.FSWatcher>,
   pollingTimers: Map<number, ReturnType<typeof setInterval>>,
   waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
   permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
-  persistAgents: () => void,
+  onAgentCreated?: (agent: AgentState) => void,
+  /** Also discover the agents of the tree's live workflow runs. Only the 1 s
+   *  periodic scan passes true: cold run discovery costs ~20 ms per agent, far
+   *  too much to pay synchronously on every spawn tool or hook event. */
+  includeWorkflowRuns = false,
+): void {
+  if (spawnScanActive) {
+    spawnRescanRoots.add(rootId);
+    return;
+  }
+  spawnScanActive = true;
+  try {
+    let next: number | undefined = rootId;
+    let withRuns = includeWorkflowRuns;
+    while (next !== undefined) {
+      spawnRescanRoots.delete(next);
+      scanSpawnTreeOnce(
+        next,
+        agents,
+        nextAgentIdRef,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        onAgentCreated,
+      );
+      if (withRuns) {
+        scanWorkflowRunsOnce(
+          next,
+          agents,
+          nextAgentIdRef,
+          fileWatchers,
+          pollingTimers,
+          waitingTimers,
+          permissionTimers,
+          onAgentCreated,
+        );
+      }
+      // Rescans queued by nested requests are event-driven: no run discovery.
+      withRuns = false;
+      next = spawnRescanRoots.values().next().value;
+    }
+  } finally {
+    spawnScanActive = false;
+    spawnRescanRoots.clear();
+  }
+}
+
+/** "Is this spawn transcript off limits?" for one scan: already watched by
+ *  some agent (O(1): the tracked set is built once), or dismissed by the user.
+ *  A transcript the user dismissed (closed the character) is off limits while
+ *  its spawn is live; the dismissal is made permanent for it — a spawn
+ *  transcript belongs to one spawn, so there is nothing to re-adopt later, and
+ *  the 3-minute cooldown must not bring it back. */
+function spawnTranscriptTaken(agents: AgentStateStore): (p: string) => boolean {
+  const trackedPaths = new PathSet();
+  for (const a of agents.values()) {
+    if (a.jsonlFile) trackedPaths.add(a.jsonlFile);
+  }
+  return (p: string): boolean => {
+    if (trackedPaths.has(p) || dismissalTracker?.isPermanentlyDismissed(p)) return true;
+    if (!dismissalTracker?.isDismissed(p)) return false;
+    dismissalTracker.permanentlyDismiss(p);
+    return true;
+  };
+}
+
+/** The fields every derived agent starts with. It shares the root's session: a
+ *  spawned agent has no session of its own and is NEVER registered with the
+ *  session router as one. */
+function derivedAgentShell(id: number, root: AgentState, jsonlFile: string): AgentState {
+  return {
+    id,
+    sessionId: root.sessionId,
+    terminalRef: undefined,
+    isExternal: true,
+    projectDir: root.projectDir,
+    jsonlFile,
+    fileOffset: 0,
+    lineBuffer: '',
+    activeToolIds: new Set(),
+    activeToolStatuses: new Map(),
+    activeToolNames: new Map(),
+    activeSubagentToolIds: new Map(),
+    activeSubagentToolNames: new Map(),
+    backgroundAgentToolIds: new Set(),
+    isWaiting: false,
+    permissionSent: false,
+    hadToolsInTurn: false,
+    hookDelivered: false,
+    lastDataAt: Date.now(),
+    linesProcessed: 0,
+    seenUnknownRecordTypes: new Set(),
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+  };
+}
+
+function scanSpawnTreeOnce(
+  rootId: number,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+  fileWatchers: Map<number, fs.FSWatcher>,
+  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
   onAgentCreated?: (agent: AgentState) => void,
 ): void {
   if (!teamProvider) return;
-  const lead = agents.get(leadId);
-  if (!lead || !lead.sessionId || !lead.projectDir) return;
-  const liveSpawnIds = liveSpawnToolIds(lead);
-  if (liveSpawnIds.size === 0) return;
+  const root = agents.get(rootId);
+  if (!root || !root.sessionId || !root.projectDir || root.parentAgentId !== undefined) return;
 
-  const entries = teamProvider.discoverTeammates(lead.projectDir, lead.sessionId);
-  for (const entry of entries) {
-    if (!entry.toolUseId || !liveSpawnIds.has(entry.toolUseId)) continue;
+  // The tree as it stands: the root plus every derived agent that climbs to it.
+  const nodes = new Map<number, SpawnTreeNode>();
+  let anyLive = false;
+  for (const a of treeMembers(rootId, agents)) {
+    const live = liveSpawnToolIds(a);
+    if (live.size > 0) anyLive = true;
+    nodes.set(a.id, {
+      id: a.id,
+      spawnAgentKey: a.spawnAgentKey,
+      liveSpawnToolIds: live,
+      parentId: a.parentAgentId,
+      spawnToolUseId: a.spawnToolUseId,
+    });
+  }
+  // No node is running a spawn: nothing can materialize, skip the disk scan.
+  if (!anyLive) return;
 
-    let alreadyTracked = subagentWatch?.isWatching(entry.jsonlPath) ?? false;
-    if (!alreadyTracked) {
-      for (const a of agents.values()) {
-        if (pathsMatch(a.jsonlFile, entry.jsonlPath)) {
-          alreadyTracked = true;
-          break;
-        }
-      }
-    }
-    if (alreadyTracked) continue;
+  const entries: SpawnEntry[] = [];
+  for (const t of teamProvider.discoverTeammates(root.projectDir, root.sessionId)) {
+    if (!t.agentKey || !t.toolUseId) continue;
+    entries.push({
+      jsonlPath: t.jsonlPath,
+      agentKey: t.agentKey,
+      parentAgentKey: t.parentAgentKey,
+      toolUseId: t.toolUseId,
+      depth: t.depth ?? 1,
+      agentType: t.agentType ?? t.teammateName,
+      description: t.description,
+      name: t.name,
+    });
+  }
+  if (entries.length === 0) return;
 
-    // Foreground spawns (Agent run_in_background:false — the tool stays open
-    // for the whole run) write the same sidecar shape. They are within-turn
-    // work whatever the sidecar says: watch them, never seat them.
-    const isForeground = !lead.backgroundAgentToolIds.has(entry.toolUseId);
+  // Only plan.create is consumed; plan.deferred is recomputed every scan.
+  const plan = planSpawnTree(rootId, nodes, entries, spawnTranscriptTaken(agents));
+  if (plan.create.length === 0) return;
 
-    if (!entry.name || isForeground) {
-      // Unnamed spawn = Sub-agent: keep the Subtask character, watch the
-      // transcript in the shadow store for live activity. No agentCreated, no
-      // subagentClear, no persistence.
-      subagentWatch?.watch(lead, leadId, {
-        jsonlPath: entry.jsonlPath,
-        toolUseId: entry.toolUseId,
-      });
+  // Create every node BEFORE reading any transcript: a read can re-enter the
+  // scan, which must then see all of this pass's nodes as existing.
+  const created: AgentState[] = [];
+  let derivedCount = nodes.size - 1;
+  let capped = false;
+  for (const { entry, parentId } of plan.create) {
+    const parent = agents.get(parentId);
+    if (!parent) continue;
+    // Guards against a runaway (or hostile) transcript: past the caps the
+    // entry is deferred — re-offered every scan, created once room frees up.
+    const depth = (parent.parentAgentId === undefined ? 0 : (parent.depth ?? 0)) + 1;
+    if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE || depth > MAX_SPAWN_DEPTH) {
+      capped = true;
       continue;
     }
-
-    // Named spawn = Teammate.
+    derivedCount++;
     const id = nextAgentIdRef.current++;
     const agent: AgentState = {
-      id,
-      // In-process: shares the lead's session (like an inline teammate). Never
-      // registered with the session router -- it would overwrite the lead.
-      sessionId: lead.sessionId,
-      terminalRef: undefined,
-      isExternal: true,
-      projectDir: lead.projectDir,
-      jsonlFile: entry.jsonlPath,
-      fileOffset: 0,
-      lineBuffer: '',
-      activeToolIds: new Set(),
-      activeToolStatuses: new Map(),
-      activeToolNames: new Map(),
-      activeSubagentToolIds: new Map(),
-      activeSubagentToolNames: new Map(),
-      backgroundAgentToolIds: new Set(),
-      isWaiting: false,
-      permissionSent: false,
-      hadToolsInTurn: false,
-      hookDelivered: false,
-      lastDataAt: Date.now(),
-      linesProcessed: 0,
-      seenUnknownRecordTypes: new Set(),
-      contextTokens: 0,
-      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
-      // Teammate-like linkage, but NO teamName: config polling must not touch these.
-      agentName: entry.name,
-      leadAgentId: leadId,
+      ...derivedAgentShell(id, root, entry.jsonlPath),
       spawnToolUseId: entry.toolUseId,
+      spawnAgentKey: entry.agentKey,
+      parentAgentId: parentId,
+      role: entry.agentType,
+      label: entry.description,
+      // From the tree, never from the sidecar: the root counts as depth 0.
+      depth,
+      // A name makes it a Teammate (CONTEXT.md). Derived team: NO teamName, so
+      // team-config polling stays away.
+      ...(entry.name ? { agentName: entry.name, leadAgentId: parentId } : {}),
     };
-
-    if (lead.palette !== undefined) {
-      agent.palette = lead.palette;
-      agent.hueShift = lead.hueShift ?? 0;
+    if (parent.palette !== undefined) {
+      agent.palette = parent.palette;
+      agent.hueShift = siblingHueShift(parent, parentId, agents);
     } else {
       assignPaletteIfNeeded(agent, agents);
     }
     agents.set(id, agent);
+    created.push(agent);
+    // A sidecar-backed spawn belongs to the tree for good: once it is (or was)
+    // a derived agent, flat teammate discovery must never adopt its transcript.
+    knownTeammateFiles.add(entry.jsonlPath);
 
     // Derived team: spawning a named agent makes the spawner a Lead, whether
-    // or not the CLI registered a team. No teamName on purpose (see above).
-    if (!lead.isTeamLead) {
-      lead.isTeamLead = true;
+    // or not the CLI registered a team.
+    if (entry.name && !parent.isTeamLead) {
+      parent.isTeamLead = true;
       agents.broadcast({
         type: 'agentTeamInfo',
-        id: leadId,
-        teamName: lead.teamName,
-        agentName: lead.agentName,
+        id: parentId,
+        teamName: parent.teamName,
+        agentName: parent.agentName,
         isTeamLead: true,
-        leadAgentId: lead.leadAgentId,
+        leadAgentId: parent.leadAgentId,
       });
+      agents.persist();
     }
 
-    persistAgents();
-
     console.log(
-      `[Pixel Agents] Background teammate detected: "${agent.agentName}" (Agent ${id}) for lead Agent ${leadId} (${path.basename(entry.jsonlPath)})`,
+      `[Pixel Agents] Spawn tree: Agent ${id} derived from Agent ${parentId} (depth ${agent.depth}, ${path.basename(entry.jsonlPath)})`,
     );
 
-    // The transient Subtask sub-character is superseded by this real character.
-    agents.broadcast({ type: 'subagentClear', id: leadId, parentToolId: entry.toolUseId });
-
+    // The parent's transient Subtask sprite for this spawn is superseded.
+    agents.broadcast({ type: 'subagentClear', id: parentId, parentToolId: entry.toolUseId });
+    spawnTreeCallbacks?.onDerivedCreated(agent);
     onAgentCreated?.(agent);
+  }
 
+  if (capped) warnSpawnCap(root, rootId);
+
+  watchCreated(created, agents, fileWatchers, pollingTimers, waitingTimers, permissionTimers);
+}
+
+/** One warning per root when a spawn-tree cap defers something. */
+function warnSpawnCap(root: AgentState, rootId: number): void {
+  if (spawnCapWarnedRoots.has(root)) return;
+  spawnCapWarnedRoots.add(root);
+  console.warn(
+    `[Pixel Agents] Spawn tree of Agent ${rootId}: more than ${MAX_DERIVED_AGENTS_PER_TREE} live agents or deeper than ${MAX_SPAWN_DEPTH} levels; the excess is not shown`,
+  );
+}
+
+/** Start watching freshly created derived agents, once all of them exist. */
+function watchCreated(
+  created: readonly AgentState[],
+  agents: AgentStateStore,
+  fileWatchers: Map<number, fs.FSWatcher>,
+  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+): void {
+  for (const agent of created) {
+    // A callback may have removed it meanwhile.
+    if (agents.get(agent.id) !== agent) continue;
     startFileWatching(
-      id,
-      entry.jsonlPath,
+      agent.id,
+      agent.jsonlFile,
       agents,
       fileWatchers,
       pollingTimers,
       waitingTimers,
       permissionTimers,
     );
-    readNewLines(id, agents, waitingTimers, permissionTimers);
+    readNewLines(agent.id, agents, waitingTimers, permissionTimers);
   }
+}
+
+// ── Workflow nodes (spec §2.1b) ──
+//
+// A `Workflow` launch is a derived node with no transcript: identity = the
+// launch tool call (the caller's live background spawn), `workflowRunDir` only
+// says where its agents write. The run's agents hang below it; their sidecars
+// carry no spawn tool id, so the gate is the node itself being alive.
+
+type WorkflowRunEntry = ReturnType<NonNullable<TeamProvider['discoverWorkflowAgents']>>[number];
+
+/** A launch seen on a transcript whose node does not exist yet. */
+interface WorkflowLaunch {
+  runDir: string;
+  name?: string;
+}
+
+/** Launches waiting for their node, per launching agent (keyed by the agent
+ *  object: an id reused by a later store never inherits them, and a removed
+ *  agent's launches are garbage-collected with it). Normally a launch lives
+ *  here for one call; it stays only while a tree cap defers its node. */
+const pendingWorkflowLaunches = new WeakMap<AgentState, Map<string, WorkflowLaunch>>();
+
+/** Run directories already reported as foreign, so a replayed transcript
+ *  doesn't flood the log. Bounded; past the bound refusals go unlogged. */
+const foreignRunDirsLogged = new Set<string>();
+const FOREIGN_RUN_DIRS_LOG_MAX = 256;
+
+/** The session root an agent's spawns belong to, or undefined when the chain
+ *  does not end at a real root (corrupt or dangling). */
+function sessionRootOf(agentId: number, agents: AgentStateStore): AgentState | undefined {
+  const root = agents.get(rootOf(agentId, agents));
+  return root && root.parentAgentId === undefined && root.sessionId && root.projectDir
+    ? root
+    : undefined;
+}
+
+/**
+ * A `Workflow` launch on `ownerId`'s transcript. The run directory must be
+ * this very session's own (`<projectDir>/<sessionId>/subagents/workflows/
+ * wf_<id>`): the launch text quotes model-authored content and could name any
+ * directory. Returns false (nothing created, logged once) when it is not;
+ * otherwise creates the node now — cheap, no disk access — or, past a tree
+ * cap, leaves it to a later 1 s scan.
+ */
+export function registerWorkflowLaunch(
+  ownerId: number,
+  toolUseId: string,
+  launch: WorkflowLaunch,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+): boolean {
+  const owner = agents.get(ownerId);
+  const root = sessionRootOf(ownerId, agents);
+  if (!owner || !root) return false;
+  if (!isWorkflowRunDirOfSession(launch.runDir, root.projectDir, root.sessionId)) {
+    if (
+      !foreignRunDirsLogged.has(launch.runDir) &&
+      foreignRunDirsLogged.size < FOREIGN_RUN_DIRS_LOG_MAX
+    ) {
+      foreignRunDirsLogged.add(launch.runDir);
+      console.log(
+        `[Pixel Agents] Workflow launch ${toolUseId} on Agent ${ownerId} ignored: its run directory is not in session ${root.sessionId.slice(0, 8)}...`,
+      );
+    }
+    return false;
+  }
+  let launches = pendingWorkflowLaunches.get(owner);
+  if (!launches) {
+    launches = new Map();
+    pendingWorkflowLaunches.set(owner, launches);
+  }
+  // Launches only wait here while a tree cap defers them; a transcript
+  // replaying launch after launch must not grow this (nor the owner's
+  // persisted live spawn ids) without bound.
+  if (!launches.has(toolUseId) && launches.size >= MAX_PENDING_WORKFLOW_LAUNCHES) {
+    warnSpawnCap(root, root.id);
+    return false;
+  }
+  launches.set(toolUseId, { runDir: launch.runDir, name: launch.name });
+  materializeWorkflowNodes(root, agents, nextAgentIdRef, owner);
+  return true;
+}
+
+/** Create the nodes of `root`'s tree whose launches are pending and still
+ *  live, within the tree caps — only `onlyOwner`'s when given (a fresh launch
+ *  never pays for the others). Launches whose spawn is no longer live (the run
+ *  completed, the session ended) are dropped. */
+function materializeWorkflowNodes(
+  root: AgentState,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+  onlyOwner?: AgentState,
+): void {
+  const members = treeMembers(root.id, agents);
+  let derivedCount = members.length - 1;
+  let capped = false;
+  // Spawn tool calls that already have a node (see spawnCallSlot).
+  const materialized = new Set<string>();
+  for (const a of members) {
+    if (a.parentAgentId !== undefined && a.spawnToolUseId !== undefined) {
+      materialized.add(spawnCallSlot(a.parentAgentId, a.spawnToolUseId));
+    }
+  }
+  for (const owner of onlyOwner ? [onlyOwner] : members) {
+    const launches = pendingWorkflowLaunches.get(owner);
+    if (!launches) continue;
+    for (const [toolUseId, launch] of launches) {
+      if (
+        !owner.backgroundAgentToolIds.has(toolUseId) ||
+        materialized.has(spawnCallSlot(owner.id, toolUseId))
+      ) {
+        launches.delete(toolUseId);
+        continue;
+      }
+      const depth = (owner.parentAgentId === undefined ? 0 : (owner.depth ?? 0)) + 1;
+      if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE || depth > MAX_SPAWN_DEPTH) {
+        capped = true;
+        continue;
+      }
+      derivedCount++;
+      launches.delete(toolUseId);
+      materialized.add(spawnCallSlot(owner.id, toolUseId));
+      const id = nextAgentIdRef.current++;
+      const node: AgentState = {
+        // No transcript of its own: nothing is ever watched for it.
+        ...derivedAgentShell(id, root, ''),
+        spawnToolUseId: toolUseId,
+        parentAgentId: owner.id,
+        role: 'workflow',
+        label: launch.name,
+        depth,
+        nodeKind: 'workflow',
+        workflowRunDir: launch.runDir,
+        // Derived status: idle until one of its agents works.
+        isWaiting: true,
+      };
+      assignChildPalette(node, owner, agents);
+      agents.set(id, node);
+      console.log(
+        `[Pixel Agents] Spawn tree: Agent ${id} is workflow ${JSON.stringify(launch.name ?? toolUseId)} of Agent ${owner.id} (depth ${depth})`,
+      );
+      agents.broadcast({ type: 'agentStatus', id, status: 'waiting', awaitingInput: false });
+      spawnTreeCallbacks?.onDerivedCreated(node);
+    }
+    if (launches.size === 0) pendingWorkflowLaunches.delete(owner);
+  }
+  if (capped) warnSpawnCap(root, root.id);
+}
+
+/** Set key of one spawn tool call of one parent. */
+function spawnCallSlot(parentId: number, toolUseId: string): string {
+  return `${parentId}\n${toolUseId}`;
+}
+
+/** Palette of a new child: the parent's, with a hue no live sibling uses. */
+function assignChildPalette(child: AgentState, parent: AgentState, agents: AgentStateStore): void {
+  if (parent.palette !== undefined) {
+    child.palette = parent.palette;
+    child.hueShift = siblingHueShift(parent, parent.id, agents);
+  } else {
+    assignPaletteIfNeeded(child, agents);
+  }
+}
+
+/** A run transcript is watched only when it is a regular file (no symlink,
+ *  FIFO or directory) sitting directly in its run's directory — checked by
+ *  the host itself right before watching, whatever the provider reported. */
+function isRunTranscript(jsonlPath: string, runDir: string): boolean {
+  if (!pathsMatch(path.dirname(jsonlPath), runDir)) return false;
+  try {
+    return fs.lstatSync(jsonlPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Materialize the agents of every live workflow run of `rootId`'s tree (1 s
+ * scan only). An agent hangs from the node, or — when its sidecar names a
+ * parent — from the agent of the SAME run holding that key; a parent key not
+ * (yet) in the run waits for a later scan and is never guessed, never the root.
+ * Same caps, dismissal and one-agent-per-key rules as every spawn.
+ */
+function scanWorkflowRunsOnce(
+  rootId: number,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+  fileWatchers: Map<number, fs.FSWatcher>,
+  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+  onAgentCreated?: (agent: AgentState) => void,
+): void {
+  const discover = teamProvider?.discoverWorkflowAgents?.bind(teamProvider);
+  const root = agents.get(rootId);
+  if (!discover || !root || root.parentAgentId !== undefined) return;
+  if (!root.sessionId || !root.projectDir) return;
+  // Launches a cap deferred get their chance first.
+  materializeWorkflowNodes(root, agents, nextAgentIdRef);
+
+  const members = treeMembers(rootId, agents);
+  const workflowNodes = members.filter((a) => a.nodeKind === 'workflow' && a.workflowRunDir);
+  if (workflowNodes.length === 0) return;
+
+  let derivedCount = members.length - 1;
+  // A tree at its cap can create nothing: don't pay for any run discovery.
+  if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE) {
+    warnSpawnCap(root, rootId);
+    return;
+  }
+  const keysInTree = new Set<string>();
+  for (const a of members) if (a.spawnAgentKey !== undefined) keysInTree.add(a.spawnAgentKey);
+  const isTaken = spawnTranscriptTaken(agents);
+  const created: AgentState[] = [];
+  let capped = false;
+
+  // One discovery per run directory per scan, whatever the number of nodes.
+  const discoveredRunDirs = new PathSet();
+  for (const node of workflowNodes) {
+    if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE) {
+      capped = true;
+      break;
+    }
+    const runDir = node.workflowRunDir!;
+    if (discoveredRunDirs.has(runDir)) continue;
+    discoveredRunDirs.add(runDir);
+    // Re-checked every scan (cheap, no I/O): the node must only ever read
+    // its own session's run directory.
+    if (!isWorkflowRunDirOfSession(runDir, root.projectDir, root.sessionId)) continue;
+    // This run's agents by key: the only parents a run agent may name.
+    const runByKey = new Map<string, AgentState>();
+    for (const a of treeMembers(node.id, agents)) {
+      if (a.spawnAgentKey !== undefined) runByKey.set(a.spawnAgentKey, a);
+    }
+    let remaining: WorkflowRunEntry[] = discover(runDir);
+    // Several passes so a parent created in this scan adopts its children in
+    // the same scan; each pass either creates something or stops.
+    for (let progress = true; progress && remaining.length > 0;) {
+      progress = false;
+      const deferred: WorkflowRunEntry[] = [];
+      for (const entry of remaining) {
+        if (keysInTree.has(entry.agentKey) || entry.parentAgentKey === entry.agentKey) continue;
+        const parent =
+          entry.parentAgentKey === undefined ? node : runByKey.get(entry.parentAgentKey);
+        if (!parent) {
+          deferred.push(entry);
+          continue;
+        }
+        if (isTaken(entry.jsonlPath) || !isRunTranscript(entry.jsonlPath, runDir)) continue;
+        const depth = (parent.depth ?? 0) + 1;
+        if (derivedCount >= MAX_DERIVED_AGENTS_PER_TREE || depth > MAX_SPAWN_DEPTH) {
+          capped = true;
+          continue;
+        }
+        derivedCount++;
+        const id = nextAgentIdRef.current++;
+        const agent: AgentState = {
+          ...derivedAgentShell(id, root, entry.jsonlPath),
+          spawnAgentKey: entry.agentKey,
+          parentAgentId: parent.id,
+          role: entry.agentType,
+          label: entry.label,
+          depth,
+        };
+        assignChildPalette(agent, parent, agents);
+        agents.set(id, agent);
+        created.push(agent);
+        keysInTree.add(entry.agentKey);
+        runByKey.set(entry.agentKey, agent);
+        // Flat teammate discovery must never adopt it.
+        knownTeammateFiles.add(entry.jsonlPath);
+        progress = true;
+        console.log(
+          `[Pixel Agents] Spawn tree: Agent ${id} is an agent of workflow Agent ${node.id} under Agent ${parent.id} (depth ${depth}, ${path.basename(entry.jsonlPath)})`,
+        );
+        spawnTreeCallbacks?.onDerivedCreated(agent);
+        onAgentCreated?.(agent);
+      }
+      remaining = deferred;
+    }
+  }
+
+  if (capped) warnSpawnCap(root, rootId);
+  watchCreated(created, agents, fileWatchers, pollingTimers, waitingTimers, permissionTimers);
 }
 
 /**
@@ -1012,14 +1741,16 @@ export function scanAllTeammateFiles(
   // Without this gate we'd pick up basic subagents' JSONL files (which some CLIs also
   // write to the same teammate directory) and create spurious teammate characters for
   // them when the Agent Teams feature is OFF.
-  for (const [agentId, agent] of agents) {
-    // Only scan for lead agents (not teammates themselves)
-    if (agent.leadAgentId !== undefined) continue;
+  // Snapshot: the scans below add agents while we iterate.
+  for (const [agentId, agent] of [...agents]) {
+    // Derived agents are scanned as part of their root's tree, never as roots.
+    if (agent.parentAgentId !== undefined) continue;
     if (!agent.sessionId || !agent.projectDir) continue;
-    // Anonymous background agents (teams OFF): adopt sidecar transcripts for the
-    // lead's live background spawns. Gated by toolUseId matching, not teamName;
-    // no-ops instantly when the lead has no live background spawns.
-    scanForBackgroundAgentFiles(
+    // Spawn tree (docs/adr/0002): sidecar-backed spawns at any depth, each gated
+    // by its own parent's live spawn tools; no-ops instantly when no node of
+    // the tree runs a spawn. The spawn-tool callback gives low latency, this
+    // periodic pass gives robustness (sidecars can land after the tool_use).
+    scanSpawnTree(
       agentId,
       agents,
       nextAgentIdRef,
@@ -1027,9 +1758,12 @@ export function scanAllTeammateFiles(
       pollingTimers,
       waitingTimers,
       permissionTimers,
-      persistAgents,
       onAgentCreated,
+      true,
     );
+    // Teammates are roots of their own spawn trees (scanned above) but never
+    // leads to discover teammates for.
+    if (agent.leadAgentId !== undefined) continue;
     // Gate: basic-mode agents never get teamName set. Real team leads do, via JSONL.
     if (!agent.teamName) continue;
 
@@ -1572,6 +2306,8 @@ export function startStaleExternalAgentCheck(
 
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
+      // A workflow node has no transcript by design; it leaves with its run.
+      if (agent.nodeKind === 'workflow') continue;
 
       // Only despawn if the JSONL file has been deleted from disk.
       // Inactive external agents stay alive so they can resume when

@@ -3,7 +3,19 @@ import * as os from 'os';
 import * as path from 'path';
 
 import type { TeamProvider } from '../../../../../core/src/teamProvider.js';
-import { CLAUDE_AGENT_KEY_PATTERN, SIDECAR_MAX_BYTES } from './constants.js';
+import { sanitizeFeedText } from '../../../feedDiff.js';
+import {
+  discoverClaudeWorkflowAgents,
+  extractClaudeWorkflowLaunch,
+  isWorkflowRunDirOfSession,
+} from './claudeWorkflow.js';
+import {
+  CLAUDE_AGENT_KEY_PATTERN,
+  IDENTIFIER_MAX_CHARS,
+  SIDECAR_COLD_READS_PER_SCAN,
+  SIDECAR_MAX_BYTES,
+  SUMMARY_MAX_CHARS,
+} from './constants.js';
 
 /**
  * Claude Code implementation of the TeamProvider interface.
@@ -64,24 +76,63 @@ export function normalizeClaudeAgentKey(value: unknown): string | undefined {
   return CLAUDE_AGENT_KEY_PATTERN.test(key) ? key : undefined;
 }
 
-/** Parse a sidecar's metadata: `agentType` (required), plus `toolUseId`,
- *  `description`, and `name` when present (background agents record the first
- *  three; a NAMED teamless spawn additionally records `name`), and the spawn-tree
- *  fields `parentAgentId` / `spawnDepth`. Sidecar content is untrusted: a field
- *  of the wrong type is dropped, never coerced. */
-function parseSidecarMeta(jsonlPath: string): SidecarMeta | null {
+/** Raw characters of a sidecar text field ever looked at: anything past the cap
+ *  is dropped anyway, and the file itself is already size-capped. */
+const SIDECAR_TEXT_SCAN_CHARS = 4096;
+
+/** A sidecar text field made safe to display and log: control/ANSI/bidi
+ *  sequences neutralized (sanitizeFeedText), line breaks folded to spaces,
+ *  trimmed, and clipped to `max` UTF-16 units without splitting a surrogate
+ *  pair. Non-strings and blank results read as absent. */
+function sidecarText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = sanitizeFeedText(value.slice(0, SIDECAR_TEXT_SCAN_CHARS))
+    // Invisible format characters (zero-width, weak bidi marks, BOM) would let
+    // two labels look identical; lone surrogates are not text at all. The
+    // zero-width JOINER stays: it builds composed emoji (👨‍💻) in names.
+    .replace(/(?!\u200D)\p{Cf}/gu, '')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
+    // One line: every line/paragraph break and tab folds to a single space.
+    .replace(/\s*[\n\t\u2028\u2029]\s*/g, ' ')
+    .trim();
+  if (!text) return undefined;
+  if (text.length <= max) return text;
+  let head = text.slice(0, max);
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
+  return head;
+}
+
+/** Result of looking a sidecar up: settled (from cache, or refused/missing
+ *  without opening it), or in need of a read — the costly part. */
+type SidecarProbe =
+  | { settled: true; meta: SidecarMeta | null }
+  | { settled: false; metaPath: string; stat: fs.Stats };
+
+/** Stat a sidecar and answer from the cache when it is unchanged. Opening a
+ *  file is what costs (a freshly written one can take milliseconds on Windows
+ *  while antivirus scans it), so this never opens anything. */
+function probeSidecar(jsonlPath: string): SidecarProbe {
   const metaPath = sidecarPath(jsonlPath);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(metaPath);
   } catch {
     sidecarCache.delete(metaPath);
-    return null;
+    return { settled: true, meta: null };
   }
   const cached = sidecarCache.get(metaPath);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-    return cached.meta;
+    return { settled: true, meta: cached.meta };
   }
+  return { settled: false, metaPath, stat };
+}
+
+/** Parse a sidecar's metadata: `agentType` (required), plus `toolUseId`,
+ *  `description`, and `name` when present (background agents record the first
+ *  three; a NAMED teamless spawn additionally records `name`), and the spawn-tree
+ *  fields `parentAgentId` / `spawnDepth`. Sidecar content is untrusted: a field
+ *  of the wrong type is dropped, never coerced. Called for a probe that needs a read. */
+function readSidecarMeta(metaPath: string, stat: fs.Stats): SidecarMeta | null {
   let meta: SidecarMeta | null = null;
   // The scan is synchronous on the server's event loop: a FIFO or device (e.g. a
   // symlink to /dev/zero) would block or never end, and a huge file would stall
@@ -115,13 +166,16 @@ function parseSidecarMeta(jsonlPath: string): SidecarMeta | null {
       // the spawn off the root -- so the whole sidecar is refused instead.
       const parentAgentKey = normalizeClaudeAgentKey(d.parentAgentId);
       const parentInvalid = d.parentAgentId !== undefined && parentAgentKey === undefined;
-      if (typeof d.agentType === 'string' && !parentInvalid) {
+      // agentType is required: one that sanitizes to nothing is as absent as a
+      // non-string one, so the sidecar is refused.
+      const agentType = sidecarText(d.agentType, IDENTIFIER_MAX_CHARS);
+      if (agentType !== undefined && !parentInvalid) {
         const depth = d.spawnDepth;
         meta = {
-          agentType: d.agentType,
+          agentType,
           toolUseId: typeof d.toolUseId === 'string' ? d.toolUseId : undefined,
-          description: typeof d.description === 'string' ? d.description : undefined,
-          name: typeof d.name === 'string' ? d.name : undefined,
+          description: sidecarText(d.description, SUMMARY_MAX_CHARS),
+          name: sidecarText(d.name, IDENTIFIER_MAX_CHARS),
           parentAgentKey,
           depth:
             typeof depth === 'number' && Number.isSafeInteger(depth) && depth >= 1
@@ -270,6 +324,10 @@ export const claudeTeamProvider: TeamProvider = {
     return { teammateName: match[1], teamName: match[2] };
   },
 
+  extractWorkflowLaunch: extractClaudeWorkflowLaunch,
+  discoverWorkflowAgents: discoverClaudeWorkflowAgents,
+  isWorkflowRunDirOfSession,
+
   discoverTeammates(projectDir, leadSessionId, teamName) {
     const result: ReturnType<TeamProvider['discoverTeammates']> = [];
 
@@ -282,11 +340,27 @@ export const claudeTeamProvider: TeamProvider = {
       // directory missing -> no old-style teammates
     }
     const liveMetaPaths = new Set<string>();
+    const metaByEntry = new Map<string, SidecarMeta | null>();
+    const needRead: Array<{ entry: string; metaPath: string; stat: fs.Stats }> = [];
     for (const entry of entries) {
       if (!entry.endsWith(TRANSCRIPT_SUFFIX)) continue;
       const jsonlPath = path.join(dir, entry);
       liveMetaPaths.add(sidecarPath(jsonlPath));
-      const meta = parseSidecarMeta(jsonlPath);
+      const probe = probeSidecar(jsonlPath);
+      if (probe.settled) metaByEntry.set(entry, probe.meta);
+      else needRead.push({ entry, metaPath: probe.metaPath, stat: probe.stat });
+    }
+    // Opening sidecars is the expensive part and runs on the event loop: at
+    // most SIDECAR_COLD_READS_PER_SCAN per call, NEWEST first (a live spawn's
+    // sidecar is fresh; a backlog of historical ones is old). The rest stay
+    // uncached and are simply absent this call — the next scan reads them.
+    needRead.sort((x, y) => y.stat.mtimeMs - x.stat.mtimeMs);
+    for (const { entry, metaPath, stat } of needRead.slice(0, SIDECAR_COLD_READS_PER_SCAN)) {
+      metaByEntry.set(entry, readSidecarMeta(metaPath, stat));
+    }
+    for (const entry of entries) {
+      const meta = metaByEntry.get(entry);
+      const jsonlPath = path.join(dir, entry);
       if (meta) {
         result.push({
           jsonlPath,

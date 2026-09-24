@@ -35,6 +35,9 @@ export function resendAgentActivity(
     for (const [toolId, status] of agent.activeToolStatuses) {
       // Skip background tools here — they're sent separately below with proper flags
       if (agent.backgroundAgentToolIds.has(toolId)) continue;
+      // A foreground spawn that is already its own derived character: re-sending
+      // it would create a Subtask ghost beside that character.
+      if (hasPromotedBackgroundAgent(id, toolId, store)) continue;
 
       const toolName = agent.activeToolNames.get(toolId) ?? '';
       send({

@@ -33,6 +33,31 @@ function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
 }
 
 describe('resendAgentActivity', () => {
+  it('skips a foreground spawn tool that already is its own derived agent', () => {
+    const store = new AgentStateStore();
+    store.set(
+      1,
+      createTestAgent({
+        id: 1,
+        activeToolIds: new Set(['toolu_L', 'tool-1']),
+        activeToolStatuses: new Map([
+          ['toolu_L', 'Subtask: work'],
+          ['tool-1', 'Running'],
+        ]),
+        activeToolNames: new Map([
+          ['toolu_L', 'Agent'],
+          ['tool-1', 'Bash'],
+        ]),
+      }),
+    );
+    store.set(2, createTestAgent({ id: 2, parentAgentId: 1, spawnToolUseId: 'toolu_L' }));
+    const sent: Array<Record<string, unknown>> = [];
+    resendAgentActivity((msg) => sent.push(msg), store);
+
+    const starts = sent.filter((m) => m.type === 'agentToolStart' && m.id === 1);
+    expect(starts.map((m) => m.toolId)).toEqual(['tool-1']);
+  });
+
   it('sends messages in order: team info, tools, waiting, context', () => {
     const store = new AgentStateStore();
     store.set(

@@ -20,13 +20,17 @@ import {
   adoptExternalSessionFromHook,
   ensureProjectScan,
   isTrackedProjectDir,
+  notifyDerivedRemoved,
   reassignAgentToFile,
-  scanForBackgroundAgentFiles,
+  registerWorkflowLaunch,
+  restorableSpawnToolIds,
+  rootOf,
   scanForTeammateFiles,
+  scanSpawnTree,
   setAgentRemovalCallback,
   setDismissalTracker,
   setHookProvider as setFileWatcherHookProvider,
-  setSubagentWatch,
+  setSpawnTreeCallbacks,
   setTeammateRegisterCallback,
   setTeammateRemovalCallback,
   setTeamProvider,
@@ -39,13 +43,15 @@ import { HookEventHandler } from './hookEventHandler.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
 import { SessionRouter } from './sessionRouter.js';
-import { SubagentWatch } from './subagentWatch.js';
+import { subtreeRemovalOrder } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
   setBackgroundAgentCompletedCallback,
   setBackgroundAgentDetectedCallback,
   setHookProvider,
+  setSpawnToolClosedCallback,
   setTeamSwitchCallback,
+  setWorkflowLaunchedCallback,
 } from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
@@ -80,21 +86,37 @@ export class AgentRuntime {
 
   // Dependencies
   readonly dismissalTracker = new DismissalTracker();
-  /** Shadow-store watcher for unnamed background spawns (sub-agents). */
-  readonly subagentWatch: SubagentWatch;
   private hookEventHandler: HookEventHandler;
   private lifecycleCallbacks: RuntimeLifecycleCallbacks = {};
+  /** Roots with a coalesced tree scan queued (see scheduleTreeScan). */
+  private readonly pendingTreeScans = new Set<number>();
+  /** Children of workflow nodes: their workflow node and whether their last
+   *  reported status was active. A workflow node's own status is derived
+   *  from these (active if any child is, else waiting). */
+  private readonly workflowChildren = new Map<number, { nodeId: number; active: boolean }>();
+  private readonly onStoreBroadcast = (msg: Record<string, unknown>): void => {
+    if (msg.type !== 'agentStatus' || typeof msg.id !== 'number') return;
+    const nodeId = this.store.get(msg.id)?.parentAgentId;
+    if (nodeId === undefined || this.store.get(nodeId)?.nodeKind !== 'workflow') return;
+    this.workflowChildren.set(msg.id, { nodeId, active: msg.status === 'active' });
+    this.refreshWorkflowStatus(nodeId);
+  };
+  private readonly onStoreAgentRemoved = (id: number): void => {
+    const child = this.workflowChildren.get(id);
+    if (!child) return;
+    this.workflowChildren.delete(id);
+    this.refreshWorkflowStatus(child.nodeId);
+  };
+  private disposed = false;
 
   constructor(
     private readonly store: AgentStateStore,
-    provider: HookProvider,
+    private readonly provider: HookProvider,
   ) {
     // Wire module-level dependencies
     setDismissalTracker(this.dismissalTracker);
     setHookProvider(provider);
     setFileWatcherHookProvider(provider);
-    this.subagentWatch = new SubagentWatch(store);
-    setSubagentWatch(this.subagentWatch);
     if (provider.team) {
       setTeamProvider(provider.team);
     }
@@ -103,32 +125,33 @@ export class AgentRuntime {
     // New-style teammates run their own sessions; registering routes their hook
     // events (PreToolUse, Stop, SessionEnd) directly to the teammate agent.
     setTeammateRegisterCallback((sessionId, agentId) => this.registerAgent(sessionId, agentId));
-    // Background spawns (teams OFF): classify by sidecar name on spawn (named
-    // -> teammate character, unnamed -> shadow-watched sub-agent), remove when
-    // the completion queue-operation lands on the lead.
-    setBackgroundAgentDetectedCallback((leadId) => {
-      scanForBackgroundAgentFiles(
-        leadId,
-        this.store,
-        this.store.nextAgentId,
-        this.fileWatchers,
-        this.pollingTimers,
-        this.waitingTimers,
-        this.permissionTimers,
-        () => this.store.persist(),
-        undefined,
-      );
-    });
-    setBackgroundAgentCompletedCallback((leadId, toolUseId) => {
-      for (const [id, agent] of this.store) {
-        if (agent.leadAgentId === leadId && agent.spawnToolUseId === toolUseId) {
-          this.removeTeammate(id, 'background-complete');
-          break;
-        }
-      }
-      // Unnamed spawns live in the shadow store; the webview sub-character is
-      // cleared by the lead-side queue-op subagentClear, not by this call.
-      this.subagentWatch.removeBySpawn(leadId, toolUseId);
+    // Spawn tree (docs/adr/0002): any node opening a spawn tool (or a spawn
+    // turning out to be a background launch) scans its whole tree; the spawn
+    // ending — foreground tool_result, background completion queue-operation,
+    // or a foreground spawn dropped at turn end — removes its derived subtree.
+    setBackgroundAgentDetectedCallback((agentId) => this.scanTree(rootOf(agentId, this.store)));
+    setBackgroundAgentCompletedCallback((agentId, toolUseId) =>
+      this.removeSpawnChild(agentId, toolUseId, 'background-complete'),
+    );
+    setSpawnToolClosedCallback((agentId, toolUseId) =>
+      this.removeSpawnChild(agentId, toolUseId, 'spawn-closed'),
+    );
+    // A Workflow launch becomes a node of the tree (spec §2.1b); it leaves
+    // through the background-completion path above, like any background spawn.
+    setWorkflowLaunchedCallback((agentId, toolUseId, launch) =>
+      registerWorkflowLaunch(agentId, toolUseId, launch, this.store, this.store.nextAgentId),
+    );
+    store.on('broadcast', this.onStoreBroadcast);
+    store.on('agentRemoved', this.onStoreAgentRemoved);
+    // Hook events carrying an agent key route to the derived agent they name.
+    setSpawnTreeCallbacks({
+      onDerivedCreated: (a) => {
+        if (a.spawnAgentKey)
+          this.hookEventHandler.registerSpawn(a.sessionId, a.spawnAgentKey, a.id);
+      },
+      onDerivedRemoved: (a) => {
+        if (a.spawnAgentKey) this.hookEventHandler.unregisterSpawn(a.sessionId, a.spawnAgentKey);
+      },
     });
     // A resumed lead that spawns again belongs to a freshly minted implicit
     // team; its previous team's teammates are defunct. Promoted anonymous
@@ -215,6 +238,15 @@ export class AgentRuntime {
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
+        // The old session's spawn tree ends with it: drop every derived agent
+        // (and its key routing) BEFORE the root moves to the new session, or
+        // they would linger under a session that no longer exists.
+        const previous = this.store.get(agentId);
+        if (previous) {
+          this.forgetSpawns(previous, agentId);
+          this.removeSpawnedChildren(agentId);
+          this.hookEventHandler.clearSpawns(previous.sessionId);
+        }
         if (newTranscriptPath) {
           this.knownJsonlFiles.add(newTranscriptPath);
           reassignAgentToFile(
@@ -262,6 +294,8 @@ export class AgentRuntime {
       onTeammateRemoved: (teammateAgentId) => {
         this.removeTeammate(teammateAgentId, 'hooks');
       },
+      // SubagentStart arrives in bursts (one per child): coalesced per root.
+      onSpawnObserved: (agentId) => this.scheduleTreeScan(rootOf(agentId, this.store)),
       onSessionEnd: (agentId) => {
         const agent = this.store.get(agentId);
         if (!agent) return;
@@ -270,8 +304,11 @@ export class AgentRuntime {
         // Covers real team leads AND leads of background teammates (which
         // have children but no teamName). No-op when childless.
         this.removeTeammates(agentId);
-        // Unnamed background spawns die with their lead's session too.
-        this.subagentWatch.removeByLead(agentId);
+        // Every agent it spawned dies with the session, whole subtrees, leaves
+        // first — even when the session agent itself stays (terminal agents).
+        this.forgetSpawns(agent, agentId);
+        this.removeSpawnedChildren(agentId);
+        this.hookEventHandler.clearSpawns(agent.sessionId);
         if (agent.isExternal) {
           this.unregisterAgent(agent.sessionId);
           this.removeAgent(agentId);
@@ -304,10 +341,120 @@ export class AgentRuntime {
 
   // ── Agent removal (shared cleanup) ──
 
-  /** Remove an agent: stop watchers, cancel timers, delete from store. */
+  /** Remove an agent and every agent it spawned (its whole spawn subtree,
+   *  leaves first): stop watchers, cancel timers, delete from store. Unknown
+   *  ids are a no-op. */
   removeAgent(id: number): void {
+    if (!this.store.get(id)) return;
+    const parentOf = new Map<number, number | undefined>();
+    for (const [aid, a] of this.store) parentOf.set(aid, a.parentAgentId);
+    const leads = new Set<number>();
+    for (const victim of subtreeRemovalOrder(id, parentOf)) {
+      const removed = this.removeSingleAgent(victim);
+      // A named derived agent leaving may empty its spawner's derived team.
+      if (removed?.parentAgentId !== undefined && removed.leadAgentId !== undefined) {
+        leads.add(removed.leadAgentId);
+      }
+    }
+    this.store.persist();
+    for (const leadId of leads) this.demoteLeadIfTeamEmpty(leadId);
+  }
+
+  /** Materialize whatever the spawn tree under `rootId` can grow right now. */
+  scanTree(rootId: number): void {
+    scanSpawnTree(
+      rootId,
+      this.store,
+      this.store.nextAgentId,
+      this.fileWatchers,
+      this.pollingTimers,
+      this.waitingTimers,
+      this.permissionTimers,
+    );
+  }
+
+  /** Queue one scan of `rootId`'s tree for the next microtask. Any number of
+   *  requests for the same root before then collapse into that single scan. */
+  scheduleTreeScan(rootId: number): void {
+    if (this.disposed || this.pendingTreeScans.has(rootId)) return;
+    this.pendingTreeScans.add(rootId);
+    queueMicrotask(() => {
+      this.pendingTreeScans.delete(rootId);
+      if (!this.disposed) this.scanTree(rootId);
+    });
+  }
+
+  /** Re-derive a workflow node's status from its children and broadcast it
+   *  when it changed: active while any child is active, otherwise waiting. */
+  private refreshWorkflowStatus(nodeId: number): void {
+    const node = this.store.get(nodeId);
+    if (!node || node.nodeKind !== 'workflow') return;
+    let active = false;
+    for (const [childId, child] of this.workflowChildren) {
+      if (child.nodeId === nodeId && child.active && this.store.has(childId)) {
+        active = true;
+        break;
+      }
+    }
+    if (active === !node.isWaiting) return;
+    node.isWaiting = !active;
+    this.store.broadcast(
+      active
+        ? { type: 'agentStatus', id: nodeId, status: 'active' }
+        : { type: 'agentStatus', id: nodeId, status: 'waiting', awaitingInput: false },
+    );
+  }
+
+  /** Remove the derived agent a spawn tool call of `parentId` started, if any.
+   *  Named ones leave as teammates (dismissal, adapter callback, lead badge). */
+  private removeSpawnChild(parentId: number, toolUseId: string, source: string): void {
+    for (const [id, a] of this.store) {
+      if (a.parentAgentId !== parentId || a.spawnToolUseId !== toolUseId) continue;
+      if (a.leadAgentId !== undefined) this.removeTeammate(id, source);
+      else this.removeAgent(id);
+      return;
+    }
+  }
+
+  /** The session ended: none of its spawns is live any more. Forget them on
+   *  the session agent (background launches and still-open spawn tools) so the
+   *  periodic scan's live-spawn gate can't re-materialize the children just
+   *  removed — the CLI exiting kills background agents, whose completion
+   *  queue-operation then never comes. Their Subtask sprites go too. */
+  private forgetSpawns(agent: AgentState, agentId: number): void {
+    const spawnTools = this.provider.subagentToolNames;
+    const dropped = new Set(agent.backgroundAgentToolIds);
+    for (const toolId of agent.activeToolIds) {
+      const name = agent.activeToolNames.get(toolId);
+      if (name && spawnTools.has(name)) dropped.add(toolId);
+    }
+    if (dropped.size === 0) return;
+    for (const toolId of dropped) {
+      agent.activeToolIds.delete(toolId);
+      agent.activeToolStatuses.delete(toolId);
+      agent.activeToolNames.delete(toolId);
+      agent.activeSubagentToolIds.delete(toolId);
+      agent.activeSubagentToolNames.delete(toolId);
+      this.store.broadcast({ type: 'subagentClear', id: agentId, parentToolId: toolId });
+    }
+    agent.backgroundAgentToolIds.clear();
+    this.store.persist();
+  }
+
+  /** Remove every derived agent `parentId` spawned, with their subtrees. */
+  private removeSpawnedChildren(parentId: number): void {
+    const children: number[] = [];
+    for (const [id, a] of this.store) {
+      if (a.parentAgentId === parentId) children.push(id);
+    }
+    for (const id of children) this.removeAgent(id);
+  }
+
+  /** Remove exactly one agent (no cascade). Returns it, or undefined when the
+   *  id is already gone (a cascade may race another removal). */
+  private removeSingleAgent(id: number): AgentState | undefined {
     const agent = this.store.get(id);
-    if (!agent) return;
+    if (!agent) return undefined;
 
     // Stop JSONL poll timer
     const jpTimer = this.jsonlPollTimers.get(id);
@@ -332,9 +479,12 @@ export class AgentRuntime {
     // Notify adapter before deleting from store
     this.lifecycleCallbacks.onAgentRemoved?.(id, agent);
 
-    // Remove from store (fires agentRemoved event) and persist
+    // Derived agents stop receiving hook events routed by their agent key.
+    if (agent.spawnAgentKey) notifyDerivedRemoved(agent);
+
+    // Remove from store (fires agentRemoved event); the caller persists.
     this.store.delete(id);
-    this.store.persist();
+    return agent;
   }
 
   /** Remove a single teammate agent. */
@@ -498,8 +648,16 @@ export class AgentRuntime {
         activeSubagentToolIds: new Map(),
         activeSubagentToolNames: new Map(),
         // Live spawn ids survive the restart so the 1s scan can re-adopt the
-        // spawns' transcripts and the completion queue-op still matches.
-        backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
+        // spawns' transcripts and the completion queue-op still matches --
+        // unless the session went quiet long ago (died without SessionEnd).
+        backgroundAgentToolIds: restorableSpawnToolIds(
+          {
+            jsonlFile: p.jsonlFile,
+            projectDir: p.projectDir,
+            sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+          },
+          p.backgroundAgentToolIds,
+        ),
         isWaiting: false,
         permissionSent: false,
         hadToolsInTurn: false,
@@ -558,8 +716,12 @@ export class AgentRuntime {
 
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
+    this.disposed = true;
+    this.pendingTreeScans.clear();
+    this.store.off('broadcast', this.onStoreBroadcast);
+    this.store.off('agentRemoved', this.onStoreAgentRemoved);
+    this.workflowChildren.clear();
     this.hookEventHandler.dispose();
-    this.subagentWatch.dispose();
 
     if (this.projectScanTimer.current) {
       clearInterval(this.projectScanTimer.current);

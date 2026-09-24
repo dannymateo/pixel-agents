@@ -84,6 +84,12 @@ export interface TeamProvider {
     resultContent: unknown,
   ): { runDir: string; name?: string } | null;
 
+  /** Whether `runDir` really is a workflow run directory of this session (and
+   *  not a path a transcript merely claims). The host must refuse a run the
+   *  provider cannot vouch for, so a provider without this method gets no
+   *  workflow nodes at all. */
+  isWorkflowRunDirOfSession?(runDir: string, projectDir: string, sessionId: string): boolean;
+
   /** Agents of one workflow run. Their sidecars carry no spawn tool id, so the
    *  host gates them on the run being live instead. `parentAgentKey` is set
    *  when one of the run's agents spawned another; `label` is a short task

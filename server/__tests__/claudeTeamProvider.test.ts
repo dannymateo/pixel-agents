@@ -3,6 +3,11 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { claudeTeamProvider } from '../src/providers/hook/claude/claudeTeamProvider.js';
+import {
+  IDENTIFIER_MAX_CHARS,
+  SIDECAR_COLD_READS_PER_SCAN,
+  SUMMARY_MAX_CHARS,
+} from '../src/providers/hook/claude/constants.js';
 
 /** Paths the PROVIDER passed to readFileSync. `vi.spyOn(require('fs'), ...)`
  *  does not reach the provider's `import * as fs` binding, so a pass-through
@@ -232,6 +237,68 @@ describe('claudeTeamProvider', () => {
       });
     });
 
+    it('sanitizes and clips the sidecar text fields (agentType, name, description)', () => {
+      const dir = path.join(tmpRoot, 'sess-text', 'subagents');
+      fsMod.mkdirSync(dir, { recursive: true });
+      fsMod.writeFileSync(path.join(dir, 'agent-t1.jsonl'), '');
+      fsMod.writeFileSync(
+        path.join(dir, 'agent-t1.meta.json'),
+        JSON.stringify({
+          agentType: '\u001b[31mdesarrollador\u001b[0m\u0007',
+          name: 'dev\nFAKE LOG LINE',
+          description: 'x'.repeat(10_000),
+          toolUseId: 'toolu_1',
+          spawnDepth: 1,
+        }),
+      );
+      fsMod.writeFileSync(path.join(dir, 'agent-t2.jsonl'), '');
+      fsMod.writeFileSync(
+        path.join(dir, 'agent-t2.meta.json'),
+        JSON.stringify({
+          agentType: 'a'.repeat(5_000),
+          name: '\u0000\u0001  ',
+          description: 'ok',
+          spawnDepth: 1,
+        }),
+      );
+      const byKey = new Map(
+        claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-text').map((e) => [e.agentKey, e]),
+      );
+      const t1 = byKey.get('t1')!;
+      expect(t1.agentType).toBe('desarrollador');
+      expect(t1.teammateName).toBe('desarrollador');
+      expect(t1.name).toBe('dev FAKE LOG LINE');
+      expect(t1.description!.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+      const t2 = byKey.get('t2')!;
+      expect(t2.agentType!.length).toBe(IDENTIFIER_MAX_CHARS);
+      // A name that sanitizes to nothing is no name: the spawn stays a Sub-agent.
+      expect(t2.name).toBeUndefined();
+      expect(t2.description).toBe('ok');
+    });
+
+    it('drops invisible characters but keeps composed emoji; a blank agentType refuses the sidecar', () => {
+      const dir = path.join(tmpRoot, 'sess-invis', 'subagents');
+      fsMod.mkdirSync(dir, { recursive: true });
+      const write = (key: string, meta: Record<string, unknown>) => {
+        fsMod.writeFileSync(path.join(dir, `agent-${key}.jsonl`), '');
+        fsMod.writeFileSync(path.join(dir, `agent-${key}.meta.json`), JSON.stringify(meta));
+      };
+      write('v1', {
+        agentType: 'Rev​iewer﻿‎',
+        name: 'coder 👨‍💻',
+        description: 'a b c\td ok\uD800',
+      });
+      write('v2', { agentType: '  ​\t ', name: 'x' });
+      const byKey = new Map(
+        claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-invis').map((e) => [e.agentKey, e]),
+      );
+      const v1 = byKey.get('v1')!;
+      expect(v1.agentType).toBe('Reviewer');
+      expect(v1.name).toBe('coder 👨‍💻');
+      expect(v1.description).toBe('a b c d ok');
+      expect(byKey.has('v2')).toBe(false);
+    });
+
     it('leaves depth undefined when spawnDepth is malformed (entry kept)', () => {
       const dir = path.join(tmpRoot, 'sess-bad', 'subagents');
       fsMod.mkdirSync(dir, { recursive: true });
@@ -408,15 +475,46 @@ describe('claudeTeamProvider', () => {
         );
       }
       const metaReads = () => fsReads.paths.filter((p) => p.endsWith('.meta.json')).length;
-      // Control: the cold scan IS observed (proves the seam reaches the
-      // provider's fs, so the zero below is not vacuous).
+      // Control: the cold scans ARE observed (proves the seam reaches the
+      // provider's fs, so the zero below is not vacuous). A call opens at most
+      // SIDECAR_COLD_READS_PER_SCAN of them; the backlog drains over calls.
       fsReads.paths.length = 0;
-      expect(claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-many')).toHaveLength(300);
+      let calls = 0;
+      let found = 0;
+      while (found < 300 && calls < 20) {
+        const before = metaReads();
+        found = claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-many').length;
+        expect(metaReads() - before).toBeLessThanOrEqual(SIDECAR_COLD_READS_PER_SCAN);
+        calls++;
+      }
+      expect(found).toBe(300);
+      expect(calls).toBe(Math.ceil(300 / SIDECAR_COLD_READS_PER_SCAN));
       expect(metaReads()).toBe(300);
       fsReads.paths.length = 0;
       expect(claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-many')).toHaveLength(300);
       expect(metaReads()).toBe(0);
     }, 60_000); // 600 file writes: slow on Windows (real-time AV scanning)
+
+    it('reads the newest sidecars first when the cold backlog exceeds one call', () => {
+      const dir = path.join(tmpRoot, 'sess-backlog', 'subagents');
+      fsMod.mkdirSync(dir, { recursive: true });
+      const old = new Date(Date.now() - 3_600_000);
+      for (let i = 0; i < SIDECAR_COLD_READS_PER_SCAN + 10; i++) {
+        const meta = path.join(dir, `agent-h${i}.meta.json`);
+        fsMod.writeFileSync(path.join(dir, `agent-h${i}.jsonl`), '');
+        fsMod.writeFileSync(meta, JSON.stringify({ agentType: 'Explore', toolUseId: `t${i}` }));
+        fsMod.utimesSync(meta, old, old);
+      }
+      // The live spawn's sidecar: written last, newest mtime.
+      fsMod.writeFileSync(path.join(dir, 'agent-live.jsonl'), '');
+      fsMod.writeFileSync(
+        path.join(dir, 'agent-live.meta.json'),
+        JSON.stringify({ agentType: 'Explore', toolUseId: 'toolu_live' }),
+      );
+      const first = claudeTeamProvider.discoverTeammates(tmpRoot, 'sess-backlog');
+      expect(first).toHaveLength(SIDECAR_COLD_READS_PER_SCAN);
+      expect(first.some((e) => e.agentKey === 'live')).toBe(true);
+    });
 
     it('serves an unchanged sidecar (same mtime and size) from the cache', () => {
       // Behavioral twin of the spy test: swap the content in place and restore the

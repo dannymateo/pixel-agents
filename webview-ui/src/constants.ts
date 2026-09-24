@@ -338,12 +338,29 @@ export const FEED_DIFF_REMOVE_COLOR = '#e05a5a';
 export const DOOR_OPEN_HOLD_MS = 900;
 /** How long the goodbye bubble shows before an agent walks out. */
 export const GOODBYE_BUBBLE_MS = 1500;
-/** State suffixes of a door's asset ids (`DOOR_CLOSED` / `DOOR_OPEN`): the
- *  catalog only pairs on/off states, so the engine finds the open variant by name. */
-export const DOOR_CLOSED_SUFFIX = '_CLOSED';
-export const DOOR_OPEN_SUFFIX = '_OPEN';
 /** Area label the user gives their own lounge in the Areas editor. */
 export const LOUNGE_AREA_LABEL = 'Descanso';
+/** The generated lounge's Area color (a green of the editor's area palette). */
+export const LOUNGE_AREA_COLOR = '#1dd1a1';
+/** Height of the generated lounge, walls included. */
+export const LOUNGE_ROWS = 6;
+/** Longest team-module label, in code points (ellipsis included). A module is
+ *  18 tiles wide; ~28 characters of the pixel font fit across it at any zoom. */
+export const MODULE_LABEL_MAX_CHARS = 28;
+/** Uid prefix of everything the living office composes (modules, default door
+ *  and lounge). OfficeState never hands a seat carrying it to the user's office. */
+export const LIVING_UID_NAMESPACE = 'living-';
+/** Furniture groups that are play, not work (the lounge's): never a working
+ *  agent's "PC", only switched on while someone rests in front of them. */
+export const LEISURE_ELECTRONICS_GROUPS: readonly string[] = ['ARCADE', 'GAME_CONSOLE'];
+/** Longest a derived agent may take to walk out to the door once the server
+ *  removed it (it removes after LEAVE_ANIMATION_MAX_MS whether or not we are
+ *  done); past it the walk is cut to the fade. */
+export const LEAVE_WALK_MAX_MS = 60_000;
+/** Mirror IDLE_TO_LOUNGE_MINUTES_{MIN,MAX} and IDLE_TO_LOUNGE_MS_DEFAULT in server/src/constants.ts. */
+export const IDLE_TO_LOUNGE_MINUTES_MIN = 1;
+export const IDLE_TO_LOUNGE_MINUTES_MAX = 240;
+export const IDLE_TO_LOUNGE_MINUTES_DEFAULT = 30;
 /** Empty columns between the user's office and the first team module (and between modules). */
 export const MODULE_GAP_COLS = 1;
 /** Team module area colors, assigned deterministically per module owner. */

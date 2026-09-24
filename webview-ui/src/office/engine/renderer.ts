@@ -203,6 +203,7 @@ export function renderAreaOverlay(
   offsetY: number,
   zoom: number,
   activeAreaLabel?: string | null,
+  onlyLabels?: ReadonlySet<string>,
 ): void {
   if (!areaTiles || areaTiles.length === 0) return;
   if (!areas || areas.length === 0) return;
@@ -216,6 +217,7 @@ export function renderAreaOverlay(
     for (let c = 0; c < cols; c++) {
       const label = areaTiles[r * cols + c];
       if (!label) continue;
+      if (onlyLabels && !onlyLabels.has(label)) continue;
       const color = colorMap.get(label);
       if (!color) continue;
       ctx.globalAlpha =
@@ -245,6 +247,7 @@ export function renderAreaLabels(
   offsetX: number,
   offsetY: number,
   zoom: number,
+  onlyLabels?: ReadonlySet<string>,
 ): void {
   if (!areaTiles || areaTiles.length === 0) return;
   if (!areas || areas.length === 0) return;
@@ -259,6 +262,7 @@ export function renderAreaLabels(
     for (let c = 0; c < cols; c++) {
       const label = areaTiles[r * cols + c];
       if (!label) continue;
+      if (onlyLabels && !onlyLabels.has(label)) continue;
       const acc = centroids.get(label);
       if (acc) {
         acc.sumX += c;
@@ -914,7 +918,12 @@ export function renderFrame(
   showAreas?: boolean,
   activeAreaLabel?: string | null,
   pets?: Pet[],
+  /** Area labels drawn even with Show Areas off: the living office's team
+   *  modules and generated lounge (they name the teams). */
+  alwaysAreaLabels?: ReadonlySet<string>,
 ): { offsetX: number; offsetY: number } {
+  const areaFilter = showAreas ? undefined : alwaysAreaLabels;
+  const drawAreas = showAreas === true || (alwaysAreaLabels?.size ?? 0) > 0;
   // Clear
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
 
@@ -935,8 +944,19 @@ export function renderFrame(
   }
 
   // Area overlay (translucent color wash) — above carpets, below seat indicators
-  if (showAreas) {
-    renderAreaOverlay(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom, activeAreaLabel);
+  if (drawAreas) {
+    renderAreaOverlay(
+      ctx,
+      areaTiles,
+      areas,
+      cols,
+      rows,
+      offsetX,
+      offsetY,
+      zoom,
+      activeAreaLabel,
+      areaFilter,
+    );
   }
 
   // Seat indicators (below furniture/characters, on top of floor)
@@ -980,8 +1000,8 @@ export function renderFrame(
   }
 
   // Area labels (above bubbles + characters, below editor overlays)
-  if (showAreas) {
-    renderAreaLabels(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom);
+  if (drawAreas) {
+    renderAreaLabels(ctx, areaTiles, areas, cols, rows, offsetX, offsetY, zoom, areaFilter);
   }
 
   // Editor overlays

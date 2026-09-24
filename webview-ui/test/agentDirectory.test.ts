@@ -164,4 +164,38 @@ describe('AgentDirectory — malformed trees', () => {
     expect(d.nearestLiveScope('root', new Map())).toBe('root');
     expect(d.nearestLiveScope(404, new Map())).toBe('root');
   });
+  it('merges nodeKind and presence like any other field', () => {
+    const d = new AgentDirectory();
+    d.upsert(1, { nodeKind: 'workflow', presence: 'available' });
+    d.upsert(1, { presence: 'lounge' });
+    expect(d.get(1)).toMatchObject({ nodeKind: 'workflow', presence: 'lounge' });
+  });
+  it('keeps its child index in step with re-parenting and removal', () => {
+    const d = tree();
+    d.upsert(13, { parentAgentId: 10 });
+    expect(d.childrenOf(10)).toEqual([11, 13]);
+    d.upsert(13, { parentAgentId: 11 }); // re-parented
+    expect(d.childrenOf(10)).toEqual([11]);
+    expect(d.childrenOf(11)).toEqual([12, 13]);
+    d.upsert(13, { parentAgentId: undefined }); // cleared: top level
+    expect(d.childrenOf(11)).toEqual([12]);
+    expect(d.membersOf('root')).toContain(13);
+    d.remove(12);
+    expect(d.childrenOf(11)).toEqual([]);
+    expect(d.liveChildCount(11)).toBe(0);
+    // Orphans stay listed under their removed parent, as before.
+    d.remove(10);
+    expect(d.childrenOf(10)).toEqual([11]);
+    // A self-parent is never its own child.
+    d.upsert(20, { parentAgentId: 20 });
+    expect(d.childrenOf(20)).toEqual([]);
+  });
+  it('childrenOf is linear in the children, not the directory', () => {
+    const d = new AgentDirectory();
+    d.upsert(0, {});
+    for (let i = 1; i <= 50_000; i++) d.upsert(i, { parentAgentId: i % 2 === 0 ? 0 : 1 });
+    const started = performance.now();
+    for (let i = 0; i < 1_000; i++) d.childrenOf(3);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
 });

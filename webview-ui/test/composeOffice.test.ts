@@ -36,7 +36,7 @@ import type {
   PlacedFurniture,
   TileType as TileTypeVal,
 } from '../src/office/types.js';
-import { TileType } from '../src/office/types.js';
+import { Direction, TileType } from '../src/office/types.js';
 
 // ── Catalog: the bundled manifests, plus stand-ins for the living-office assets
 // (T20) when they are not on disk yet. Stand-ins use the footprints T20 specifies.
@@ -102,6 +102,7 @@ function loadCatalog(): LoadedAssetData {
     [LIVING_ASSET_TYPES.arcade, 'electronics', 1, 2],
     [LIVING_ASSET_TYPES.gameConsole, 'electronics', 2, 1],
     [LIVING_ASSET_TYPES.beanbag, 'chairs', 1, 1],
+    [LIVING_ASSET_TYPES.beanbagBack, 'chairs', 1, 1],
   ];
   for (const [id, category, w, h] of standIns) {
     if (catalog.some((e) => e.id === id)) continue;
@@ -386,7 +387,7 @@ describe('composeLivingOffice — (c) stability', () => {
     // What sat below the freed module in its column (here the lounge) moved up.
     const freed = a.modules.find((m) => m.ownerId === 10)!;
     const bean = (o: LivingOffice) =>
-      o.layout.furniture.find((f) => f.type === LIVING_ASSET_TYPES.beanbag)!;
+      o.layout.furniture.find((f) => f.type === LIVING_ASSET_TYPES.beanbagBack)!;
     expect(bean(a).col).toBeGreaterThanOrEqual(freed.col);
     expect(bean(a).col).toBeLessThan(freed.col + freed.cols);
     expect(bean(b).row).toBe(bean(a).row - freed.rows);
@@ -495,9 +496,14 @@ describe('composeLivingOffice — (e) entrance and lounge', () => {
     expect(types).toContain(LIVING_ASSET_TYPES.arcade);
     expect(types).toContain(LIVING_ASSET_TYPES.gameConsole);
     expect(types).toContain(LIVING_ASSET_TYPES.coffee);
-    const beanbags = o.layout.furniture.filter((f) => f.type === LIVING_ASSET_TYPES.beanbag);
+    // The beanbags face up at the TV: back views, below the console.
+    const beanbags = o.layout.furniture.filter((f) => f.type === LIVING_ASSET_TYPES.beanbagBack);
     expect(beanbags).toHaveLength(3);
+    const tv = o.layout.furniture.find((f) => f.type === LIVING_ASSET_TYPES.gameConsole)!;
+    const seats = layoutToSeats(o.layout.furniture);
     for (const b of beanbags) {
+      expect(b.row).toBeGreaterThan(tv.row);
+      expect(seats.get(b.uid)?.facingDir).toBe(Direction.UP);
       expect(o.loungeSeats).toContain(b.uid);
       expect(b.col).toBeGreaterThanOrEqual(o.userCols);
       expect(areaAt(o.layout, b.col, b.row)).toBe(LOUNGE_AREA_LABEL);
@@ -717,6 +723,28 @@ describe('teamsFromDirectory', () => {
     expect(teamsFromDirectory(d).map((t) => [t.ownerId, t.label])).toEqual([
       [2, '⚙ deploy'],
       [3, '⚙ workflow'],
+    ]);
+  });
+
+  it('detects workflow nodes by nodeKind first, role only as a fallback', () => {
+    const d = new AgentDirectory();
+    d.upsert(1, {});
+    d.upsert(2, { parentAgentId: 1, nodeKind: 'workflow', role: 'deploy-script', label: 'deploy' });
+    d.upsert(3, { parentAgentId: 1, nodeKind: 'agent', role: 'workflow' }); // a plain agent typed "workflow"
+    d.upsert(4, { parentAgentId: 1, role: 'workflow' }); // older server: no nodeKind
+    expect(teamsFromDirectory(d).map((t) => [t.ownerId, t.label])).toEqual([
+      [2, '⚙ deploy'],
+      [4, '⚙ workflow'],
+    ]);
+  });
+
+  it('keepOwners: an owner keeps its module after its last member left', () => {
+    const d = new AgentDirectory();
+    d.upsert(1, {});
+    d.upsert(2, { parentAgentId: 1, label: 'Fase 1' });
+    expect(teamsFromDirectory(d)).toEqual([]);
+    expect(teamsFromDirectory(d, new Set([2])).map((t) => [t.ownerId, t.members])).toEqual([
+      [2, []],
     ]);
   });
 

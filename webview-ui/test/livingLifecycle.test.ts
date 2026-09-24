@@ -11,9 +11,9 @@
  *
  * The catalog is built by hand so the tests don't depend on sprite loading.
  * The door mirrors the bundled DOOR manifest (ids DOOR_CLOSED / DOOR_OPEN,
- * states `closed` / `open` — which the catalog does NOT pair, since it only
- * pairs on/off); a second door uses an on/off pair, the catalog's own
- * convention. A last test pins the bundled manifest to the ids assumed here.
+ * states `closed` / `open`, a catalog state pair); a second door uses an
+ * on/off pair, the electronics convention, which the engine also accepts.
+ * A last test pins the bundled manifest to the ids assumed here.
  *
  * Run with: npm test
  */

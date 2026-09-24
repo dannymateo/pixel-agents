@@ -294,6 +294,7 @@ export function OfficeCanvas({
           showAreas,
           activeAreaLabel,
           officeState.pets,
+          officeState.livingAreaLabels,
         );
         offsetRef.current = { x: offsetX, y: offsetY };
 
@@ -768,8 +769,9 @@ export function OfficeCanvas({
                   officeState.selectedAgentId = null;
                   officeState.cameraFollowId = null;
                   return;
-                } else if (!seat.assigned) {
-                  // Clicked available seat — reassign
+                } else if (!seat.assigned && officeState.canAssignSeatByHand(seatId)) {
+                  // Clicked available seat — reassign (never a rest seat, nor a
+                  // team module's desk: the living office hands those out)
                   officeState.reassignSeat(officeState.selectedAgentId, seatId);
                   officeState.selectedAgentId = null;
                   officeState.cameraFollowId = null;

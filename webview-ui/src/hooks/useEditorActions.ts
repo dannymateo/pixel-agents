@@ -36,6 +36,7 @@ import {
   getRotatedType,
   getToggledType,
 } from '../office/layout/furnitureCatalog.js';
+import type { LivingOfficeController } from '../office/living/livingOfficeController.js';
 import type {
   EditTool as EditToolType,
   OfficeLayout,
@@ -110,7 +111,16 @@ function defaultZoom(): number {
 export function useEditorActions(
   getOfficeState: () => OfficeState,
   editorState: EditorState,
+  /** The living office: the editor edits and saves only the user's layout. */
+  livingOffice?: LivingOfficeController,
 ): EditorActions {
+  // Only the user's own layout is ever persisted — never the composed office
+  // (modules, default door and lounge live in memory only; docs/adr/0003).
+  const toSavable = useCallback(
+    (layout: OfficeLayout): OfficeLayout =>
+      livingOffice ? livingOffice.savableLayout(layout) : layout,
+    [livingOffice],
+  );
   const [isEditMode, setIsEditMode] = useState(false);
   const [editorTick, setEditorTick] = useState(0);
   const [isDirty, setIsDirty] = useState(false);
@@ -141,12 +151,18 @@ export function useEditorActions(
   }, [editorState]);
 
   // Debounced layout save
-  const saveLayout = useCallback((layout: OfficeLayout) => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      transport.send({ type: 'saveLayout', layout: layout as unknown as Record<string, unknown> });
-    }, LAYOUT_SAVE_DEBOUNCE_MS);
-  }, []);
+  const saveLayout = useCallback(
+    (layout: OfficeLayout) => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        transport.send({
+          type: 'saveLayout',
+          layout: toSavable(layout) as unknown as Record<string, unknown>,
+        });
+      }, LAYOUT_SAVE_DEBOUNCE_MS);
+    },
+    [toSavable],
+  );
 
   // Apply a layout edit: push undo, clear redo, rebuild state, save, mark dirty
   const applyEdit = useCallback(
@@ -172,6 +188,8 @@ export function useEditorActions(
       const next = !prev;
       editorState.isEditMode = next;
       if (next) {
+        // The editor sees only the user's part of the office (modules hidden).
+        livingOffice?.enterEditMode();
         // Initialize wallColor from existing wall tiles so new walls match
         const os = getOfficeState();
         const layout = os.getLayout();
@@ -188,10 +206,12 @@ export function useEditorActions(
         editorState.clearGhost();
         editorState.clearDrag();
         wallColorEditActiveRef.current = false;
+        // Back to the living office, composed around the edited layout.
+        livingOffice?.exitEditMode(getOfficeState().getLayout());
       }
       return next;
     });
-  }, [editorState, getOfficeState]);
+  }, [editorState, getOfficeState, livingOffice]);
 
   // Tool toggle: clicking already-active tool deselects it (returns to SELECT)
   const handleToolChange = useCallback(
@@ -534,12 +554,12 @@ export function useEditorActions(
       saveTimerRef.current = null;
     }
     const os = getOfficeState();
-    const layout = os.getLayout();
+    const layout = toSavable(os.getLayout());
     lastSavedLayoutRef.current = structuredClone(layout);
     transport.send({ type: 'saveLayout', layout: layout as unknown as Record<string, unknown> });
     editorState.isDirty = false;
     setIsDirty(false);
-  }, [getOfficeState, editorState]);
+  }, [getOfficeState, editorState, toSavable]);
 
   // Notify React that imperative editor selection changed (e.g., from OfficeCanvas mouseUp)
   const handleEditorSelectionChange = useCallback(() => {

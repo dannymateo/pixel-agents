@@ -1,6 +1,12 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import {
+  IDLE_TO_LOUNGE_MINUTES_DEFAULT,
+  IDLE_TO_LOUNGE_MINUTES_MAX,
+  IDLE_TO_LOUNGE_MINUTES_MIN,
+} from '../constants.js';
 import { isSoundEnabled, setSoundEnabled } from '../notificationSound.js';
+import { clampIdleToLoungeMinutes } from '../office/living/livingOfficeController.js';
 import { isBrowserRuntime } from '../runtime.js';
 import { transport } from '../transport/index.js';
 import { Button } from './ui/Button.js';
@@ -36,6 +42,62 @@ interface SettingsModalProps {
   onExportLayout: () => void;
   /** Browser-native layout import from a chosen file (standalone only). */
   onImportLayout: (file: File) => void;
+  /** Minutes an available agent waits before walking to the lounge (null = not reported yet). */
+  idleToLoungeMinutes: number | null;
+  onChangeIdleToLoungeMinutes: (minutes: number) => void;
+}
+
+/** "Minutos hasta el descanso": typed, committed on Enter or blur, clamped to
+ *  the server's range; an invalid entry snaps back to the current value. */
+function IdleToLoungeField({
+  value,
+  onCommit,
+}: {
+  value: number | null;
+  onCommit: (minutes: number) => void;
+}) {
+  const current = value ?? IDLE_TO_LOUNGE_MINUTES_DEFAULT;
+  const [draft, setDraft] = useState(String(current));
+  // Only a value the user typed is ever sent: focusing and leaving the field
+  // (or the server not having reported its value yet) sends nothing.
+  const [edited, setEdited] = useState(false);
+  useEffect(() => {
+    setDraft(String(current));
+    setEdited(false);
+  }, [current]);
+  const commit = () => {
+    if (!edited) return;
+    setEdited(false);
+    const minutes = clampIdleToLoungeMinutes(draft);
+    if (minutes === null) {
+      setDraft(String(current));
+      return;
+    }
+    setDraft(String(minutes));
+    if (minutes !== current) onCommit(minutes);
+  };
+  return (
+    <label className="flex items-center justify-between gap-8 py-6 px-10">
+      <span>Minutos hasta el descanso</span>
+      <input
+        type="number"
+        data-testid="idle-to-lounge-minutes"
+        min={IDLE_TO_LOUNGE_MINUTES_MIN}
+        max={IDLE_TO_LOUNGE_MINUTES_MAX}
+        step={1}
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setEdited(true);
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+        }}
+        className="w-64 shrink-0 text-xs py-2 px-4 bg-bg border-2 border-border rounded-none text-text"
+      />
+    </label>
+  );
 }
 
 export function SettingsModal({
@@ -57,6 +119,8 @@ export function SettingsModal({
   showAreasAvailable,
   onExportLayout,
   onImportLayout,
+  idleToLoungeMinutes,
+  onChangeIdleToLoungeMinutes,
 }: SettingsModalProps) {
   const [soundLocal, setSoundLocal] = useState(isSoundEnabled);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -206,6 +270,7 @@ export function SettingsModal({
       {showAreasAvailable && (
         <Checkbox label="Show Areas" checked={showAreas} onChange={onToggleShowAreas} />
       )}
+      <IdleToLoungeField value={idleToLoungeMinutes} onCommit={onChangeIdleToLoungeMinutes} />
       <Checkbox label="Debug View" checked={isDebugMode} onChange={onToggleDebugMode} />
     </Modal>
   );

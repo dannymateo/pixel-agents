@@ -25,6 +25,7 @@ import { OfficeState } from './office/engine/officeState.js';
 import { exportLayoutToFile } from './office/layout/exportLayout.js';
 import { isRotatable } from './office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from './office/layout/layoutSerializer.js';
+import { LivingOfficeController } from './office/living/livingOfficeController.js';
 import { getPetCount } from './office/sprites/petSpriteData.js';
 import { EditTool, type OfficeLayout } from './office/types.js';
 import { isBrowserRuntime, isE2E } from './runtime.js';
@@ -47,6 +48,10 @@ function getOfficeState(): OfficeState {
   return officeStateRef.current;
 }
 
+// The living office (docs/adr/0003): shared by the message handler (tree,
+// composition, derived agents' lives) and the editor (edits the user's layout only).
+const livingOffice = new LivingOfficeController(getOfficeState);
+
 function App() {
   // Browser runtime (dev or static dist): dispatch mock messages after the
   // useExtensionMessages listener has been registered.
@@ -59,7 +64,7 @@ function App() {
     }
   }, []);
 
-  const editor = useEditorActions(getOfficeState, editorState);
+  const editor = useEditorActions(getOfficeState, editorState, livingOffice);
 
   const isEditDirty = useCallback(
     () => editor.isEditMode && editor.isDirty,
@@ -96,7 +101,9 @@ function App() {
     setAreaMappings,
     showAreas,
     setShowAreas,
-  } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty);
+    idleToLoungeMinutes,
+    setIdleToLoungeMinutes,
+  } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty, livingOffice);
 
   // Show migration notice once layout reset is detected
   const [migrationNoticeDismissed, setMigrationNoticeDismissed] = useState(false);
@@ -258,11 +265,24 @@ function App() {
   // there is at least one mappable folder. Decouples the Areas UI from VS Code
   // multi-root workspaces (fixes single-root VS Code AND standalone, where
   // workspaceFolders is always empty).
-  const areasAvailable = (officeState.getLayout().areas?.length ?? 0) > 0 || areaFolders.length > 0;
+  // The user's own Areas: the team modules' Areas are the composition's, not theirs.
+  // (While editing, the office shows exactly the user's layout being edited.)
+  const areasAvailable =
+    ((editor.isEditMode ? officeState.getLayout() : livingOffice.getUserLayout()).areas?.length ??
+      0) > 0 || areaFolders.length > 0;
 
   const handleExportLayout = useCallback(() => {
-    exportLayoutToFile(getOfficeState().getLayout());
+    // The user's layout, never the composed living office.
+    exportLayoutToFile(livingOffice.savableLayout(getOfficeState().getLayout()));
   }, []);
+
+  const handleIdleToLoungeMinutesChange = useCallback(
+    (minutes: number) => {
+      setIdleToLoungeMinutes(minutes);
+      transport.send({ type: 'setIdleToLoungeMinutes', minutes });
+    },
+    [setIdleToLoungeMinutes],
+  );
 
   const handleImportLayout = useCallback(
     (file: File) => {
@@ -289,7 +309,7 @@ function App() {
             return;
           }
           const migrated = migrateLayoutColors(imported as unknown as OfficeLayout);
-          getOfficeState().rebuildFromLayout(migrated);
+          livingOffice.setUserLayout(migrated);
           editor.setLastSavedLayout(migrated);
           transport.send({
             type: 'saveLayout',
@@ -538,6 +558,8 @@ function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        idleToLoungeMinutes={idleToLoungeMinutes}
+        onChangeIdleToLoungeMinutes={handleIdleToLoungeMinutesChange}
         isDebugMode={isDebugMode}
         onToggleDebugMode={handleToggleDebugMode}
         alwaysShowOverlay={alwaysShowOverlay}

@@ -9,7 +9,12 @@ import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../off
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
-import type { TreeNodeFields } from '../office/scope/treeDisplay.js';
+import type { DerivedAgentInit } from '../office/living/livingOfficeController.js';
+import {
+  isWireAgentId,
+  LivingOfficeController,
+  parsePresence,
+} from '../office/living/livingOfficeController.js';
 import { treeDisplayName } from '../office/scope/treeDisplay.js';
 import { setCarpetSprites } from '../office/sprites/carpetTiles.js';
 import { setPetTemplates } from '../office/sprites/petSpriteData.js';
@@ -63,6 +68,7 @@ interface FurnitureAsset {
   rotationScheme?: string;
   animationGroup?: string;
   frame?: number;
+  restSeat?: boolean;
 }
 
 export interface WorkspaceFolder {
@@ -112,6 +118,31 @@ interface ExtensionMessageState {
   setAreaMappings: (m: Record<string, string[]>) => void;
   showAreas: boolean;
   setShowAreas: (v: boolean) => void;
+  /** Minutes an available agent waits before walking to the lounge (settingsLoaded). */
+  idleToLoungeMinutes: number | null;
+  setIdleToLoungeMinutes: (v: number) => void;
+}
+
+/** A string off the wire, or undefined. */
+const wireString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+/** A finite number off the wire, or undefined. */
+const wireNumber = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+const wireNodeKind = (v: unknown): 'agent' | 'workflow' | undefined =>
+  v === 'agent' || v === 'workflow' ? v : undefined;
+
+/** Tree fields of an agentCreated / existingAgents.agentMeta entry, validated. */
+function treeFieldsOf(id: number, raw: Record<string, unknown> | undefined) {
+  const src = raw ?? {};
+  const parent = isWireAgentId(src.parentAgentId) ? src.parentAgentId : undefined;
+  return {
+    parentAgentId: parent === id ? undefined : parent,
+    role: wireString(src.role),
+    label: wireString(src.label),
+    depth: wireNumber(src.depth),
+    nodeKind: wireNodeKind(src.nodeKind),
+    presence: parsePresence(src.presence),
+  };
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -122,7 +153,15 @@ export function useExtensionMessages(
   getOfficeState: () => OfficeState,
   onLayoutLoaded?: (layout: OfficeLayout) => void,
   isEditDirty?: () => boolean,
+  livingOffice?: LivingOfficeController,
 ): ExtensionMessageState {
+  // The living office (docs/adr/0003): tree, composition and derived agents'
+  // lives. App shares its instance with the editor; standalone use gets its own.
+  const ownLivingRef = useRef<LivingOfficeController | null>(null);
+  if (!livingOffice && !ownLivingRef.current) {
+    ownLivingRef.current = new LivingOfficeController(getOfficeState);
+  }
+  const living = livingOffice ?? ownLivingRef.current!;
   const [agents, setAgents] = useState<number[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<number | null>(null);
   const [agentTools, setAgentTools] = useState<Record<number, ToolActivity[]>>({});
@@ -155,6 +194,7 @@ export function useExtensionMessages(
   const consentRequest = consentQueue[0] ?? null;
   const [areaMappings, setAreaMappings] = useState<Record<string, string[]>>({});
   const [showAreas, setShowAreas] = useState(false);
+  const [idleToLoungeMinutes, setIdleToLoungeMinutes] = useState<number | null>(null);
 
   // The renderer keeps its own module-level copy (read every rAF frame), so both
   // sources of truth move together — the persisted value on settingsLoaded and
@@ -176,19 +216,6 @@ export function useExtensionMessages(
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
     let pendingAgents: PendingAgent[] = [];
-
-    // Spawn-tree metadata of restored agents (existingAgents), applied once their
-    // characters exist — which may be only after the next layoutLoaded.
-    const treeMeta = new Map<number, ExistingAgentMeta>();
-    const applyTreeMeta = (os: OfficeState) => {
-      for (const [id, m] of treeMeta) {
-        const ch = os.characters.get(id);
-        if (!ch) continue;
-        ch.leadAgentId = m.parentAgentId;
-        ch.agentName = treeDisplayName(m);
-        treeMeta.delete(id);
-      }
-    };
 
     // Accumulate distinct folderNames seen across agents (never removed during the
     // session): the source for the Areas folder-mapping dropdown, so a folder stays
@@ -238,20 +265,20 @@ export function useExtensionMessages(
         }
         const rawLayout = msg.layout as OfficeLayout | null;
         const layout = rawLayout && rawLayout.version === 1 ? migrateLayoutColors(rawLayout) : null;
-        if (layout) {
-          os.rebuildFromLayout(layout);
-          onLayoutLoaded?.(layout);
-        } else {
-          // Default layout — snapshot whatever OfficeState built
-          onLayoutLoaded?.(os.getLayout());
-        }
-        // Add buffered agents now that layout (and seats) are correct
+        // The USER's layout: the living office composes the visible one around
+        // it; the editor's saved baseline is always this one, never the composition.
+        // No layout → the default OfficeState built (or the user's already known).
+        const userLayout = layout ?? living.getUserLayout();
+        // Add buffered agents once layout (and seats) are correct: roots first,
+        // then the living office places the derived agents it held back.
+        living.setUserLayout(userLayout);
+        onLayoutLoaded?.(userLayout);
         for (const p of pendingAgents) {
           os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
           if (p.isHeadless) os.setHeadless(p.id, true);
         }
-        applyTreeMeta(os);
         pendingAgents = [];
+        living.flushPending();
         layoutReadyRef.current = true;
         setLayoutReady(true);
         if (msg.wasReset) {
@@ -261,11 +288,15 @@ export function useExtensionMessages(
           saveAgentSeats(os);
         }
       } else if (msg.type === 'agentCreated') {
-        const id = msg.id as number;
-        const folderName = msg.folderName as string | undefined;
-        const teammateName = msg.teammateName as string | undefined;
-        const teammateParentId = msg.parentAgentId as number | undefined;
-        const teamName = msg.teamName as string | undefined;
+        if (!isWireAgentId(msg.id)) return;
+        const id = msg.id;
+        const folderName = wireString(msg.folderName);
+        const teammateName = wireString(msg.teammateName);
+        const teamName = wireString(msg.teamName);
+        const tree = treeFieldsOf(id, msg as Record<string, unknown>);
+        const teammateParentId = tree.parentAgentId;
+        // The tree first: placing a derived agent recomposes the office from it.
+        living.upsertAgent(id, { ...tree, agentName: teammateName });
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
         // Don't auto-select spawned agents (keep focus on whoever spawned them)
         if (teammateParentId === undefined) {
@@ -274,36 +305,28 @@ export function useExtensionMessages(
         if (teammateParentId !== undefined) {
           // Spawned agent (teammate, sub-agent or workflow node; docs/adr/0002):
           // the server's palette (parent's, with a per-sibling hue) or the parent's,
-          // and the parent's workspace folderName. Seated at the free seat closest
-          // to the parent so the tree clusters. Name shown via agentName.
+          // and the parent's workspace folderName. It enters through the door and
+          // walks to its desk in its team's module (docs/adr/0003), or to a free
+          // desk of the user's office when it has no team. Name shown via agentName.
           const parentCh = os.characters.get(teammateParentId);
-          const palette = (msg.palette as number | undefined) ?? parentCh?.palette;
-          const hueShift = (msg.hueShift as number | undefined) ?? parentCh?.hueShift;
-          os.addAgent(
-            id,
-            palette,
-            hueShift,
-            undefined,
-            undefined,
-            parentCh?.folderName,
-            teammateParentId,
-          );
-          noteFolderName(parentCh?.folderName);
-          // Set team metadata on the character
-          const ch = os.characters.get(id);
-          if (ch) {
-            ch.leadAgentId = teammateParentId;
-            ch.teamName = teamName ?? parentCh?.teamName;
-            ch.agentName = treeDisplayName({
+          const init: DerivedAgentInit = {
+            parentAgentId: teammateParentId,
+            palette: wireNumber(msg.palette) ?? parentCh?.palette,
+            hueShift: wireNumber(msg.hueShift) ?? parentCh?.hueShift,
+            folderName: parentCh?.folderName,
+            teamName: teamName ?? parentCh?.teamName,
+            agentName: treeDisplayName({
               teammateName,
-              label: msg.label as string | undefined,
-              role: msg.role as string | undefined,
-              nodeKind: msg.nodeKind as TreeNodeFields['nodeKind'],
-            });
-          }
+              label: tree.label,
+              role: tree.role,
+              nodeKind: tree.nodeKind,
+            }),
+          };
+          living.placeDerived(id, init, 'enter');
+          noteFolderName(parentCh?.folderName);
         } else {
-          const palette = msg.palette as number | undefined;
-          const hueShift = msg.hueShift as number | undefined;
+          const palette = wireNumber(msg.palette);
+          const hueShift = wireNumber(msg.hueShift);
           os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
           noteFolderName(folderName);
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
@@ -312,7 +335,8 @@ export function useExtensionMessages(
         }
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
-        const id = msg.id as number;
+        if (!isWireAgentId(msg.id)) return;
+        const id = msg.id;
         setAgents((prev) => prev.filter((a) => a !== id));
         setSelectedAgent((prev) => (prev === id ? null : prev));
         setAgentTools((prev) => {
@@ -337,16 +361,32 @@ export function useExtensionMessages(
         delete backgroundParentToolIdsRef.current[id];
         os.removeAllSubagents(id);
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
-        os.removeAgent(id);
+        // Roots rain out; derived agents walk out through the door first.
+        living.agentClosed(id);
       } else if (msg.type === 'existingAgents') {
-        const incoming = msg.agents as number[];
-        const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
+        const incoming = (Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []).filter(
+          isWireAgentId,
+        );
+        const meta = (
+          msg.agentMeta && typeof msg.agentMeta === 'object' ? msg.agentMeta : {}
+        ) as Record<number, ExistingAgentMeta>;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
         const externalAgents = (msg.externalAgents || {}) as Record<number, boolean>;
         const headlessAgents: Record<number, boolean> = {};
         for (const id of incoming) {
           noteFolderName(folderNames[id]);
           if (isHeadlessAgent(externalAgents[id])) headlessAgents[id] = true;
+        }
+        // The whole tree first, so the office composes with every team at once.
+        const roots: number[] = [];
+        const derived: number[] = [];
+        for (const id of incoming) {
+          const tree = treeFieldsOf(id, meta[id] as Record<string, unknown> | undefined);
+          living.upsertAgent(id, {
+            ...tree,
+            agentName: wireString((meta[id] as Record<string, unknown> | undefined)?.teammateName),
+          });
+          (tree.parentAgentId === undefined ? roots : derived).push(id);
         }
         // Order-independent restore: add agents now if the layout (and its seats)
         // is already built, otherwise buffer them for the next layoutLoaded.
@@ -355,7 +395,7 @@ export function useExtensionMessages(
         if (
           reconcileExistingAgents(
             os,
-            incoming,
+            roots,
             meta,
             folderNames,
             layoutReadyRef.current,
@@ -365,10 +405,32 @@ export function useExtensionMessages(
         ) {
           saveAgentSeats(os);
         }
-        for (const id of incoming) {
-          if (meta[id]?.parentAgentId !== undefined) treeMeta.set(id, meta[id]);
+        // Derived agents come back seated at their desks (no door walk: they
+        // were already here); the living office buffers them until the layout.
+        for (const id of derived) {
+          if (os.characters.has(id)) continue;
+          const m = meta[id];
+          const node = living.directory.get(id)!;
+          living.placeDerived(
+            id,
+            {
+              parentAgentId: node.parentAgentId!,
+              palette: wireNumber(m?.palette),
+              hueShift: wireNumber(m?.hueShift),
+              folderName: folderNames[id],
+              seatId: wireString(m?.seatId),
+              agentName: treeDisplayName({
+                teammateName: node.agentName,
+                label: node.label,
+                role: node.role,
+                nodeKind: node.nodeKind,
+              }),
+            },
+            'restore',
+          );
         }
-        applyTreeMeta(os);
+        // Agents already on the floor may have come back with a changed tree.
+        living.refresh();
         setAgents((prev) => {
           const ids = new Set(prev);
           const merged = [...prev];
@@ -379,6 +441,11 @@ export function useExtensionMessages(
           }
           return merged.sort((a, b) => a - b);
         });
+      } else if (msg.type === 'agentPresence') {
+        // Server-owned presence (docs/adr/0003); the office only animates it.
+        if (!isWireAgentId(msg.id)) return;
+        const presence = parsePresence(msg.presence);
+        if (presence) living.setPresence(msg.id, presence);
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number;
         const toolId = msg.toolId as string;
@@ -690,6 +757,12 @@ export function useExtensionMessages(
         if (typeof msg.showAreas === 'boolean') {
           setShowAreas(msg.showAreas as boolean);
         }
+        if (
+          typeof msg.idleToLoungeMinutes === 'number' &&
+          Number.isFinite(msg.idleToLoungeMinutes)
+        ) {
+          setIdleToLoungeMinutes(msg.idleToLoungeMinutes as number);
+        }
         if (Array.isArray(msg.externalAssetDirectories)) {
           setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
         }
@@ -742,7 +815,10 @@ export function useExtensionMessages(
           const sprites = msg.sprites as Record<string, string[][]>;
           console.log(`📦 Webview: Loaded ${catalog.length} furniture assets`);
           // Build dynamic catalog immediately so getCatalogEntry() works when layoutLoaded arrives next
-          buildDynamicCatalog({ catalog, sprites });
+          if (buildDynamicCatalog({ catalog, sprites })) {
+            // Footprints and seats are known now: the living office may compose.
+            living.markCatalogReady();
+          }
           setLoadedAssets({ catalog, sprites });
         } catch (err) {
           console.error(`❌ Webview: Error processing furnitureAssetsLoaded:`, err);
@@ -824,5 +900,7 @@ export function useExtensionMessages(
     setAreaMappings,
     showAreas,
     setShowAreas,
+    idleToLoungeMinutes,
+    setIdleToLoungeMinutes,
   };
 }

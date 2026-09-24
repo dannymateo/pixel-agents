@@ -16,6 +16,10 @@ export interface DirectoryAgent {
   role?: string;
   label?: string;
   depth?: number;
+  /** 'workflow' for a scripted multi-agent run's node; absent = a plain agent. */
+  nodeKind?: 'agent' | 'workflow';
+  /** Living-office presence (docs/adr/0003); absent = working. */
+  presence?: 'working' | 'available' | 'lounge' | 'leaving';
   agentName?: string;
   palette?: number;
   hueShift?: number;
@@ -38,6 +42,8 @@ const MERGEABLE_KEYS: ReadonlyArray<keyof DirectoryFields> = [
   'role',
   'label',
   'depth',
+  'nodeKind',
+  'presence',
   'agentName',
   'palette',
   'hueShift',
@@ -48,6 +54,10 @@ const MERGEABLE_KEYS: ReadonlyArray<keyof DirectoryFields> = [
 
 export class AgentDirectory {
   private readonly agents = new Map<number, DirectoryAgent>();
+  /** parent id -> direct children, in the order they joined that parent. Kept
+   *  in step with every parentAgentId change, so child walks are O(children)
+   *  rather than a scan of the whole directory. */
+  private readonly children = new Map<number, number[]>();
 
   /** Creates the agent (no status, no tools, no permission) or merges `fields` into it.
    *  A key present with value `undefined` clears that field. */
@@ -57,10 +67,15 @@ export class AgentDirectory {
       agent = { id, status: null, tools: new Map(), permission: false };
       this.agents.set(id, agent);
     }
+    const previousParent = agent.parentAgentId;
     const target = agent as unknown as Record<string, unknown>;
     const source = fields as Record<string, unknown>;
     for (const key of MERGEABLE_KEYS) {
       if (Object.prototype.hasOwnProperty.call(source, key)) target[key] = source[key];
+    }
+    if (agent.parentAgentId !== previousParent) {
+      this.unlinkChild(previousParent, id);
+      this.linkChild(agent.parentAgentId, id);
     }
     return agent;
   }
@@ -68,20 +83,40 @@ export class AgentDirectory {
   /** Removes only `id`. Its children are the server's to remove (cascade, leaves
    *  first); until they are, they show in the root office as orphans. */
   remove(id: number): void {
+    const agent = this.agents.get(id);
+    if (!agent) return;
+    this.unlinkChild(agent.parentAgentId, id);
     this.agents.delete(id);
+  }
+
+  /** Every agent id, in announcement order. */
+  ids(): number[] {
+    return [...this.agents.keys()];
+  }
+
+  private linkChild(parent: number | undefined, id: number): void {
+    if (parent === undefined || parent === id) return;
+    const list = this.children.get(parent);
+    if (list) list.push(id);
+    else this.children.set(parent, [id]);
+  }
+
+  private unlinkChild(parent: number | undefined, id: number): void {
+    if (parent === undefined) return;
+    const list = this.children.get(parent);
+    if (!list) return;
+    const i = list.indexOf(id);
+    if (i >= 0) list.splice(i, 1);
+    if (list.length === 0) this.children.delete(parent);
   }
 
   get(id: number): DirectoryAgent | undefined {
     return this.agents.get(id);
   }
 
-  /** Direct children, in announcement order. An agent is never its own child. */
+  /** Direct children, in the order they joined `id`. An agent is never its own child. */
   childrenOf(id: number): number[] {
-    const out: number[] = [];
-    for (const a of this.agents.values()) {
-      if (a.parentAgentId === id && a.id !== id) out.push(a.id);
-    }
-    return out;
+    return [...(this.children.get(id) ?? [])];
   }
 
   /** root → top-level agents; n → [n, ...childrenOf(n)] ([] if n is unknown). */
@@ -92,12 +127,12 @@ export class AgentDirectory {
   }
 
   liveChildCount(id: number): number {
-    return this.childrenOf(id).length;
+    return this.children.get(id)?.length ?? 0;
   }
 
   /** True when any strict descendant of `id` has permission=true. */
   hasPermissionBelow(id: number): boolean {
-    const children = this.childIndex();
+    const children = this.children;
     const visited = new Set<number>([id]);
     const stack = [...(children.get(id) ?? [])];
     while (stack.length > 0) {
@@ -147,18 +182,6 @@ export class AgentDirectory {
   setPermission(id: number, on: boolean): void {
     const agent = this.agents.get(id);
     if (agent) agent.permission = on;
-  }
-
-  /** parent id → direct children, built once per walk (keeps walks O(n)). */
-  private childIndex(): Map<number, number[]> {
-    const index = new Map<number, number[]>();
-    for (const a of this.agents.values()) {
-      if (a.parentAgentId === undefined || a.parentAgentId === a.id) continue;
-      const list = index.get(a.parentAgentId);
-      if (list) list.push(a.id);
-      else index.set(a.parentAgentId, [a.id]);
-    }
-    return index;
   }
 
   /**

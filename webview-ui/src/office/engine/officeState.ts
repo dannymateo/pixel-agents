@@ -6,22 +6,26 @@ import {
   CHARACTER_HIT_HEIGHT,
   CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
-  DOOR_CLOSED_SUFFIX,
   DOOR_OPEN_HOLD_MS,
-  DOOR_OPEN_SUFFIX,
   FURNITURE_ANIM_INTERVAL_SEC,
   GOODBYE_BUBBLE_MS,
   GREETER_ID,
   GREETER_TILE_MARGIN,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
+  LEISURE_ELECTRONICS_GROUPS,
   MATRIX_EFFECT_DURATION_SEC,
   MAX_PET_ID_LENGTH,
   PET_HIT_HALF_WIDTH,
   PET_HIT_HEIGHT,
   WAITING_BUBBLE_DURATION_SEC,
 } from '../../constants.js';
-import { getAnimationFrames, getCatalogEntry, getOnStateType } from '../layout/furnitureCatalog.js';
+import {
+  getAnimationFrames,
+  getCatalogEntry,
+  getOnStateType,
+  getOpenStateType,
+} from '../layout/furnitureCatalog.js';
 import {
   createDefaultLayout,
   getBlockedTiles,
@@ -81,20 +85,24 @@ interface LifecycleScene {
 }
 
 /**
- * The open variant of a door type. The catalog only pairs `on`/`off` states,
- * while the bundled DOOR declares `closed`/`open`, so the pair is also found by
- * the asset naming convention `{BASE}[_{ORIENTATION}][_{STATE}]`
- * (`DOOR_CLOSED` → `DOOR_OPEN`). Returns the type unchanged when there is no
- * open variant, so an unknown door simply never swaps.
+ * The open variant of a door type: its catalog `closed`→`open` pair (the
+ * bundled DOOR), else an `off`→`on` pair (a custom door drawn with the
+ * electronics convention). Returns the type unchanged when there is no open
+ * variant, so an unknown door simply never swaps.
  */
 function openDoorType(type: string): string {
-  const on = getOnStateType(type);
-  if (on !== type) return on;
-  if (type.endsWith(DOOR_CLOSED_SUFFIX)) {
-    const open = type.slice(0, -DOOR_CLOSED_SUFFIX.length) + DOOR_OPEN_SUFFIX;
-    if (getCatalogEntry(open)) return open;
+  const open = getOpenStateType(type);
+  return open !== type ? open : getOnStateType(type);
+}
+
+/** Electronics that are play, not work (the lounge's arcade and console):
+ *  never a "PC seat", never switched on by a working agent's auto-state. */
+function isLeisureElectronics(type: string): boolean {
+  const base = type.split(':')[0];
+  for (const group of LEISURE_ELECTRONICS_GROUPS) {
+    if (base === group || base.startsWith(`${group}_`)) return true;
   }
-  return type;
+  return false;
 }
 
 /** Internal helper: facing-tile coords for a seat. Returns null for invalid direction. */
@@ -166,6 +174,16 @@ export class OfficeState {
   /** Seconds the door stays open after its tile was last occupied. */
   private doorHoldTimer = 0;
   private doorOpen = false;
+  /** Area labels the composition added (team modules, the generated lounge):
+   *  drawn even with Show Areas off — they name the teams. */
+  livingAreaLabels: ReadonlySet<string> = new Set();
+  /** Furniture uids the living office composed (module chairs, lounge seats):
+   *  their seats are the composition's to hand out, never a user-office desk.
+   *  The exact set, not a uid prefix — a user's own `living-…` uid stays theirs. */
+  private composedUids: ReadonlySet<string> = new Set();
+  /** Characters no rebuild may hand a seat to: module members while the editor
+   *  shows only the user's layout (their desks come back when it closes). */
+  private seatlessHold: ReadonlySet<number> = new Set();
 
   setAreaMappings(mappings: Record<string, string[]>): void {
     this.areaMappings = mappings;
@@ -183,8 +201,17 @@ export class OfficeState {
   }
 
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
-   *  @param shift Optional pixel shift to apply when grid expands left/up */
-  rebuildFromLayout(layout: OfficeLayout, shift?: { col: number; row: number }): void {
+   *  @param shift Optional pixel shift to apply when grid expands left/up
+   *  @param opts.preservePositions Nobody is snapped: characters stay where they
+   *    stand and walk to a seat that changed (the living office recomposes this
+   *    way on every tree change — a snap would teleport everyone wandering).
+   *  Characters in `seatlessHold` are never handed a new seat here. */
+  rebuildFromLayout(
+    layout: OfficeLayout,
+    shift?: { col: number; row: number },
+    opts?: { preservePositions?: boolean },
+  ): void {
+    const preserve = opts?.preservePositions === true;
     this.layout = layout;
     this.tileMap = layoutToTileMap(layout);
     this.seats = layoutToSeats(layout.furniture);
@@ -251,10 +278,13 @@ export class OfficeState {
         }
         continue;
       }
-      if (ch.seatId && this.seats.has(ch.seatId) && !this.loungeSeatSet.has(ch.seatId)) {
+      // A rest seat is kept too: setLivingTargets moves its sitter to a real
+      // desk when there is one, and leaves it the sofa rather than none.
+      if (ch.seatId && this.seats.has(ch.seatId)) {
         const seat = this.seats.get(ch.seatId)!;
         if (!seat.assigned) {
           seat.assigned = true;
+          if (preserve) continue; // keeps its seat; stays where it stands
           // Snap character to seat position
           ch.tileCol = seat.seatCol;
           ch.tileRow = seat.seatRow;
@@ -272,11 +302,18 @@ export class OfficeState {
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
       if (ch.seatId) continue;
+      if (this.seatlessHold.has(ch.id)) continue; // its desk is elsewhere, for later
       const scene = this.scenes.get(ch.id);
       if (scene?.kind === 'leave') continue;
       const seatId = this.findFreeSeat(ch.folderName);
       if (seatId && scene) {
         // Mid-scene: take the seat, keep walking (no snap).
+        this.seats.get(seatId)!.assigned = true;
+        ch.seatId = seatId;
+        continue;
+      }
+      if (seatId && preserve) {
+        // A new desk: walk there from where it stands (see preserveInPlace).
         this.seats.get(seatId)!.assigned = true;
         ch.seatId = seatId;
         continue;
@@ -292,6 +329,8 @@ export class OfficeState {
         ch.dir = seat.facingDir;
       }
     }
+
+    if (preserve) this.settleInPlace();
 
     // Relocate any characters that ended up outside bounds or on non-walkable tiles
     for (const ch of this.characters.values()) {
@@ -338,6 +377,71 @@ export class OfficeState {
     this.rebuildPetsFromLayout(layout);
   }
 
+  /**
+   * preservePositions rebuild, for characters no scene steers: whoever stands
+   * where the new layout has no floor steps to the nearest walkable tile; a
+   * walk in progress is re-routed to its old destination (or stopped when that
+   * is gone); a character typing off its seat — the seat moved — walks to it.
+   */
+  private settleInPlace(): void {
+    for (const ch of this.characters.values()) {
+      if (this.scenes.has(ch.id) || ch.matrixEffect === 'despawn') continue;
+      const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+      const onOwnSeat = !!seat && seat.seatCol === ch.tileCol && seat.seatRow === ch.tileRow;
+      const inBounds =
+        ch.tileRow >= 0 &&
+        ch.tileRow < this.tileMap.length &&
+        ch.tileCol >= 0 &&
+        ch.tileCol < (this.tileMap[0]?.length ?? 0);
+      if (
+        !onOwnSeat &&
+        (!inBounds || !isWalkable(ch.tileCol, ch.tileRow, this.tileMap, this.blockedTiles))
+      ) {
+        const spot = this.nearestWalkableTile(ch.tileCol, ch.tileRow);
+        if (spot) this.placeAt(ch, spot.col, spot.row);
+        if (ch.state === CharacterState.WALK) ch.state = CharacterState.IDLE;
+      }
+      if (ch.path.length > 0) {
+        const dest = ch.path[ch.path.length - 1];
+        const path = this.withOwnSeatUnblocked(ch, () =>
+          findPath(ch.tileCol, ch.tileRow, dest.col, dest.row, this.tileMap, this.blockedTiles),
+        );
+        ch.path = path;
+        ch.moveProgress = 0;
+        if (path.length === 0) ch.state = CharacterState.IDLE;
+        continue;
+      }
+      if (seat && !onOwnSeat && ch.state === CharacterState.TYPE) {
+        const path = this.withOwnSeatUnblocked(ch, () =>
+          findPath(
+            ch.tileCol,
+            ch.tileRow,
+            seat.seatCol,
+            seat.seatRow,
+            this.tileMap,
+            this.blockedTiles,
+          ),
+        );
+        if (path.length > 0) this.startWalk(ch, path);
+        else ch.state = CharacterState.IDLE;
+      }
+    }
+  }
+
+  /** Walkable tile closest (Manhattan) to (col,row), occupied or not. */
+  private nearestWalkableTile(col: number, row: number): { col: number; row: number } | null {
+    let best: { col: number; row: number } | null = null;
+    let bestDist = Infinity;
+    for (const tile of this.walkableTiles) {
+      const d = Math.abs(tile.col - col) + Math.abs(tile.row - row);
+      if (d < bestDist) {
+        best = tile;
+        bestDist = d;
+      }
+    }
+    return best;
+  }
+
   /** Move a character to a random walkable tile */
   private relocateCharacterToWalkable(ch: Character): void {
     if (this.walkableTiles.length === 0) return;
@@ -377,6 +481,7 @@ export class OfficeState {
     for (const item of this.layout.furniture) {
       const entry = getCatalogEntry(item.type);
       if (!entry || entry.category !== 'electronics') continue;
+      if (isLeisureElectronics(item.type)) continue; // an arcade is nobody's PC
       for (let dr = 0; dr < entry.footprintH; dr++) {
         for (let dc = 0; dc < entry.footprintW; dc++) {
           out.add(`${item.col + dc},${item.row + dr}`);
@@ -465,12 +570,20 @@ export class OfficeState {
     const electronicsTiles = this.buildElectronicsTileSet();
     const freeSeats: string[] = [];
     for (const [uid, seat] of this.seats) {
-      // Rest seats are for the lounge, never a desk (docs/adr/0003).
-      if (!seat.assigned && !this.loungeSeatSet.has(uid)) freeSeats.push(uid);
+      // Rest seats are for the lounge, never a desk (docs/adr/0003); module
+      // seats belong to their team — the composition hands those out itself.
+      if (!seat.assigned && !this.loungeSeatSet.has(uid) && !this.isComposedSeat(uid)) {
+        freeSeats.push(uid);
+      }
     }
     if (freeSeats.length === 0) return null;
 
-    const areaLabels = folderName ? this.areaMappings[folderName] : undefined;
+    // Own keys only: a folder named like an Object.prototype member
+    // ("constructor") must not read the prototype.
+    const areaLabels =
+      folderName && Object.prototype.hasOwnProperty.call(this.areaMappings, folderName)
+        ? this.areaMappings[folderName]
+        : undefined;
 
     // Stage 1 — in-area seats for the folder's mapped Area labels.
     if (areaLabels && areaLabels.length > 0) {
@@ -946,75 +1059,94 @@ export class OfficeState {
   private rebuildFurnitureInstances(): void {
     // Collect tiles where active agents face desks
     const autoOnTiles = new Set<string>();
+    // Tiles resting agents face from a rest seat: leisure electronics there
+    // (the arcade, the console) play while someone rests in front of them.
+    const playTiles = new Set<string>();
+    for (const [id, scene] of this.scenes) {
+      if (scene.kind !== 'lounge' || scene.phase !== 'rest' || !scene.loungeSeat) continue;
+      const seat = this.seats.get(scene.loungeSeat);
+      if (seat && this.characters.has(id)) this.addFacingTiles(seat, playTiles);
+    }
     for (const ch of this.characters.values()) {
       if (!ch.isActive || !ch.seatId) continue;
       const seat = this.seats.get(ch.seatId);
       if (!seat) continue;
-      // Find the desk tile(s) the agent faces from their seat
-      const dCol =
-        seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0;
-      const dRow = seat.facingDir === Direction.DOWN ? 1 : seat.facingDir === Direction.UP ? -1 : 0;
-      // Check tiles in the facing direction (desk could be 1-3 tiles deep)
-      for (let d = 1; d <= AUTO_ON_FACING_DEPTH; d++) {
-        const tileCol = seat.seatCol + dCol * d;
-        const tileRow = seat.seatRow + dRow * d;
-        autoOnTiles.add(`${tileCol},${tileRow}`);
-      }
-      // Also check tiles to the sides of the facing direction (desks can be wide)
-      for (let d = 1; d <= AUTO_ON_SIDE_DEPTH; d++) {
-        const baseCol = seat.seatCol + dCol * d;
-        const baseRow = seat.seatRow + dRow * d;
-        if (dCol !== 0) {
-          // Facing left/right: check tiles above and below
-          autoOnTiles.add(`${baseCol},${baseRow - 1}`);
-          autoOnTiles.add(`${baseCol},${baseRow + 1}`);
-        } else {
-          // Facing up/down: check tiles left and right
-          autoOnTiles.add(`${baseCol - 1},${baseRow}`);
-          autoOnTiles.add(`${baseCol + 1},${baseRow}`);
-        }
-      }
+      this.addFacingTiles(seat, autoOnTiles);
     }
 
     // The living office's door is never auto-state furniture: it shows its open
     // variant exactly while someone crosses it (+ DOOR_OPEN_HOLD_MS), whatever
     // a seated agent happens to face.
     const doorUid = this.livingTargets?.door.uid;
-    if (autoOnTiles.size === 0 && !(doorUid && this.doorOpen)) {
+    if (autoOnTiles.size === 0 && playTiles.size === 0 && !(doorUid && this.doorOpen)) {
       this.furniture = layoutToFurnitureInstances(this.layout.furniture);
       return;
     }
 
     // Build modified furniture list with auto-state and animation applied
     const animFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
+    const switchOn = (item: PlacedFurniture): PlacedFurniture => {
+      let onType = getOnStateType(item.type);
+      if (onType === item.type) return item;
+      // Check if the on-state type has animation frames
+      const frames = getAnimationFrames(onType);
+      if (frames && frames.length > 1) onType = frames[animFrame % frames.length];
+      return { ...item, type: onType };
+    };
+    const overlaps = (item: PlacedFurniture, w: number, h: number, tiles: Set<string>) => {
+      for (let dr = 0; dr < h; dr++) {
+        for (let dc = 0; dc < w; dc++) {
+          if (tiles.has(`${item.col + dc},${item.row + dr}`)) return true;
+        }
+      }
+      return false;
+    };
     const modifiedFurniture: PlacedFurniture[] = this.layout.furniture.map((item) => {
       if (doorUid !== undefined && item.uid === doorUid) {
         return this.doorOpen ? { ...item, type: openDoorType(item.type) } : item;
       }
       const entry = getCatalogEntry(item.type);
       if (!entry) return item;
-      // Check if any tile of this furniture overlaps an auto-on tile
-      for (let dr = 0; dr < entry.footprintH; dr++) {
-        for (let dc = 0; dc < entry.footprintW; dc++) {
-          if (autoOnTiles.has(`${item.col + dc},${item.row + dr}`)) {
-            let onType = getOnStateType(item.type);
-            if (onType !== item.type) {
-              // Check if the on-state type has animation frames
-              const frames = getAnimationFrames(onType);
-              if (frames && frames.length > 1) {
-                const frameIdx = animFrame % frames.length;
-                onType = frames[frameIdx];
-              }
-              return { ...item, type: onType };
-            }
-            return item;
-          }
-        }
+      if (isLeisureElectronics(item.type)) {
+        // Not someone's PC: only a rester in front of it switches it on.
+        return overlaps(item, entry.footprintW, entry.footprintH, playTiles)
+          ? switchOn(item)
+          : item;
       }
-      return item;
+      return overlaps(item, entry.footprintW, entry.footprintH, autoOnTiles)
+        ? switchOn(item)
+        : item;
     });
 
     this.furniture = layoutToFurnitureInstances(modifiedFurniture);
+  }
+
+  /** Tiles a seat faces (AUTO_ON_FACING_DEPTH deep, AUTO_ON_SIDE_DEPTH to each side). */
+  private addFacingTiles(seat: Seat, out: Set<string>): void {
+    // Find the desk tile(s) the agent faces from their seat
+    const dCol =
+      seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0;
+    const dRow = seat.facingDir === Direction.DOWN ? 1 : seat.facingDir === Direction.UP ? -1 : 0;
+    // Check tiles in the facing direction (desk could be 1-3 tiles deep)
+    for (let d = 1; d <= AUTO_ON_FACING_DEPTH; d++) {
+      const tileCol = seat.seatCol + dCol * d;
+      const tileRow = seat.seatRow + dRow * d;
+      out.add(`${tileCol},${tileRow}`);
+    }
+    // Also check tiles to the sides of the facing direction (desks can be wide)
+    for (let d = 1; d <= AUTO_ON_SIDE_DEPTH; d++) {
+      const baseCol = seat.seatCol + dCol * d;
+      const baseRow = seat.seatRow + dRow * d;
+      if (dCol !== 0) {
+        // Facing left/right: check tiles above and below
+        out.add(`${baseCol},${baseRow - 1}`);
+        out.add(`${baseCol},${baseRow + 1}`);
+      } else {
+        // Facing up/down: check tiles left and right
+        out.add(`${baseCol - 1},${baseRow}`);
+        out.add(`${baseCol + 1},${baseRow}`);
+      }
+    }
   }
 
   setAgentTool(id: number, tool: string | null): void {
@@ -1077,11 +1209,10 @@ export class OfficeState {
     this.loungeSeatSet = new Set(t.loungeSeats);
     for (const ch of [...this.characters.values()]) {
       if (this.scenes.has(ch.id)) continue;
-      // Someone working on what is now a rest seat moves to a real desk.
+      // Someone working on what is now a rest seat moves to a real desk —
+      // when there is one: without a free desk it keeps the sofa rather than
+      // end up with no seat at all.
       if (ch.seatId && this.loungeSeatSet.has(ch.seatId)) {
-        const old = this.seats.get(ch.seatId);
-        if (old) old.assigned = false;
-        ch.seatId = null;
         const desk = this.findFreeSeat(ch.folderName);
         if (desk) this.reassignSeat(ch.id, desk);
       }
@@ -1097,6 +1228,63 @@ export class OfficeState {
       if (ch.presence === 'lounge' && !this.scenes.has(ch.id)) this.goToLounge(ch.id);
     }
     this.rebuildFurnitureInstances();
+  }
+
+  /**
+   * The office is no longer composed (no derived agent left, or the editor
+   * shows the user's layout alone): no door, no rest seats, no composed seats.
+   * A leaver still walking waves where it stands; a rester goes back to the FSM.
+   */
+  clearLivingTargets(): void {
+    this.livingTargets = null;
+    this.loungeSeatSet = new Set();
+    this.composedUids = new Set();
+    this.doorOpen = false;
+    this.doorHoldTimer = 0;
+    for (const [id, scene] of [...this.scenes]) {
+      const ch = this.characters.get(id);
+      if (!ch) continue;
+      if (scene.kind === 'leave') {
+        if (scene.phase === 'walk') this.routeToDoor(ch, scene);
+      } else if (scene.kind === 'lounge') {
+        this.dropScene(ch);
+      }
+    }
+    this.rebuildFurnitureInstances();
+  }
+
+  /** Hold these characters seatless through every rebuild until cleared (see seatlessHold). */
+  setSeatlessHold(ids: Iterable<number>): void {
+    this.seatlessHold = new Set(ids);
+  }
+
+  /** Free `id`'s desk without moving it (it is about to get another one). */
+  releaseSeat(id: number): void {
+    const ch = this.characters.get(id);
+    if (!ch?.seatId || this.isLeaving(id)) return;
+    const seat = this.seats.get(ch.seatId);
+    if (seat) seat.assigned = false;
+    ch.seatId = null;
+  }
+
+  /** The furniture uids the current composition generated (see composedUids). */
+  setComposedUids(uids: Iterable<string>): void {
+    this.composedUids = new Set(uids);
+  }
+
+  /** Whether a seat belongs to the composition (a module chair, a generated
+   *  lounge seat). Multi-tile seats are keyed `uid:n`. */
+  isComposedSeat(seatUid: string): boolean {
+    if (this.composedUids.size === 0) return false;
+    if (this.composedUids.has(seatUid)) return true;
+    const at = seatUid.lastIndexOf(':');
+    return at > 0 && this.composedUids.has(seatUid.slice(0, at));
+  }
+
+  /** Whether the user may send an agent to `seatUid` by hand: never a rest
+   *  seat, never a seat of the composition (the teams' desks are theirs). */
+  canAssignSeatByHand(seatUid: string): boolean {
+    return !this.loungeSeatSet.has(seatUid) && !this.isComposedSeat(seatUid);
   }
 
   /** Whether the door currently shows its open variant. */
@@ -1313,12 +1501,52 @@ export class OfficeState {
     return this.scenes.get(id)?.kind === 'leave';
   }
 
-  /** Seats that may be handed out as desks (every seat but the rest seats). */
+  /** A free desk of the user's office for an agent of `folderName` (never a
+   *  rest seat, never a module seat), or null when every desk is taken. */
+  pickDeskSeat(folderName?: string): string | null {
+    return this.findFreeSeat(folderName);
+  }
+
+  /** Whether `id` is walking out through the door (or waving / fading there).
+   *  Such a character removes itself once gone; nothing else should move it. */
+  isLeavingAgent(id: number): boolean {
+    return this.isLeaving(id);
+  }
+
+  /**
+   * Give `id` a different desk and walk it there (a derived agent that moves
+   * into its team's module, or back to the user's office). A resting agent keeps
+   * resting — its new desk is where it will return to. Returns false (nothing
+   * changed) for a leaver, an unknown or taken seat, or a rest seat.
+   */
+  moveToSeat(id: number, seatId: string): boolean {
+    const ch = this.characters.get(id);
+    if (!ch || this.isLeaving(id) || ch.matrixEffect === 'despawn') return false;
+    if (ch.seatId === seatId) return true;
+    const seat = this.seats.get(seatId);
+    if (!seat || seat.assigned || this.loungeSeatSet.has(seatId)) return false;
+    const scene = this.scenes.get(id);
+    if (!scene) {
+      this.reassignSeat(id, seatId);
+      return ch.seatId === seatId;
+    }
+    if (ch.seatId) {
+      const old = this.seats.get(ch.seatId);
+      if (old) old.assigned = false;
+    }
+    seat.assigned = true;
+    ch.seatId = seatId;
+    // Walking in (or back): re-route to the new desk. Resting: stays put.
+    if (scene.kind === 'enter' || scene.kind === 'return') this.returnToDesk(id);
+    return true;
+  }
+
+  /** Seats that may be handed out as desks: every seat but the rest seats and
+   *  the seats of the composed modules (their team's, handed out by the composition). */
   private deskSeats(): Map<string, Seat> {
-    if (this.loungeSeatSet.size === 0) return this.seats;
     const out = new Map<string, Seat>();
     for (const [uid, seat] of this.seats) {
-      if (!this.loungeSeatSet.has(uid)) out.set(uid, seat);
+      if (!this.loungeSeatSet.has(uid) && !this.isComposedSeat(uid)) out.set(uid, seat);
     }
     return out;
   }

@@ -16,14 +16,17 @@
  * tiles the composition changes, and only in memory.
  */
 import {
-  AREA_DEFAULT_COLORS,
+  LIVING_UID_NAMESPACE,
+  LOUNGE_AREA_COLOR,
   LOUNGE_AREA_LABEL,
+  LOUNGE_ROWS,
   MAX_COLS,
   MAX_ROWS,
   MODULE_AREA_COLORS,
   MODULE_GAP_COLS,
+  MODULE_LABEL_MAX_CHARS,
 } from '../../constants.js';
-import { getCatalogEntry } from '../layout/furnitureCatalog.js';
+import { getCatalogEntry, isRestSeatCatalogType } from '../layout/furnitureCatalog.js';
 import { getBlockedTiles, layoutToSeats, migrateLayoutColors } from '../layout/layoutSerializer.js';
 import type { AgentDirectory } from '../scope/agentDirectory.js';
 import {
@@ -97,11 +100,14 @@ export const LIVING_ASSET_TYPES = {
   arcade: 'ARCADE_OFF',
   gameConsole: 'GAME_CONSOLE_OFF',
   beanbag: 'BEANBAG',
+  /** The beanbag's back-facing variant: sits facing UP (toward a TV above it). */
+  beanbagBack: 'BEANBAG_BACK',
   coffee: 'COFFEE',
   smallTable: 'SMALL_TABLE_FRONT',
 } as const;
 
-/** Rest-seat families (never desks): matched on the type id's base. */
+/** Rest-seat families (never desks) recognized by id even when their manifest
+ *  predates the `restSeat` flag: matched on the type id's base. */
 const REST_SEAT_TYPE_PREFIXES = ['BEANBAG', 'SOFA_'] as const;
 
 const DOOR_TYPES: ReadonlySet<string> = new Set([
@@ -114,9 +120,7 @@ const DOOR_FALLBACK_HEIGHT = 2;
 
 // ── Labels ──────────────────────────────────────────────────────────────────
 
-/** Longest module label, in code points (ellipsis included). A module is 18
- *  tiles wide; ~28 characters of the pixel font fit across it at any zoom. */
-export const MODULE_LABEL_MAX_CHARS = 28;
+export { MODULE_LABEL_MAX_CHARS };
 /** Consecutive combining marks kept per base character (defuses "zalgo"). */
 const MAX_COMBINING_MARKS = 2;
 const ELLIPSIS = '…';
@@ -138,9 +142,14 @@ function labelKey(label: string): string {
  * blank-looking fillers count as nothing; a label with no visible letter,
  * digit, symbol or punctuation is ''. Non-strings → ''.
  */
+/** Raw code units read from a label: plenty for MODULE_LABEL_MAX_CHARS visible
+ *  characters after cleaning, and a bound on the work a huge label can cost. */
+const MODULE_LABEL_SCAN_UNITS = MODULE_LABEL_MAX_CHARS * 16;
+
 export function sanitizeModuleLabel(raw: string): string {
   if (typeof raw !== 'string') return '';
   const cleaned = raw
+    .slice(0, MODULE_LABEL_SCAN_UNITS)
     .normalize('NFC')
     .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Co}\p{Cn}]/gu, ' ')
     .replace(BLANK_FILLERS, ' ')
@@ -193,11 +202,9 @@ function colorForOwner(ownerId: number): string {
   return MODULE_AREA_COLORS[((n % len) + len) % len];
 }
 
-/** The generated lounge's Area color (a green of the editor's area palette). */
-const LOUNGE_AREA_COLOR = AREA_DEFAULT_COLORS[3];
-
 // ── Teams from the agent tree ───────────────────────────────────────────────
 
+/** Role the server gives workflow nodes; the fallback when `nodeKind` is absent. */
 const WORKFLOW_ROLE = 'workflow';
 
 /**
@@ -205,8 +212,16 @@ const WORKFLOW_ROLE = 'workflow';
  * workflow node (even before its agents appear). A root's childless child is in
  * no team: it sits in the user's office until its first child is born. Members
  * are the owner's subtree in BFS order, capped at the seats a module has.
+ *
+ * `keepOwners`: owners that already have a module keep it while they are in
+ * the directory, even once their last member left - a module is freed when its
+ * whole team, owner included, has gone (spec 3.1), so the owner is never moved
+ * out from under the desk it works at.
  */
-export function teamsFromDirectory(dir: AgentDirectory): TeamSpec[] {
+export function teamsFromDirectory(
+  dir: AgentDirectory,
+  keepOwners?: ReadonlySet<number>,
+): TeamSpec[] {
   const roots = dir.membersOf('root');
   const rootSet = new Set(roots);
   const maxMembers = scopeLayoutCapacity() - 1;
@@ -217,9 +232,11 @@ export function teamsFromDirectory(dir: AgentDirectory): TeamSpec[] {
       if (rootSet.has(ownerId) || owned.has(ownerId)) continue;
       const owner = dir.get(ownerId);
       if (!owner) continue;
-      const isWorkflow = owner.role === WORKFLOW_ROLE;
+      const isWorkflow =
+        owner.nodeKind === 'workflow' ||
+        (owner.nodeKind === undefined && owner.role === WORKFLOW_ROLE);
       const kids = dir.childrenOf(ownerId).filter((k) => !rootSet.has(k));
-      if (kids.length === 0 && !isWorkflow) continue;
+      if (kids.length === 0 && !isWorkflow && !keepOwners?.has(ownerId)) continue;
       owned.add(ownerId);
 
       const members: TeamSpec['members'] = [];
@@ -244,9 +261,10 @@ export function teamsFromDirectory(dir: AgentDirectory): TeamSpec[] {
 
 // ── Composition ─────────────────────────────────────────────────────────────
 
-/** Uid namespace for generated furniture; lengthened if the user's layout
- *  already uses it, so generated uids can never collide with theirs. */
-const UID_NAMESPACE = 'living-';
+/** Uid namespace for generated furniture; lengthened (`_` prefixes) if the
+ *  user's layout already uses it, so generated uids can never collide with
+ *  theirs. (OfficeState is handed the exact generated uids, not this prefix.) */
+const UID_NAMESPACE = LIVING_UID_NAMESPACE;
 const LOUNGE_KEY = 'lounge';
 const DOOR_UID_SUFFIX = 'door';
 const CHAIR_UID_INFIX = '-scope-chair-';
@@ -255,15 +273,15 @@ const CHAIR_UID_INFIX = '-scope-chair-';
  *  side-wall openings sit on it, so it is the module's through-walkway. */
 const WALKWAY_ROW = 1;
 
-/** Generated lounge: one module wide, a wall on top and on both sides. */
-const LOUNGE_ROWS = 6;
+/** Generated lounge (LOUNGE_ROWS tall): one module wide, a wall on top and on both sides. */
 const LOUNGE_ITEMS: ReadonlyArray<{ key: string; type: string; col: number; row: number }> = [
   { key: 'arcade', type: LIVING_ASSET_TYPES.arcade, col: 2, row: 2 },
-  { key: 'console', type: LIVING_ASSET_TYPES.gameConsole, col: 6, row: 4 },
-  // Beanbags face the console from the row above (one free row between).
-  { key: 'beanbag-0', type: LIVING_ASSET_TYPES.beanbag, col: 5, row: 2 },
-  { key: 'beanbag-1', type: LIVING_ASSET_TYPES.beanbag, col: 7, row: 2 },
-  { key: 'beanbag-2', type: LIVING_ASSET_TYPES.beanbag, col: 9, row: 2 },
+  { key: 'console', type: LIVING_ASSET_TYPES.gameConsole, col: 6, row: 2 },
+  // Beanbags sit in a row below the TV facing up at it (one free row
+  // between), all within the screen's view: whoever rests there watches it.
+  { key: 'beanbag-0', type: LIVING_ASSET_TYPES.beanbagBack, col: 5, row: 4 },
+  { key: 'beanbag-1', type: LIVING_ASSET_TYPES.beanbagBack, col: 6, row: 4 },
+  { key: 'beanbag-2', type: LIVING_ASSET_TYPES.beanbagBack, col: 7, row: 4 },
   // Coffee is a surface item: it stands on a small table (like the default layout's).
   { key: 'table', type: LIVING_ASSET_TYPES.smallTable, col: 12, row: 2 },
   { key: 'coffee', type: LIVING_ASSET_TYPES.coffee, col: 12, row: 3 },
@@ -279,8 +297,9 @@ interface Placement {
 const isFloor = (t: TileTypeVal | undefined): boolean =>
   t !== undefined && t !== TileType.WALL && t !== TileType.VOID;
 
-function isRestSeatType(type: string): boolean {
-  return REST_SEAT_TYPE_PREFIXES.some((p) => type.startsWith(p));
+/** A rest seat: its manifest says so (`restSeat`), or it is a known rest-seat family. */
+export function isRestSeatType(type: string): boolean {
+  return isRestSeatCatalogType(type) || REST_SEAT_TYPE_PREFIXES.some((p) => type.startsWith(p));
 }
 
 function footprint(type: string): { w: number; h: number } {
@@ -605,6 +624,11 @@ export function composeLivingOffice(
   const areas: AreaDefinition[] = (user.areas ?? []).map((a) => ({ ...a }));
   const takenLabels = new Set<string>(areas.map((a) => labelKey(a.label)));
   takenLabels.add(labelKey(LOUNGE_AREA_LABEL));
+  // Labels painted on the user's tiles count too, defined in `areas` or not:
+  // a module named like one would paint and name those tiles as its own.
+  for (const label of user.areaTiles ?? []) {
+    if (typeof label === 'string') takenLabels.add(labelKey(label));
+  }
 
   // Stamp a generated room (walls + floor + area) at (x, y).
   const stamp = (
@@ -696,7 +720,7 @@ export function composeLivingOffice(
     for (const item of LOUNGE_ITEMS) {
       const uid = `${ns}${LOUNGE_KEY}-${item.key}`;
       furniture.push({ uid, type: item.type, col: x + item.col, row: y + item.row });
-      if (item.type === LIVING_ASSET_TYPES.beanbag) loungeSeatsGenerated.push(uid);
+      if (isRestSeatType(item.type)) loungeSeatsGenerated.push(uid);
     }
   }
 

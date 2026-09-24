@@ -857,4 +857,572 @@ describe('HookEventHandler', () => {
       }
     });
   });
+
+  // ── Spawn tree routing by agentKey (docs/adr/0002) ─────────
+  // Claude fires tool events from inside a spawned agent with the ROOT's
+  // session_id plus agent_id. Resolving by session_id alone animated the root.
+
+  describe('agentKey routing', () => {
+    beforeEach(() => {
+      agents.set(1, createTestAgent({ id: 1, sessionId: 'sess-1' }));
+      handler.registerAgent('sess-1', 1);
+    });
+
+    it('a tool event fired inside a subagent never animates the session root', () => {
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        agent_type: 'desarrollador',
+        tool_name: 'Bash',
+        tool_input: { command: 'mvn test' },
+      });
+      expect(
+        mockWebview.messages.filter(
+          (m) => m.id === 1 && (m.type === 'agentToolStart' || m.type === 'agentStatus'),
+        ),
+      ).toEqual([]);
+    });
+
+    const bashInSub = (agentId: string, sessionId = 'sess-1') => ({
+      hook_event_name: 'PreToolUse',
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: 'desarrollador',
+      tool_name: 'Read',
+      tool_input: { file_path: '/a.ts' },
+    });
+    const derived = (id: number, key: string, parentAgentId = 1) =>
+      createTestAgent({ id, sessionId: 'sess-1', spawnAgentKey: key, parentAgentId });
+    const toolStartsFor = (id: number) =>
+      mockWebview.messages.filter((m) => m.id === id && m.type === 'agentToolStart');
+
+    it('buffers an unknown agent_id (never the root) and delivers it once registered', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      expect(mockWebview.messages).toEqual([]); // not registered yet -> buffered
+
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      expect(toolStartsFor(7)).toHaveLength(1);
+      expect(toolStartsFor(1)).toEqual([]);
+      expect(agents.get(7)!.hookDelivered).toBe(true);
+      expect(agents.get(1)!.hookDelivered).toBe(false);
+    });
+
+    it('routes a keyed event straight to a registered derived agent', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      expect(toolStartsFor(7)).toHaveLength(1);
+      expect(mockWebview.messages.filter((m) => m.id === 1)).toEqual([]);
+    });
+
+    it('re-dispatches each buffered event exactly once', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.registerSpawn('sess-1', 'bbb222', 7); // idempotent: nothing left to flush
+      handler.registerAgent('sess-1', 1); // root re-register must not steal keyed events
+      expect(toolStartsFor(7)).toHaveLength(2);
+      expect(toolStartsFor(1)).toEqual([]);
+    });
+
+    it('keeps other keys buffered when one spawn registers', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      agents.set(8, derived(8, 'ccc333'));
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      handler.handleEvent('claude', bashInSub('ccc333'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      expect(toolStartsFor(8)).toEqual([]);
+      handler.registerSpawn('sess-1', 'ccc333', 8);
+      expect(toolStartsFor(8)).toHaveLength(1);
+      expect(toolStartsFor(7)).toHaveLength(1);
+    });
+
+    it('does not resolve a key registered under another session (forged agent_id)', () => {
+      agents.set(2, createTestAgent({ id: 2, sessionId: 'sess-2' }));
+      handler.registerAgent('sess-2', 2);
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', bashInSub('bbb222', 'sess-2'));
+      expect(toolStartsFor(7)).toEqual([]);
+      expect(toolStartsFor(2)).toEqual([]);
+      expect(toolStartsFor(1)).toEqual([]);
+    });
+
+    it('drops keyed events for sessions nobody tracks instead of buffering them', () => {
+      handler.handleEvent('claude', bashInSub('bbb222', 'sess-unknown'));
+      agents.set(9, createTestAgent({ id: 9, sessionId: 'sess-unknown' }));
+      handler.registerSpawn('sess-unknown', 'bbb222', 9);
+      expect(mockWebview.messages).toEqual([]);
+    });
+
+    it('buffers keyed events of a session whose root is not registered yet', () => {
+      // Internal-agent race: the root exists in the store but registerAgent
+      // has not run; keyed events of its spawns must still wait.
+      agents.set(3, createTestAgent({ id: 3, sessionId: 'sess-3' }));
+      handler.handleEvent('claude', bashInSub('bbb222', 'sess-3'));
+      agents.set(7, createTestAgent({ id: 7, sessionId: 'sess-3', spawnAgentKey: 'bbb222' }));
+      handler.registerSpawn('sess-3', 'bbb222', 7);
+      expect(toolStartsFor(7)).toHaveLength(1);
+      expect(toolStartsFor(3)).toEqual([]);
+    });
+
+    it('drops a keyed event whose derived agent left the store (stale mapping)', () => {
+      handler.registerSpawn('sess-1', 'bbb222', 7); // no agent 7 in the store
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      expect(mockWebview.messages).toEqual([]);
+    });
+
+    it('after unregisterSpawn a keyed event buffers again instead of reaching anyone', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.unregisterSpawn('sess-1', 'bbb222');
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      expect(mockWebview.messages).toEqual([]);
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      expect(toolStartsFor(7)).toHaveLength(1);
+    });
+
+    it('clearSpawns forgets the session spawns and their buffered events', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', bashInSub('ccc333'));
+      handler.clearSpawns('sess-1');
+      handler.handleEvent('claude', bashInSub('bbb222'));
+      expect(mockWebview.messages).toEqual([]); // mapping gone -> buffered, not delivered
+      agents.set(8, derived(8, 'ccc333'));
+      handler.registerSpawn('sess-1', 'ccc333', 8);
+      expect(toolStartsFor(8)).toEqual([]); // its earlier buffered event was dropped
+    });
+
+    it('keyed PermissionRequest / Stop act on the derived agent only', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', {
+        hook_event_name: 'PermissionRequest',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+      });
+      handler.handleEvent('claude', {
+        hook_event_name: 'Stop',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+      });
+      expect(mockWebview.messages.filter((m) => m.id === 1)).toEqual([]);
+      expect(mockWebview.messages.filter((m) => m.id === 7).map((m) => m.type)).toEqual([
+        'agentToolPermission',
+        'agentToolsClear',
+        'agentStatus',
+      ]);
+      expect(agents.get(1)!.isWaiting).toBe(false);
+      expect(agents.get(7)!.isWaiting).toBe(true);
+    });
+
+    it('a keyed SessionEnd never ends the root session', () => {
+      const onSessionEnd = vi.fn();
+      handler.setLifecycleCallbacks({ onSessionEnd });
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', {
+        hook_event_name: 'SessionEnd',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        reason: 'exit',
+      });
+      expect(onSessionEnd).not.toHaveBeenCalledWith(1, expect.anything());
+      expect(mockWebview.messages.filter((m) => m.id === 1)).toEqual([]);
+    });
+
+    it('events without agent_id keep routing to the root as today', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      expect(toolStartsFor(1)).toHaveLength(1);
+      expect(toolStartsFor(7)).toEqual([]);
+    });
+
+    it('a buffered keyed event does not make unknown-session root events buffer', () => {
+      // hasBufferedRoot gate: keyed events waiting for a spawn must not turn an
+      // otherwise-dropped root event of an unknown session into a buffered one.
+      agents.set(4, createTestAgent({ id: 4, sessionId: 'sess-4' }));
+      handler.handleEvent('claude', bashInSub('bbb222', 'sess-4')); // buffered (root unregistered)
+      handler.registerAgent('sess-4', 4); // registers root; keyed event stays buffered
+      handler.unregisterAgent('sess-4');
+      agents.delete(4);
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-4',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      agents.set(5, createTestAgent({ id: 5, sessionId: 'sess-4' }));
+      handler.registerAgent('sess-4', 5);
+      expect(toolStartsFor(5)).toEqual([]);
+      expect(toolStartsFor(4)).toEqual([]);
+    });
+
+    it('a keyed SubagentStart reports the spawn and creates no Subtask', () => {
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onSpawnObserved });
+      const root = agents.get(1)!;
+      root.activeToolNames.set('toolu_L', 'Agent');
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        agent_type: 'Explore',
+      });
+      expect(onSpawnObserved).toHaveBeenCalledWith(1);
+      expect(mockWebview.messages).toEqual([]);
+      expect(root.activeSubagentToolIds.size).toBe(0);
+      expect(root.hookDelivered).toBe(true);
+    });
+
+    it('an unkeyed SubagentStart creates the Subtask as before and reports no spawn', () => {
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onSpawnObserved });
+      agents.get(1)!.activeToolNames.set('toolu_L', 'Agent');
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-1',
+        agent_type: 'Explore',
+      });
+      expect(onSpawnObserved).not.toHaveBeenCalled();
+      const sub = mockWebview.messages.find((m) => m.type === 'subagentToolStart');
+      expect(sub?.id).toBe(1);
+      expect(sub?.parentToolId).toBe('toolu_L');
+    });
+
+    it('a keyed SubagentStop of a nested child is handled by its derived parent', () => {
+      // bbb222 (id 7) spawned ccc333 (id 8). ccc333 stopping is bbb222's
+      // business: bbb222's (unkeyed) inline teammate is marked waiting, the
+      // root's is not. No Subtask is cleared anywhere.
+      const parent = derived(7, 'bbb222');
+      parent.activeToolNames.set('toolu_B', 'Agent');
+      parent.activeSubagentToolIds.set('toolu_B', new Set(['sub-x']));
+      agents.set(7, parent);
+      agents.set(8, derived(8, 'ccc333', 7));
+      agents.set(20, createTestAgent({ id: 20, sessionId: 'sess-1', leadAgentId: 7 }));
+      agents.set(21, createTestAgent({ id: 21, sessionId: 'sess-1', leadAgentId: 1 }));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.registerSpawn('sess-1', 'ccc333', 8);
+
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStop',
+        session_id: 'sess-1',
+        agent_id: 'ccc333',
+        agent_type: 'qa-revisor',
+      });
+      expect(agents.get(20)!.isWaiting).toBe(true);
+      expect(agents.get(21)!.isWaiting).toBe(false);
+      expect(mockWebview.messages.filter((m) => m.type === 'subagentClear')).toEqual([]);
+      expect(parent.activeSubagentToolIds.has('toolu_B')).toBe(true);
+    });
+
+    it('a derived agent outliving its root mapping is never auto-discovered as the root', () => {
+      // After /clear the root moves to a new session; its derived agent keeps
+      // the old session_id. A late root event on the old session must not
+      // register the derived agent as that session's owner.
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.unregisterAgent('sess-1');
+      agents.get(1)!.sessionId = 'sess-new';
+      handler.registerAgent('sess-new', 1);
+
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      handler.handleEvent('claude', {
+        hook_event_name: 'SessionStart',
+        session_id: 'sess-1',
+        source: 'resume',
+      });
+      expect(toolStartsFor(7)).toEqual([]);
+      expect(agents.get(7)!.hookDelivered).toBe(false);
+      // Mapping not hijacked: a later spawn-less SessionEnd on the old session
+      // reaches nobody.
+      const onSessionEnd = vi.fn();
+      handler.setLifecycleCallbacks({ onSessionEnd });
+      handler.handleEvent('claude', {
+        hook_event_name: 'SessionEnd',
+        session_id: 'sess-1',
+        reason: 'exit',
+      });
+      expect(onSessionEnd).not.toHaveBeenCalled();
+    });
+
+    it('an orphaned derived agent does not open the buffer to foreign sessions', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.unregisterAgent('sess-1'); // root mapping gone, derived still in store
+      agents.delete(1);
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-foreign',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      handler.handleEvent('claude', bashInSub('ccc333', 'sess-foreign'));
+      agents.set(9, createTestAgent({ id: 9, sessionId: 'sess-foreign' }));
+      handler.registerAgent('sess-foreign', 9);
+      agents.set(
+        10,
+        createTestAgent({ id: 10, sessionId: 'sess-foreign', spawnAgentKey: 'ccc333' }),
+      );
+      handler.registerSpawn('sess-foreign', 'ccc333', 10);
+      expect(mockWebview.messages).toEqual([]);
+    });
+
+    it('a derived agent keeps its own permission and activity when it has a named child', () => {
+      agents.set(7, derived(7, 'aaa111'));
+      agents.set(
+        8,
+        createTestAgent({
+          id: 8,
+          sessionId: 'sess-1',
+          spawnAgentKey: 'bbb222',
+          parentAgentId: 7,
+          agentName: 'reviewer',
+          leadAgentId: 7,
+        }),
+      );
+      handler.registerSpawn('sess-1', 'aaa111', 7);
+      handler.registerSpawn('sess-1', 'bbb222', 8);
+      handler.handleEvent('claude', { ...bashInSub('aaa111') });
+      handler.handleEvent('claude', {
+        hook_event_name: 'PermissionRequest',
+        session_id: 'sess-1',
+        agent_id: 'aaa111',
+      });
+      expect(mockWebview.messages.filter((m) => m.id === 7).map((m) => m.type)).toEqual([
+        'agentToolStart',
+        'agentStatus',
+        'agentToolPermission',
+      ]);
+      expect(mockWebview.messages.filter((m) => m.id === 8)).toEqual([]);
+    });
+
+    it('unkeyed events stay on the root when its only teammate is a derived (keyed) one', () => {
+      agents.set(
+        7,
+        createTestAgent({
+          id: 7,
+          sessionId: 'sess-1',
+          spawnAgentKey: 'bbb222',
+          parentAgentId: 1,
+          agentName: 'reviewer',
+          leadAgentId: 1,
+        }),
+      );
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+      });
+      handler.handleEvent('claude', { hook_event_name: 'PermissionRequest', session_id: 'sess-1' });
+      expect(mockWebview.messages.filter((m) => m.id === 1).map((m) => m.type)).toEqual([
+        'agentToolStart',
+        'agentStatus',
+        'agentToolPermission',
+      ]);
+      expect(mockWebview.messages.filter((m) => m.id === 7)).toEqual([]);
+    });
+
+    it('a classic inline teammate (no agentKey) still absorbs the ambiguous root events', () => {
+      agents.set(7, createTestAgent({ id: 7, sessionId: 'sess-1', leadAgentId: 1 }));
+      handler.handleEvent('claude', { hook_event_name: 'PermissionRequest', session_id: 'sess-1' });
+      expect(mockWebview.messages).toEqual([{ type: 'agentToolPermission', id: 7 }]);
+    });
+
+    it('keyed SubagentStart/Stop buffered for an unregistered root flush without Subtask work', () => {
+      // Root of sess-6 not in the store yet; an unregistered agent (launch race)
+      // opens the buffer. Keyed subagent events buffer as ROOT events and flush
+      // on registerAgent -- still without creating or clearing any Subtask.
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onSpawnObserved });
+      agents.set(30, createTestAgent({ id: 30, sessionId: 'sess-racing' }));
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-6',
+        agent_id: 'bbb222',
+        agent_type: 'Explore',
+      });
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStop',
+        session_id: 'sess-6',
+        agent_id: 'bbb222',
+        agent_type: 'Explore',
+      });
+      const root = createTestAgent({ id: 6, sessionId: 'sess-6' });
+      root.activeToolNames.set('toolu_L', 'Agent');
+      root.activeSubagentToolIds.set('toolu_L', new Set(['sub-y']));
+      agents.set(6, root);
+      handler.registerAgent('sess-6', 6);
+      expect(mockWebview.messages).toEqual([]);
+      expect([...root.activeSubagentToolIds.get('toolu_L')!]).toEqual(['sub-y']);
+      expect(onSpawnObserved).toHaveBeenCalledTimes(1);
+      expect(onSpawnObserved).toHaveBeenCalledWith(6);
+      expect(root.hookDelivered).toBe(true);
+    });
+
+    it('keyed SubagentStart/Stop honor the provider.team gate like unkeyed ones', () => {
+      const noTeam = new HookEventHandler(
+        agents,
+        waitingTimers,
+        permissionTimers,
+        { ...claudeProvider, team: undefined },
+        new SessionRouter(),
+      );
+      const onTeammateDetected = vi.fn();
+      const onSpawnObserved = vi.fn();
+      noTeam.setLifecycleCallbacks({ onTeammateDetected, onSpawnObserved });
+      const root = agents.get(1)!;
+      root.teamName = 'research';
+      root.currentHookIsTeammateSpawn = true;
+      agents.set(20, createTestAgent({ id: 20, sessionId: 'sess-1', leadAgentId: 1 }));
+      noTeam.registerAgent('sess-1', 1);
+      for (const name of ['SubagentStart', 'SubagentStop']) {
+        noTeam.handleEvent('claude', {
+          hook_event_name: name,
+          session_id: 'sess-1',
+          agent_id: 'bbb222',
+          agent_type: 'web-researcher',
+        });
+      }
+      expect(onTeammateDetected).not.toHaveBeenCalled();
+      expect(agents.get(20)!.isWaiting).toBe(false);
+      expect(mockWebview.messages).toEqual([]);
+      expect(onSpawnObserved).toHaveBeenCalledWith(1);
+      noTeam.dispose();
+    });
+
+    it('a keyed tool event does not confirm a pending external session; the root event does', () => {
+      const onExternalSessionDetected = vi.fn();
+      handler.setLifecycleCallbacks({ onExternalSessionDetected });
+      handler.handleEvent('claude', {
+        hook_event_name: 'SessionStart',
+        session_id: 'sess-ext',
+        transcript_path: '/test/sess-ext.jsonl',
+        source: 'startup',
+      });
+      handler.handleEvent('claude', bashInSub('bbb222', 'sess-ext'));
+      expect(onExternalSessionDetected).not.toHaveBeenCalled();
+      handler.handleEvent('claude', {
+        hook_event_name: 'PreToolUse',
+        session_id: 'sess-ext',
+        tool_name: 'Agent',
+        tool_input: {},
+      });
+      expect(onExternalSessionDetected).toHaveBeenCalledTimes(1);
+      // The keyed event is still waiting for its spawn, not handed to anyone.
+      agents.set(7, createTestAgent({ id: 7, sessionId: 'sess-ext', spawnAgentKey: 'bbb222' }));
+      handler.registerSpawn('sess-ext', 'bbb222', 7);
+      expect(toolStartsFor(7)).toHaveLength(1);
+    });
+
+    it('SubagentStop does not report a spawn', () => {
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onSpawnObserved });
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStop',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        agent_type: 'Explore',
+      });
+      expect(onSpawnObserved).not.toHaveBeenCalled();
+    });
+
+    it('a keyed SubagentStop of a depth-1 child is harmless: no Subtask to clear', () => {
+      agents.set(7, derived(7, 'bbb222'));
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+      const root = agents.get(1)!;
+      root.activeToolNames.set('toolu_L', 'Agent');
+      root.activeSubagentToolIds.set('toolu_L', new Set(['sub-y']));
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStop',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        agent_type: 'desarrollador',
+      });
+      expect(mockWebview.messages).toEqual([]);
+      expect(root.activeSubagentToolIds.has('toolu_L')).toBe(true);
+      expect(agents.get(7)!.isWaiting).toBe(false);
+    });
+
+    it('an unkeyed SubagentStop still clears the Subtask as before', () => {
+      const root = agents.get(1)!;
+      root.activeToolNames.set('toolu_L', 'Agent');
+      root.activeSubagentToolIds.set('toolu_L', new Set(['sub-y']));
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStop',
+        session_id: 'sess-1',
+        agent_type: 'Explore',
+      });
+      expect(mockWebview.messages).toEqual([
+        { type: 'subagentClear', id: 1, parentToolId: 'toolu_L' },
+      ]);
+    });
+
+    it('a keyed grandchild SubagentStart creates no Subtask on the root nor on its parent', () => {
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onSpawnObserved });
+      const root = agents.get(1)!;
+      root.activeToolNames.set('toolu_L', 'Agent');
+      const parent = derived(7, 'bbb222');
+      parent.activeToolNames.set('toolu_B', 'Agent');
+      agents.set(7, parent);
+      handler.registerSpawn('sess-1', 'bbb222', 7);
+
+      // ccc333 is not registered yet (the usual case at SubagentStart).
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-1',
+        agent_id: 'ccc333',
+        agent_type: 'qa-revisor',
+      });
+      // ...and once it is, a repeat still creates nothing.
+      agents.set(8, derived(8, 'ccc333', 7));
+      handler.registerSpawn('sess-1', 'ccc333', 8);
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-1',
+        agent_id: 'ccc333',
+        agent_type: 'qa-revisor',
+      });
+
+      expect(mockWebview.messages).toEqual([]);
+      expect(root.activeSubagentToolIds.size).toBe(0);
+      expect(parent.activeSubagentToolIds.size).toBe(0);
+      expect(onSpawnObserved).toHaveBeenCalledTimes(2);
+      expect(onSpawnObserved).toHaveBeenCalledWith(1);
+    });
+
+    it('a keyed SubagentStart keeps the teammate-discovery path', () => {
+      const onTeammateDetected = vi.fn();
+      const onSpawnObserved = vi.fn();
+      handler.setLifecycleCallbacks({ onTeammateDetected, onSpawnObserved });
+      const root = agents.get(1)!;
+      root.teamName = 'research';
+      root.currentHookIsTeammateSpawn = true;
+      handler.handleEvent('claude', {
+        hook_event_name: 'SubagentStart',
+        session_id: 'sess-1',
+        agent_id: 'bbb222',
+        agent_type: 'web-researcher',
+      });
+      expect(onTeammateDetected).toHaveBeenCalledWith(1, 'sess-1', 'web-researcher');
+      expect(onSpawnObserved).toHaveBeenCalledWith(1);
+    });
+  });
 });

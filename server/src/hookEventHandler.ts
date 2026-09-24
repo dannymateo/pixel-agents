@@ -4,12 +4,18 @@ import type { AgentEvent, HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import { SESSION_END_GRACE_MS } from './constants.js';
 import type { SessionRouter } from './sessionRouter.js';
-import { getInlineTeammates, hasInlineTeammates, hasPromotedBackgroundAgent } from './teamUtils.js';
+import { getInlineTeammates, hasPromotedBackgroundAgent } from './teamUtils.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import { notifyBackgroundAgentCompleted } from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
 const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
+
+/** Derived agents (docs/adr/0002) carry their root's session_id; only an agent
+ *  with no parent may ever be resolved as the owner of a session_id. */
+function isSessionRoot(agent: AgentState): boolean {
+  return agent.parentAgentId === undefined;
+}
 
 /** Normalized hook event received from any provider's hook script via the HTTP server. */
 export interface HookEvent {
@@ -54,6 +60,10 @@ interface SessionLifecycleCallbacks {
   /** Called when a teammate should be removed (e.g. no longer in team config members).
    *  Removes the teammate agent from the office. */
   onTeammateRemoved?: (teammateAgentId: number) => void;
+  /** Called when a SubagentStart carries the child's agentKey: a spawn just
+   *  started inside the session of `rootAgentId`, so the runtime can scan its
+   *  spawn tree now instead of waiting for the next periodic scan. */
+  onSpawnObserved?: (rootAgentId: number) => void;
 }
 
 export class HookEventHandler {
@@ -123,6 +133,29 @@ export class HookEventHandler {
     this.sessionRouter.unregister(sessionId);
   }
 
+  /** Register a derived agent (docs/adr/0002) for events keyed by `agentKey`
+   *  inside `sessionId`, then re-dispatch the events buffered for exactly that
+   *  pair. Only the runtime calls this, once it has materialized the node from
+   *  the transcript/sidecar -- never from a key merely seen in a hook payload. */
+  registerSpawn(sessionId: string, agentKey: string, agentId: number): void {
+    const flushed = this.sessionRouter.registerSpawn(sessionId, agentKey, agentId);
+    // Re-running handleEvent re-derives the same agentKey from the same raw
+    // payload, so each flushed event lands on this derived agent.
+    for (const { providerId, event } of flushed) {
+      this.handleEvent(providerId, event as HookEvent);
+    }
+  }
+
+  /** Forget one derived agent's routing (called when the node is removed). */
+  unregisterSpawn(sessionId: string, agentKey: string): void {
+    this.sessionRouter.unregisterSpawn(sessionId, agentKey);
+  }
+
+  /** Forget every derived agent of `sessionId` and drop their buffered events. */
+  clearSpawns(sessionId: string): void {
+    this.sessionRouter.clearSpawns(sessionId);
+  }
+
   /**
    * Process an incoming hook event. Looks up the agent by session_id,
    * falls back to auto-discovery scan, or buffers if agent not yet registered.
@@ -143,6 +176,7 @@ export class HookEventHandler {
     const normalized = this.provider.normalizeHookEvent(event);
     if (!normalized) return; // unknown / uninteresting event -- silently drop
     const normEvent = normalized.event;
+    const agentKey = normalized.agentKey;
     const eventName = event.hook_event_name; // retained for logs only
     // CI / e2e diagnostic: see agentStateStore.ts debugLogBroadcast comment.
     if (process.env['PIXEL_AGENTS_DEBUG_LOG']) {
@@ -160,6 +194,22 @@ export class HookEventHandler {
       } catch {
         /* never crash on diagnostic failure */
       }
+    }
+
+    // --- Events fired inside a spawned agent (docs/adr/0002) ---
+    // They carry the ROOT's session_id plus the spawn's agentKey. Routing them by
+    // session_id alone animated the root with its child's activity. A keyed event
+    // goes to the derived agent registered for (session, key), waits in the
+    // buffer until the runtime registers it, or is dropped -- it NEVER reaches
+    // the root. SubagentStart/SubagentStop are the exception: there the key names
+    // the child, and the event belongs to whoever spawned it (handled below).
+    if (
+      agentKey !== undefined &&
+      normEvent.kind !== 'subagentStart' &&
+      normEvent.kind !== 'subagentEnd'
+    ) {
+      this.handleKeyedEvent(_providerId, event, agentKey, normEvent);
+      return;
     }
 
     // --- SessionStart: handle /clear for known agents, ignore unknown sessions ---
@@ -189,9 +239,10 @@ export class HookEventHandler {
           );
         return;
       }
-      // Check auto-discovery (agent exists but not yet registered for hooks)
+      // Check auto-discovery (agent exists but not yet registered for hooks).
+      // Derived agents share their root's session_id but are never its root.
       for (const [id, agent] of this.agents) {
-        if (agent.sessionId === event.session_id) {
+        if (isSessionRoot(agent) && agent.sessionId === event.session_id) {
           this.registerAgent(agent.sessionId, id);
           agent.hookDelivered = true;
           if (debug)
@@ -284,7 +335,7 @@ export class HookEventHandler {
     let agentId = this.sessionRouter.resolve(event.session_id);
     if (agentId === undefined) {
       for (const [id, agent] of this.agents) {
-        if (agent.sessionId === event.session_id) {
+        if (isSessionRoot(agent) && agent.sessionId === event.session_id) {
           this.registerAgent(agent.sessionId, id);
           agentId = id;
           break;
@@ -298,10 +349,10 @@ export class HookEventHandler {
       // Silently drop events for sessions we have no record of
       // (e.g. other projects with Watch All OFF).
       const isPending = this.sessionRouter.hasPending(event.session_id);
-      const hasBuffered = this.sessionRouter.hasBuffered(event.session_id);
-      const hasUnregisteredAgents = [...this.agents.values()].some(
-        (a) => a.sessionId && !this.sessionRouter.hasSession(a.sessionId),
-      );
+      // Root events only: keyed events waiting for a spawn don't make this
+      // session "already buffering" -- they can never flush to a root.
+      const hasBuffered = this.sessionRouter.hasBufferedRoot(event.session_id);
+      const hasUnregisteredAgents = this.hasUnregisteredAgents();
       if (isPending || hasBuffered || hasUnregisteredAgents) {
         if (debug)
           console.log(
@@ -321,6 +372,121 @@ export class HookEventHandler {
         `[Pixel Agents] Hook: Agent ${agentId} - ${eventName} (session=${event.session_id.slice(0, 8)}...)`,
       );
 
+    if (agentKey !== undefined) {
+      // SubagentStart/SubagentStop naming a child: route to its spawner -- the
+      // root, or a derived agent when the child is already registered under it.
+      const spawnerId = this.resolveSpawner(event.session_id, agentKey, agentId);
+      const spawner = spawnerId === agentId ? agent : this.agents.get(spawnerId);
+      // The keyed child already has an identity and is represented by its own
+      // derived character (materialized from the sidecar), so the hook-created
+      // Subtask sub-character is skipped: no ghost on the root or on the parent.
+      if (spawner) {
+        spawner.hookDelivered = true;
+        if (this.provider.team && normEvent.kind === 'subagentStart') {
+          this.handleSubagentStart(event, spawner, spawnerId, true);
+        } else if (this.provider.team && normEvent.kind === 'subagentEnd') {
+          this.handleSubagentStop(spawner, spawnerId, true);
+        }
+      }
+      if (normEvent.kind === 'subagentStart') {
+        this.lifecycleCallbacks.onSpawnObserved?.(agentId);
+      }
+      return;
+    }
+
+    this.dispatch(normEvent, event, agent, agentId);
+  }
+
+  /** Deliver an event fired inside a spawned agent to that agent only. */
+  private handleKeyedEvent(
+    providerId: string,
+    event: HookEvent,
+    agentKey: string,
+    normEvent: AgentEvent,
+  ): void {
+    // Session lifecycle belongs to the session's root. A keyed one is not
+    // something Claude emits; honoring it would end or re-home the root (or,
+    // through the host's session-end cleanup, a derived agent sharing its
+    // session_id). Dropped.
+    if (normEvent.kind === 'sessionStart' || normEvent.kind === 'sessionEnd') return;
+
+    const derivedId = this.sessionRouter.resolveSpawn(event.session_id, agentKey);
+    if (derivedId === undefined) {
+      // Not materialized yet (the runtime scans the spawn tree periodically):
+      // wait for registerSpawn -- but only for sessions we track or are about
+      // to track, the same bar the root path uses for its own buffering.
+      if (this.mayBufferKeyedEvent(event.session_id)) {
+        this.sessionRouter.bufferEvent(providerId, event, agentKey);
+      }
+      return;
+    }
+    const derived = this.agents.get(derivedId);
+    if (!derived) return; // stale mapping: drop, never fall back to the root
+    derived.hookDelivered = true;
+    if (debug)
+      console.log(
+        `[Pixel Agents] Hook: Agent ${derivedId} (spawn) - ${event.hook_event_name} (session=${event.session_id.slice(0, 8)}...)`,
+      );
+    this.dispatch(normEvent, event, derived, derivedId);
+  }
+
+  /** A keyed event may wait for its spawn on the same bar the root path uses
+   *  for its own buffering: its session's root is registered or present in the
+   *  store, it is a pending external session or already buffering root events,
+   *  or ANY session root still awaits registration (the internal-agent launch
+   *  race -- global by necessity, since the racing root's session_id is not
+   *  known yet). Anything else would only occupy -- and, under the global cap,
+   *  evict from -- the shared buffer. */
+  private mayBufferKeyedEvent(sessionId: string): boolean {
+    return (
+      this.sessionRouter.hasSession(sessionId) ||
+      this.sessionRouter.hasPending(sessionId) ||
+      this.sessionRouter.hasBufferedRoot(sessionId) ||
+      [...this.agents.values()].some((a) => isSessionRoot(a) && a.sessionId === sessionId) ||
+      this.hasUnregisteredAgents()
+    );
+  }
+
+  /** A session root in the store not yet registered for hooks (internal-agent
+   *  launch race). Derived agents never count: they route by registerSpawn, and
+   *  one outliving its root's mapping (e.g. after /clear) would otherwise hold
+   *  this true forever and let every foreign session's events into the buffer. */
+  private hasUnregisteredAgents(): boolean {
+    return [...this.agents.values()].some(
+      (a) => isSessionRoot(a) && a.sessionId && !this.sessionRouter.hasSession(a.sessionId),
+    );
+  }
+
+  /** Inline teammates of `leadId` whose hook events are indistinguishable from
+   *  the lead's (same session_id, no agentKey), so an unkeyed event on the lead
+   *  may really be theirs. A derived teammate (spawnAgentKey set) never is: its
+   *  events arrive keyed and route to it directly (docs/adr/0002), which makes
+   *  an unkeyed event unambiguously the lead's own. Not used for TeammateIdle /
+   *  TaskCompleted: those identify the teammate by name and carry no key. */
+  private hookAmbiguousTeammates(leadId: number): Array<[number, AgentState]> {
+    return getInlineTeammates(leadId, this.agents).filter(([, a]) => a.spawnAgentKey === undefined);
+  }
+
+  /** The agent that spawned child `childKey` of `sessionId`: its derived parent
+   *  when both child and parent are registered spawns of that same session,
+   *  otherwise the session's root (a child not yet materialized included). */
+  private resolveSpawner(sessionId: string, childKey: string, rootId: number): number {
+    const childId = this.sessionRouter.resolveSpawn(sessionId, childKey);
+    if (childId === undefined) return rootId;
+    const parentId = this.agents.get(childId)?.parentAgentId;
+    if (parentId === undefined || parentId === rootId) return rootId;
+    const parentKey = this.agents.get(parentId)?.spawnAgentKey;
+    if (parentKey === undefined) return rootId;
+    return this.sessionRouter.resolveSpawn(sessionId, parentKey) === parentId ? parentId : rootId;
+  }
+
+  /** Dispatch on normalized AgentEvent.kind to the agent the event belongs to. */
+  private dispatch(
+    normEvent: AgentEvent,
+    event: HookEvent,
+    agent: AgentState,
+    agentId: number,
+  ): void {
     // Dispatch on normalized AgentEvent.kind, not raw hook event names.
     // The TeammateIdle / TaskCompleted hooks normalize to `subagentTurnEnd` -- both
     // retain their raw payload for the team-routing handler's identity extraction.
@@ -429,7 +595,7 @@ export class HookEventHandler {
     // When a lead has inline teammates, hook tool events are ambiguous (could be
     // from the lead or any teammate -- they share session_id). Suppress hook-originated
     // tool display on the lead. Both lead and teammate tools display via JSONL polling.
-    if (hasInlineTeammates(agentId, this.agents)) return;
+    if (this.hookAmbiguousTeammates(agentId).length > 0) return;
 
     // Cancel waiting, mark active
     cancelWaitingTimer(agentId, this.waitingTimers);
@@ -466,7 +632,7 @@ export class HookEventHandler {
   private handlePostToolUse(agent: AgentState, agentId: number): void {
     if (agent.currentHookToolId) {
       // Suppress tool display when lead has inline teammates (see handlePreToolUse)
-      if (!hasInlineTeammates(agentId, this.agents)) {
+      if (this.hookAmbiguousTeammates(agentId).length === 0) {
         this.agents.broadcast({
           type: 'agentToolDone',
           id: agentId,
@@ -491,8 +657,16 @@ export class HookEventHandler {
    *
    * For old-style Task/Agent subagents (inline, no run_in_background), creates
    * the child character immediately via hooks without waiting for JSONL polling.
+   *
+   * `childIsDerived`: the event carried the child's agentKey, so the child is
+   * (or will be) its own derived character -- skip the Subtask sub-character.
    */
-  private handleSubagentStart(event: HookEvent, agent: AgentState, agentId: number): void {
+  private handleSubagentStart(
+    event: HookEvent,
+    agent: AgentState,
+    agentId: number,
+    childIsDerived = false,
+  ): void {
     const agentType = this.provider.team?.extractTeammateNameFromEvent(event) ?? 'unknown';
 
     // Decide path: teammate spawn vs basic within-turn subagent.
@@ -511,6 +685,7 @@ export class HookEventHandler {
       this.lifecycleCallbacks.onTeammateDetected?.(agentId, event.session_id, agentType);
       return;
     }
+    if (childIsDerived) return;
 
     // Basic within-turn subagent path: find parent tool ID from activeToolNames.
     // Use only the real JSONL-populated id -- no synthetic fallback here, or we'd
@@ -560,8 +735,12 @@ export class HookEventHandler {
    * independent agents, not sub-agent characters to destroy).
    *
    * For old-style Task subagents: removes the child character from the office.
+   *
+   * `childIsDerived`: the event carried the child's agentKey; no Subtask was
+   * created for it, so there is none to clear (its derived node's removal is
+   * the runtime's, driven by the transcript).
    */
-  private handleSubagentStop(agent: AgentState, agentId: number): void {
+  private handleSubagentStop(agent: AgentState, agentId: number, childIsDerived = false): void {
     // Check if this agent has inline teammates (independent agents with leadAgentId).
     // Just mark them waiting -- SubagentStop fires per-task-iteration; teammates may
     // sit idle for minutes between lead requests before being re-invoked.
@@ -569,7 +748,7 @@ export class HookEventHandler {
     //   - Periodic team config polling (scanTeamConfigsForRemovals) -- teammate
     //     removed when no longer in team config members list
     //   - SessionEnd on lead (removeTeammates in ViewProvider)
-    const inlineTeammates = getInlineTeammates(agentId, this.agents);
+    const inlineTeammates = this.hookAmbiguousTeammates(agentId);
     if (inlineTeammates.length > 0) {
       if (debug)
         console.log(
@@ -580,6 +759,7 @@ export class HookEventHandler {
       }
       return;
     }
+    if (childIsDerived) return;
 
     // Old-style within-turn subagents: find a parent tool that actually has tracked
     // sub-agents. The `activeSubagentToolIds.has(toolId)` gate below prevents us
@@ -608,7 +788,7 @@ export class HookEventHandler {
   private handlePermissionRequest(agent: AgentState, agentId: number): void {
     // When lead has inline teammates, route permission to the teammates instead.
     // The hook fires on the lead's session_id but the permission is for a teammate.
-    const inlineTeammates = getInlineTeammates(agentId, this.agents);
+    const inlineTeammates = this.hookAmbiguousTeammates(agentId);
     if (inlineTeammates.length > 0) {
       for (const [id, a] of inlineTeammates) {
         cancelPermissionTimer(id, this.permissionTimers);
@@ -736,8 +916,8 @@ export class HookEventHandler {
       if (toolName && parentTools.has(toolName)) {
         agent.activeSubagentToolIds.delete(toolId);
         agent.activeSubagentToolNames.delete(toolId);
-        // A foreground spawn dropped at Stop without a tool_result: stop its
-        // shadow watch too, or it lingers until sessionEnd.
+        // A foreground spawn dropped at Stop without a tool_result: remove its
+        // derived agent (and its subtree) too, or it lingers until sessionEnd.
         notifyBackgroundAgentCompleted(agentId, toolId);
       }
     }

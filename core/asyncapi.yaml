@@ -1443,3 +1443,6 @@ components:
           type: string
         frame:
           type: integer
+        restSeat:
+          type: boolean
+          description: A rest seat (beanbag, sofa) — the living office's lounge seats it and never hands it out as a desk.

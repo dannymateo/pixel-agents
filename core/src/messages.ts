@@ -249,6 +249,7 @@ export interface FurnitureAssetMessage {
   rotationScheme?: string;
   animationGroup?: string;
   frame?: number;
+  restSeat?: boolean;
 }
 
 export interface CharacterSpritesLoaded {

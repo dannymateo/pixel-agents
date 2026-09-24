@@ -12,7 +12,7 @@ export interface LoadedAssetData {
     isDesk: boolean;
     groupId?: string;
     orientation?: string; // 'front' | 'back' | 'left' | 'right' | 'side'
-    state?: string; // 'on' | 'off'
+    state?: string; // 'on' | 'off' | 'open' | 'closed'
     canPlaceOnSurfaces?: boolean;
     backgroundTiles?: number;
     canPlaceOnWalls?: boolean;
@@ -20,6 +20,8 @@ export interface LoadedAssetData {
     rotationScheme?: string;
     animationGroup?: string;
     frame?: number;
+    /** Rest seat (manifest `restSeat: true`): lounge seating, never a desk. */
+    restSeat?: boolean;
   }>;
   sprites: Record<string, SpriteData>;
 }
@@ -45,11 +47,24 @@ interface RotationGroup {
 const rotationGroups = new Map<string, RotationGroup>();
 
 // ── State groups ────────────────────────────────────────────────
-// Maps asset ID → its on/off counterpart (symmetric for toggle)
+// Two state pairs are recognized inside a groupId + orientation: `off`/`on`
+// (electronics: auto-state turns them on in front of a working agent) and
+// `closed`/`open` (doors: the living office opens its entrance while someone
+// crosses it). Both toggle with T in the editor; only off/on is auto-state.
+/** Base state of each pair (the one placed and shown in the palette) → its active state. */
+const STATE_PAIRS: ReadonlyArray<{ base: string; active: string }> = [
+  { base: 'off', active: 'on' },
+  { base: 'closed', active: 'open' },
+];
+const BASE_STATES: ReadonlySet<string> = new Set(STATE_PAIRS.map((p) => p.base));
+const ACTIVE_STATES: ReadonlySet<string> = new Set(STATE_PAIRS.map((p) => p.active));
+// Maps asset ID → its counterpart in either pair (symmetric for toggle)
 const stateGroups = new Map<string, string>();
-// Directional maps for getOnStateType / getOffStateType
+// Directional maps for getOnStateType / getOffStateType (off/on pairs only)
 const offToOn = new Map<string, string>(); // off asset → on asset
 const onToOff = new Map<string, string>(); // on asset → off asset
+// closed asset → open asset (doors)
+const closedToOpen = new Map<string, string>();
 
 // ── Animation groups ────────────────────────────────────────────
 // Maps animation group ID → ordered list of asset IDs by frame index
@@ -92,6 +107,7 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
         ...(asset.backgroundTiles ? { backgroundTiles: asset.backgroundTiles } : {}),
         ...(asset.canPlaceOnWalls ? { canPlaceOnWalls: true } : {}),
         ...(asset.mirrorSide ? { mirrorSide: true } : {}),
+        ...(asset.restSeat === true ? { restSeat: true } : {}),
       };
     })
     .filter((e): e is CatalogEntryWithCategory => e !== null);
@@ -119,6 +135,7 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
   stateGroups.clear();
   offToOn.clear();
   onToOff.clear();
+  closedToOpen.clear();
   animationGroups.clear();
 
   // Phase 1: Collect orientations per group (only "off" or stateless variants for rotation)
@@ -126,8 +143,8 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
   const groupMap = new Map<string, Map<string, string>>(); // groupId → (orientation → assetId)
   for (const asset of assets.catalog) {
     if (asset.groupId && asset.orientation) {
-      // For rotation groups, only use the "off" or stateless variant
-      if (asset.state && asset.state !== 'off') continue;
+      // For rotation groups, only use the base ("off"/"closed") or stateless variant
+      if (asset.state && !BASE_STATES.has(asset.state)) continue;
       let orientMap = groupMap.get(asset.groupId);
       if (!orientMap) {
         orientMap = new Map();
@@ -207,19 +224,24 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
     }
   }
   for (const sm of stateMap.values()) {
-    const onId = sm.get('on');
-    const offId = sm.get('off');
-    if (onId && offId) {
-      stateGroups.set(onId, offId);
-      stateGroups.set(offId, onId);
-      offToOn.set(offId, onId);
-      onToOff.set(onId, offId);
+    for (const { base, active } of STATE_PAIRS) {
+      const activeId = sm.get(active);
+      const baseId = sm.get(base);
+      if (!activeId || !baseId) continue;
+      stateGroups.set(activeId, baseId);
+      stateGroups.set(baseId, activeId);
+      if (base === 'off') {
+        offToOn.set(baseId, activeId);
+        onToOff.set(activeId, baseId);
+      } else {
+        closedToOpen.set(baseId, activeId);
+      }
     }
   }
 
   // Also register rotation groups for "on" state variants (so rotation works on on-state items too)
   for (const asset of assets.catalog) {
-    if (asset.groupId && asset.orientation && asset.state === 'on') {
+    if (asset.groupId && asset.orientation && asset.state && ACTIVE_STATES.has(asset.state)) {
       // Skip non-first animation frames
       if (asset.animationGroup && asset.frame !== undefined && asset.frame > 0) continue;
 
@@ -270,10 +292,10 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
     );
   }
 
-  // Track "on" variant IDs and animation frame IDs (non-first) to exclude from visible catalog
+  // Track active ("on"/"open") variant IDs — animation frames included — to exclude from visible catalog
   const onStateIds = new Set<string>();
   for (const asset of assets.catalog) {
-    if (asset.state === 'on') onStateIds.add(asset.id);
+    if (asset.state && ACTIVE_STATES.has(asset.state)) onStateIds.add(asset.id);
   }
 
   // Store full internal catalog (all variants — for getCatalogEntry lookups)
@@ -289,8 +311,10 @@ export function buildDynamicCatalog(assets: LoadedAssetData): boolean {
     if (rotationGroups.has(entry.type) || stateGroups.has(entry.type)) {
       entry.label = entry.label
         .replace(/ - Front - Off$/, '')
+        .replace(/ - Front - Closed$/, '')
         .replace(/ - Front$/, '')
-        .replace(/ - Off$/, '');
+        .replace(/ - Off$/, '')
+        .replace(/ - Closed$/, '');
     }
   }
 
@@ -355,7 +379,7 @@ export function getRotatedType(currentType: string, direction: 'cw' | 'ccw'): st
   return order[nextIdx];
 }
 
-/** Returns the toggled state variant (on↔off), or null if no state variant exists. */
+/** Returns the toggled state variant (on↔off, closed↔open), or null if no state variant exists. */
 export function getToggledType(currentType: string): string | null {
   return stateGroups.get(currentType) ?? null;
 }
@@ -363,6 +387,17 @@ export function getToggledType(currentType: string): string | null {
 /** Returns the "on" variant if this type has one, otherwise returns the type unchanged. */
 export function getOnStateType(currentType: string): string {
   return offToOn.get(currentType) ?? currentType;
+}
+
+/** Returns the "open" variant of a closed door-like type, otherwise the type unchanged.
+ *  Separate from getOnStateType on purpose: auto-state never opens a door. */
+export function getOpenStateType(currentType: string): string {
+  return closedToOpen.get(currentType) ?? currentType;
+}
+
+/** Whether this type is a rest seat (manifest `restSeat: true`). */
+export function isRestSeatCatalogType(type: string): boolean {
+  return getCatalogEntry(type)?.restSeat === true;
 }
 
 /** Returns the "off" variant if this type has one, otherwise returns the type unchanged - unused */

@@ -120,6 +120,8 @@ export interface FurnitureCatalogEntry {
   rotationScheme?: string;
   animationGroup?: string;
   frame?: number;
+  /** Rest seat (beanbag, sofa): lounge seating, never a desk. */
+  restSeat?: boolean;
 }
 
 // ── Hook Events ──────────────────────────────────────────────

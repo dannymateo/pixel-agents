@@ -144,33 +144,45 @@ Use `"rotationScheme": "3-way-mirror"` and add `"mirrorSide": true` to the side 
 
 ### Root fields (all manifests)
 
-| Field | Type | Description |
-|---|---|---|
-| `id` | string | Unique identifier. Must be unique across all loaded assets |
-| `name` | string | Display name shown in the palette |
-| `category` | string | Palette category: `desks`, `chairs`, `electronics`, `storage`, `decor`, `misc`, `wall` |
-| `type` | `"asset"` \| `"group"` | Single sprite or grouped (rotation/state/animation) |
-| `canPlaceOnWalls` | boolean | Whether the item can be placed on wall tiles |
-| `canPlaceOnSurfaces` | boolean | Whether the item can be placed on top of desk surfaces |
-| `backgroundTiles` | number | Number of floor tiles the sprite extends below its footprint (for tall sprites) |
+| Field                | Type                   | Description                                                                                                                                          |
+| -------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                 | string                 | Unique identifier. Must be unique across all loaded assets                                                                                           |
+| `name`               | string                 | Display name shown in the palette                                                                                                                    |
+| `category`           | string                 | Palette category: `desks`, `chairs`, `electronics`, `storage`, `decor`, `misc`, `wall`                                                               |
+| `type`               | `"asset"` \| `"group"` | Single sprite or grouped (rotation/state/animation)                                                                                                  |
+| `canPlaceOnWalls`    | boolean                | Whether the item can be placed on wall tiles                                                                                                         |
+| `canPlaceOnSurfaces` | boolean                | Whether the item can be placed on top of desk surfaces                                                                                               |
+| `backgroundTiles`    | number                 | Number of floor tiles the sprite extends below its footprint (for tall sprites)                                                                      |
+| `restSeat`           | boolean (optional)     | A rest seat (beanbag, sofa): agents sit on it in the lounge and it is never assigned as a desk. Applies to every member of a group. Absent = `false` |
 
 ### Asset-only fields
 
-| Field | Type | Description |
-|---|---|---|
-| `file` | string | PNG filename relative to the item folder |
-| `width` | number | Sprite width in pixels |
-| `height` | number | Sprite height in pixels |
+| Field        | Type   | Description                              |
+| ------------ | ------ | ---------------------------------------- |
+| `file`       | string | PNG filename relative to the item folder |
+| `width`      | number | Sprite width in pixels                   |
+| `height`     | number | Sprite height in pixels                  |
 | `footprintW` | number | Footprint width in tiles (1 tile = 16px) |
-| `footprintH` | number | Footprint height in tiles |
+| `footprintH` | number | Footprint height in tiles                |
 
 ### Group fields
 
-| Field | Type | Description |
-|---|---|---|
-| `groupType` | `"rotation"` \| `"state"` \| `"animation"` | How members relate to each other |
-| `rotationScheme` | `"2-way"` \| `"3-way-mirror"` \| `"4-way"` | Rotation variants available |
-| `members` | array | Child assets or nested groups |
+| Field            | Type                                       | Description                      |
+| ---------------- | ------------------------------------------ | -------------------------------- |
+| `groupType`      | `"rotation"` \| `"state"` \| `"animation"` | How members relate to each other |
+| `rotationScheme` | `"2-way"` \| `"3-way-mirror"` \| `"4-way"` | Rotation variants available      |
+| `members`        | array                                      | Child assets or nested groups    |
+
+### Member state values
+
+A `state` group pairs a base state with an active one inside the same orientation:
+
+| Base     | Active | Used for                                                                                                            |
+| -------- | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| `off`    | `on`   | Electronics: switched on while a working agent faces them (auto-state). The active member may be an animation group |
+| `closed` | `open` | Doors: the living office opens its entrance while an agent walks through. Never switched by auto-state              |
+
+Only the base member appears in the editor palette; **T** toggles a placed item between the two.
 
 ### Member orientation values
 

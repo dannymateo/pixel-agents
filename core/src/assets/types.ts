@@ -38,6 +38,8 @@ export interface CatalogEntry {
   rotationScheme?: string;
   animationGroup?: string;
   frame?: number;
+  /** Rest seat (manifest `restSeat: true`): lounge seating, never a desk. */
+  restSeat?: boolean;
 }
 
 export interface PetSpriteFrames {

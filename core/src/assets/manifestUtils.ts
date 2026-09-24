@@ -39,6 +39,9 @@ export interface FurnitureManifest {
   canPlaceOnWalls: boolean;
   canPlaceOnSurfaces: boolean;
   backgroundTiles: number;
+  /** Optional: a rest seat (beanbag, sofa) — the living office's lounge seats
+   *  it, and never hands it out as a desk. Absent = false. */
+  restSeat?: boolean;
   // If type is 'asset', these fields are present:
   type: 'asset' | 'group';
   file?: string;
@@ -59,6 +62,7 @@ export interface InheritedProps {
   canPlaceOnWalls: boolean;
   canPlaceOnSurfaces: boolean;
   backgroundTiles: number;
+  restSeat?: boolean;
   orientation?: string;
   state?: string;
   rotationScheme?: string;
@@ -86,6 +90,8 @@ export interface FurnitureAsset {
   rotationScheme?: string;
   animationGroup?: string;
   frame?: number;
+  /** Rest seat (see FurnitureManifest.restSeat); present only when true. */
+  restSeat?: boolean;
 }
 
 /**
@@ -120,6 +126,7 @@ export function flattenManifest(node: ManifestNode, inherited: InheritedProps): 
         ...(inherited.rotationScheme ? { rotationScheme: inherited.rotationScheme } : {}),
         ...(inherited.animationGroup ? { animationGroup: inherited.animationGroup } : {}),
         ...(asset.frame !== undefined ? { frame: asset.frame } : {}),
+        ...(inherited.restSeat === true ? { restSeat: true } : {}),
       },
     ];
   }

@@ -19,8 +19,12 @@ import {
   buildDynamicCatalog,
   getAnimationFrames,
   getCatalogByCategory,
+  getCatalogEntry,
+  getOnStateType,
+  getOpenStateType,
   getRotatedType,
   getToggledType,
+  isRestSeatCatalogType,
 } from '../src/office/layout/furnitureCatalog.js';
 import {
   layoutToFurnitureInstances,
@@ -73,11 +77,14 @@ describe('living-office assets in the editor palette', () => {
     expect(ids('wall')).toContain('DOOR_CLOSED');
   });
 
-  it('KNOWN GAP: the catalog pairs only on/off, so DOOR_OPEN is a second "Door" entry with no T toggle', () => {
-    // Pinned so the change is visible when the catalog learns generic state
-    // pairs: then DOOR_OPEN should leave the palette and T should toggle.
-    expect(ids('wall')).toContain('DOOR_OPEN');
-    expect(getToggledType('DOOR_CLOSED')).toBeNull();
+  it('pairs closed/open for the door: one "Door" in the palette, T toggles it', () => {
+    expect(ids('wall')).toContain('DOOR_CLOSED');
+    expect(ids('wall')).not.toContain('DOOR_OPEN');
+    expect(getToggledType('DOOR_CLOSED')).toBe('DOOR_OPEN');
+    expect(getToggledType('DOOR_OPEN')).toBe('DOOR_CLOSED');
+    // Auto-state never opens a door: only the living office's entrance opens it.
+    expect(getOnStateType('DOOR_CLOSED')).toBe('DOOR_CLOSED');
+    expect(getOpenStateType('DOOR_CLOSED')).toBe('DOOR_OPEN');
   });
 
   it('pairs off/on for the electronics (T toggles, auto-state animates)', () => {
@@ -88,6 +95,13 @@ describe('living-office assets in the editor palette', () => {
       'GAME_CONSOLE_ON_1',
       'GAME_CONSOLE_ON_2',
     ]);
+  });
+
+  it('carries the manifest restSeat flag into the catalog', () => {
+    expect(getCatalogEntry('BEANBAG')?.restSeat).toBe(true);
+    expect(getCatalogEntry('BEANBAG_BACK')?.restSeat).toBe(true);
+    expect(getCatalogEntry('ARCADE_OFF')?.restSeat).toBeUndefined();
+    expect(isRestSeatCatalogType('BEANBAG_BACK')).toBe(true);
   });
 
   it('rotates the beanbag between its front and back views (R)', () => {

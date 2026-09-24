@@ -128,7 +128,7 @@ describe('living-office assets — real asset loader', () => {
     expect(sprites.get('GAME_CONSOLE_ON_1')).not.toEqual(sprites.get('GAME_CONSOLE_ON_2'));
   });
 
-  it('BEANBAG: 1x1 chair, front (bare id) and back orientations, manifest declares restSeat', () => {
+  it('BEANBAG: 1x1 chair, front (bare id) and back orientations, a rest seat', () => {
     for (const [id, orientation] of [
       ['BEANBAG', 'front'],
       ['BEANBAG_BACK', 'back'],
@@ -146,9 +146,12 @@ describe('living-office assets — real asset loader', () => {
     const manifest = JSON.parse(
       fs.readFileSync(path.join(FURNITURE_DIR, 'BEANBAG', 'manifest.json'), 'utf-8'),
     ) as Record<string, unknown>;
-    // Declared only: no loader propagates restSeat yet (the living office
-    // recognises rest seats by type id today).
     expect(manifest['restSeat']).toBe(true);
+    // The loader carries it to every flattened member (the living office
+    // reads it from the catalog: a rest seat is never a desk).
+    expect(asset('BEANBAG')).toMatchObject({ restSeat: true });
+    expect(asset('BEANBAG_BACK')).toMatchObject({ restSeat: true });
+    expect(asset('ARCADE_OFF')).not.toHaveProperty('restSeat');
   });
 });
 

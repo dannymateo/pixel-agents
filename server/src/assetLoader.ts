@@ -104,6 +104,7 @@ export async function loadFurnitureAssets(workspaceRoot: string): Promise<Loaded
           canPlaceOnWalls: manifest.canPlaceOnWalls,
           canPlaceOnSurfaces: manifest.canPlaceOnSurfaces,
           backgroundTiles: manifest.backgroundTiles,
+          ...(manifest.restSeat === true ? { restSeat: true } : {}),
         };
 
         let assets: FurnitureAsset[];
@@ -126,6 +127,7 @@ export async function loadFurnitureAssets(workspaceRoot: string): Promise<Loaded
               canPlaceOnSurfaces: manifest.canPlaceOnSurfaces,
               backgroundTiles: manifest.backgroundTiles,
               groupId: manifest.id,
+              ...(manifest.restSeat === true ? { restSeat: true } : {}),
             },
           ];
         } else {

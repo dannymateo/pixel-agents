@@ -40,6 +40,16 @@ export interface ClaudeMockWriteJsonAction {
   value: Record<string, unknown>;
 }
 
+/** Write (create or replace) a file under the session's project dir. The
+ *  runner confines `relPath` to that dir: absolute paths and `..` escapes fail
+ *  the scenario. Objects are written as pretty JSON. */
+export interface ClaudeMockWriteFileAction {
+  kind: 'writeFile';
+  atMs: number;
+  relPath: string;
+  content: string | Record<string, unknown>;
+}
+
 export interface ClaudeMockDeletePathAction {
   kind: 'deletePath';
   atMs: number;
@@ -56,6 +66,7 @@ export type ClaudeMockAction =
   | ClaudeMockAppendJsonlAction
   | ClaudeMockEmitHookAction
   | ClaudeMockWriteJsonAction
+  | ClaudeMockWriteFileAction
   | ClaudeMockDeletePathAction
   | ClaudeMockExitAction;
 
@@ -102,6 +113,31 @@ class TimedScenarioStepBuilder {
       atMs: this.atMs,
       filePath,
       value,
+    });
+    return this.scenario;
+  }
+
+  /**
+   * Timed file write relative to the session's project dir
+   * (`~/.claude/projects/<hash>/`), e.g. a sub-agent sidecar:
+   * `.writeFile('{{sessionId}}/subagents/agent-aaa.meta.json', {...})`.
+   * Transcripts should still grow through `appendJsonl` (append-only rule).
+   */
+  writeFile(relPath: string, content: string | Record<string, unknown>): ClaudeMockScenarioBuilder {
+    if (path.isAbsolute(relPath) || relPath.split(/[\\/]/).includes('..')) {
+      throw new Error(`writeFile needs a path relative to the project dir, got ${relPath}`);
+    }
+    // Transcripts are append-only (e2e/README.md): grow them with appendJsonl.
+    if (relPath.endsWith('.jsonl')) {
+      throw new Error(`writeFile must not write transcripts; use appendJsonl: ${relPath}`);
+    }
+    // Early feedback only — the runner is the real confinement (it also sees
+    // resolved templates and Windows path forms this host check cannot).
+    this.scenario.pushAction({
+      kind: 'writeFile',
+      atMs: this.atMs,
+      relPath,
+      content,
     });
     return this.scenario;
   }

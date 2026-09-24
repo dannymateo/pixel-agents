@@ -188,6 +188,80 @@ function writeJsonFile(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function isInsideDir(dir, candidate) {
+  const rel = path.relative(dir, candidate);
+  return (
+    rel.length > 0 && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
+  );
+}
+
+/**
+ * Resolve a scenario-relative path against the session's project dir and
+ * refuse anything that would land outside it. The scenario queue is test
+ * input, but a mistyped template must never write into the real profile or
+ * elsewhere on disk — so this is a hard confinement, not a convenience:
+ * absolute and drive/UNC paths are refused outright, `..` escapes are refused
+ * after resolution, and the existing parent chain is realpath-checked so a
+ * symlinked directory inside the project dir cannot redirect the write.
+ */
+function resolveProjectFilePath(projectDir, relPath) {
+  if (typeof relPath !== 'string' || relPath.length === 0 || relPath.includes('\0')) {
+    throw new Error(`writeFile: invalid relative path ${JSON.stringify(relPath)}`);
+  }
+  if (path.isAbsolute(relPath) || path.win32.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath)) {
+    throw new Error(`writeFile: path must be relative to the project dir: ${relPath}`);
+  }
+  const target = path.resolve(projectDir, relPath);
+  if (!isInsideDir(projectDir, target)) {
+    throw new Error(`writeFile: path escapes the project dir: ${relPath}`);
+  }
+  return target;
+}
+
+function writeProjectFile(projectDir, relPath, content) {
+  const target = resolveProjectFilePath(projectDir, relPath);
+  const realProjectDir = fs.realpathSync.native(projectDir);
+  const staysInside = (dir) => {
+    const real = fs.realpathSync.native(dir);
+    return real === realProjectDir || isInsideDir(realProjectDir, real);
+  };
+  // Check the deepest EXISTING ancestor before creating anything, so a
+  // symlinked directory cannot make mkdir create folders outside either.
+  let ancestor = path.dirname(target);
+  while (!fs.existsSync(ancestor) && isInsideDir(projectDir, ancestor)) {
+    ancestor = path.dirname(ancestor);
+  }
+  if (!staysInside(ancestor)) {
+    throw new Error(`writeFile: parent directory resolves outside the project dir: ${relPath}`);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (!staysInside(path.dirname(target))) {
+    throw new Error(`writeFile: parent directory resolves outside the project dir: ${relPath}`);
+  }
+  let existing = null;
+  try {
+    existing = fs.lstatSync(target);
+  } catch {
+    existing = null;
+  }
+  if (existing && !existing.isFile()) {
+    throw new Error(`writeFile: refusing to replace a non-regular file: ${relPath}`);
+  }
+  const text = typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`;
+  // Write a fresh sibling (exclusive create) and rename it over the target:
+  // the rename replaces the directory ENTRY, so a pre-existing hard link, or a
+  // symlink swapped in after the checks above, never has its target rewritten.
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, text, { flag: 'wx' });
+  try {
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    fs.rmSync(tmp, { force: true });
+    throw error;
+  }
+  return target;
+}
+
 function deletePathTarget(filePath) {
   fs.rmSync(filePath, { recursive: true, force: true });
 }
@@ -465,6 +539,17 @@ async function playScenario(homeDir, scenario, context) {
         `writeJson ${path.basename(filePath)} ${JSON.stringify({ filePath, value })}`,
       );
       echo(atMs, `${ANSI_CYAN}write${ANSI_RESET} ${path.basename(filePath)}`);
+      continue;
+    }
+
+    if (action.kind === 'writeFile') {
+      // Relative to the session's project dir (templates allowed, e.g.
+      // `{{sessionId}}/subagents/agent-<key>.meta.json`), confined to it.
+      const relPath = resolveTemplateString(action.relPath, context);
+      const content = resolveValue(action.content, context);
+      const target = writeProjectFile(context.projectDir, relPath, content);
+      logAction(homeDir, `writeFile ${JSON.stringify({ filePath: target })}`);
+      echo(atMs, `${ANSI_CYAN}write${ANSI_RESET} ${path.basename(target)}`);
       continue;
     }
 

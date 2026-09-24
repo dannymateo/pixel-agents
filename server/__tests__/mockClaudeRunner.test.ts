@@ -239,6 +239,218 @@ describe('mock-claude-runner hook execution', () => {
     });
   });
 
+  describe('writeFile', () => {
+    const projectDirOf = () =>
+      path.join(tmpHome, '.claude', 'projects', workspaceDir.replace(/[^a-zA-Z0-9-]/g, '-'));
+
+    function writeFileScenario(relPath: string, content: unknown = 'x'): void {
+      writeScenarioQueue(tmpHome, [
+        {
+          schemaVersion: 1,
+          autoInit: false,
+          holdOpenMs: 0,
+          sessions: [],
+          actions: [{ kind: 'writeFile', atMs: 0, relPath, content }],
+        },
+      ]);
+    }
+
+    function actionsLog(): string {
+      try {
+        return fs.readFileSync(path.join(tmpHome, '.claude-mock', 'actions.log'), 'utf8');
+      } catch {
+        return '';
+      }
+    }
+
+    it('writes timed sidecars and transcripts under the project dir, in scenario order', async () => {
+      writeScenarioQueue(tmpHome, [
+        {
+          schemaVersion: 1,
+          autoInit: false,
+          holdOpenMs: 0,
+          sessions: [
+            {
+              alias: 'aaa',
+              sessionIdTemplate: '{{sessionId}}',
+              transcriptPathTemplate: '{{projectDir}}/{{sessionId}}/subagents/agent-aaa.jsonl',
+            },
+          ],
+          actions: [
+            {
+              kind: 'writeFile',
+              atMs: 200,
+              relPath: '{{sessionId}}/subagents/agent-aaa.meta.json',
+              content: {
+                agentType: 'lider-fase',
+                description: 'Fase 1',
+                toolUseId: 'toolu_L',
+                spawnDepth: 1,
+                note: 'root {{sessionId}}',
+              },
+            },
+            {
+              kind: 'appendJsonl',
+              atMs: 200,
+              session: 'aaa',
+              record: { type: 'user', isSidechain: true, agentId: 'aaa' },
+            },
+            {
+              kind: 'writeFile',
+              atMs: 0,
+              relPath: 'notes/plain.txt',
+              content: 'plain text',
+            },
+          ],
+        },
+      ]);
+
+      const startedAt = Date.now();
+      const { code, stderr } = await runMockClaude('lead-session');
+
+      expect(code, stderr).toBe(0);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+      const subagentsDir = path.join(projectDirOf(), 'lead-session', 'subagents');
+      expect(
+        JSON.parse(fs.readFileSync(path.join(subagentsDir, 'agent-aaa.meta.json'), 'utf8')),
+      ).toEqual({
+        agentType: 'lider-fase',
+        description: 'Fase 1',
+        toolUseId: 'toolu_L',
+        spawnDepth: 1,
+        note: 'root lead-session',
+      });
+      expect(fs.readFileSync(path.join(subagentsDir, 'agent-aaa.jsonl'), 'utf8')).toBe(
+        `${JSON.stringify({ type: 'user', isSidechain: true, agentId: 'aaa' })}\n`,
+      );
+      expect(fs.readFileSync(path.join(projectDirOf(), 'notes', 'plain.txt'), 'utf8')).toBe(
+        'plain text',
+      );
+
+      // Scenario order: the t=0 file first, then the sidecar BEFORE its transcript line.
+      const log = actionsLog();
+      const plainAt = log.indexOf('plain.txt');
+      const metaAt = log.indexOf('agent-aaa.meta.json');
+      const appendAt = log.indexOf('appendJsonl aaa');
+      expect(plainAt).toBeGreaterThanOrEqual(0);
+      expect(metaAt).toBeGreaterThan(plainAt);
+      expect(appendAt).toBeGreaterThan(metaAt);
+    });
+
+    // A backslash is a separator only on Windows; on POSIX `..\x` is a filename.
+    const WINDOWS_ONLY_ESCAPES: Array<[string, string, RegExp]> = [
+      ['a backslash parent-dir escape', '..\\escaped.txt', /escapes the project dir/],
+    ];
+
+    it.each<[string, string, RegExp]>([
+      ['a parent-dir escape', '../escaped.txt', /escapes the project dir/],
+      ['a nested parent-dir escape', 'sub/../../escaped.txt', /escapes the project dir/],
+      [
+        'a template that resolves to an escape',
+        '{{sessionId}}/../../escaped.txt',
+        /escapes the project dir/,
+      ],
+      [
+        'a template that resolves to an absolute path',
+        '{{cwd}}/../escaped.txt',
+        /must be relative to the project dir/,
+      ],
+      ['an empty path', '', /invalid relative path/],
+      ['a path with a NUL byte', 'a\0b.txt', /invalid relative path/],
+      ['a drive-relative path', 'C:escaped.txt', /must be relative to the project dir/],
+      ['a UNC path', '\\\\localhost\\c$\\escaped.txt', /must be relative to the project dir/],
+      ...(process.platform === 'win32' ? WINDOWS_ONLY_ESCAPES : []),
+    ])('refuses %s and writes nothing outside the project dir', async (_label, relPath, reason) => {
+      writeFileScenario(relPath);
+
+      const { code } = await runMockClaude('lead-session');
+
+      expect(code).toBe(1);
+      expect(actionsLog()).toMatch(reason);
+      expect(fs.existsSync(path.join(path.dirname(projectDirOf()), 'escaped.txt'))).toBe(false);
+      expect(fs.existsSync(path.join(tmpBase, 'escaped.txt'))).toBe(false);
+    });
+
+    it('refuses an absolute path', async () => {
+      const outside = path.join(tmpBase, 'absolute-escape.txt');
+      writeFileScenario(outside);
+
+      const { code } = await runMockClaude('lead-session');
+
+      expect(code).toBe(1);
+      expect(actionsLog()).toMatch(/must be relative to the project dir/);
+      expect(fs.existsSync(outside)).toBe(false);
+    });
+
+    it('refuses to write through a symlinked directory that points outside', async () => {
+      const outsideDir = path.join(tmpBase, 'outside');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.mkdirSync(projectDirOf(), { recursive: true });
+      // A junction needs no elevation on Windows; elsewhere the type is ignored.
+      fs.symlinkSync(outsideDir, path.join(projectDirOf(), 'link'), 'junction');
+      writeFileScenario('link/nested/escaped.txt');
+
+      const { code } = await runMockClaude('lead-session');
+
+      expect(code).toBe(1);
+      expect(actionsLog()).toMatch(/resolves outside the project dir/);
+      expect(fs.readdirSync(outsideDir)).toEqual([]);
+    });
+
+    it('accepts names that merely start with two dots', async () => {
+      writeFileScenario('..cache/kept.txt', 'kept');
+
+      const { code, stderr } = await runMockClaude('lead-session');
+
+      expect(code, stderr).toBe(0);
+      expect(fs.readFileSync(path.join(projectDirOf(), '..cache', 'kept.txt'), 'utf8')).toBe(
+        'kept',
+      );
+    });
+
+    it('refuses to replace a directory', async () => {
+      fs.mkdirSync(path.join(projectDirOf(), 'occupied'), { recursive: true });
+      writeFileScenario('occupied');
+
+      const { code } = await runMockClaude('lead-session');
+
+      expect(code).toBe(1);
+      expect(actionsLog()).toMatch(/refusing to replace a non-regular file/);
+    });
+
+    it('replaces a hard-linked target without rewriting the outside file', async () => {
+      const outside = path.join(tmpBase, 'victim.txt');
+      fs.writeFileSync(outside, 'original');
+      fs.mkdirSync(projectDirOf(), { recursive: true });
+      fs.linkSync(outside, path.join(projectDirOf(), 'victim.txt'));
+      writeFileScenario('victim.txt', 'scenario');
+
+      const { code, stderr } = await runMockClaude('lead-session');
+
+      expect(code, stderr).toBe(0);
+      expect(fs.readFileSync(outside, 'utf8')).toBe('original');
+      expect(fs.readFileSync(path.join(projectDirOf(), 'victim.txt'), 'utf8')).toBe('scenario');
+    });
+
+    it('replaces a symlinked target without writing through it', async (ctx) => {
+      const outside = path.join(tmpBase, 'link-victim.txt');
+      fs.writeFileSync(outside, 'original');
+      fs.mkdirSync(projectDirOf(), { recursive: true });
+      try {
+        fs.symlinkSync(outside, path.join(projectDirOf(), 'link.txt'), 'file');
+      } catch {
+        ctx.skip(); // file symlinks need Developer Mode / elevation on Windows
+      }
+      writeFileScenario('link.txt', 'scenario');
+
+      const { code } = await runMockClaude('lead-session');
+
+      expect(code).toBe(1);
+      expect(actionsLog()).toMatch(/refusing to replace a non-regular file/);
+      expect(fs.readFileSync(outside, 'utf8')).toBe('original');
+    });
+  });
+
   it('deletes configured paths with template values', async () => {
     writeScenarioQueue(tmpHome, [
       {

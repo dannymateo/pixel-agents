@@ -54,6 +54,7 @@ import {
 import { getPetSprites } from '../sprites/petSpriteData.js';
 import { getCachedSprite, getOutlineSprite } from '../sprites/spriteCache.js';
 import {
+  BUBBLE_GOODBYE_SPRITE,
   BUBBLE_HEART_SPRITE,
   BUBBLE_PERMISSION_SPRITE,
   BUBBLE_WAITING_SPRITE,
@@ -404,8 +405,10 @@ export function renderScene(
     const charZY = ch.y + TILE_SIZE / 2 + CHARACTER_Z_SORT_OFFSET;
 
     // Headless agents (adopted, no terminal to focus) render translucent while
-    // the "Display headless as ghosts" setting is on.
-    const alpha = ch.isHeadless && ghostHeadlessAgents ? HEADLESS_CHARACTER_ALPHA : 1;
+    // the "Display headless as ghosts" setting is on. A living-office scene
+    // fades a derived agent in at the door and out through it.
+    const alpha =
+      (ch.isHeadless && ghostHeadlessAgents ? HEADLESS_CHARACTER_ALPHA : 1) * (ch.sceneAlpha ?? 1);
 
     // Matrix spawn/despawn effect — skip outline, use per-pixel rendering
     if (ch.matrixEffect) {
@@ -429,7 +432,8 @@ export function renderScene(
     const isSelected = selectedAgentId !== null && ch.id === selectedAgentId;
     const isHovered = hoveredAgentId !== null && ch.id === hoveredAgentId;
     if (isSelected || isHovered) {
-      const outlineAlpha = isSelected ? SELECTED_OUTLINE_ALPHA : HOVERED_OUTLINE_ALPHA;
+      const outlineAlpha =
+        (isSelected ? SELECTED_OUTLINE_ALPHA : HOVERED_OUTLINE_ALPHA) * (ch.sceneAlpha ?? 1);
       const outlineData = getOutlineSprite(spriteData);
       const outlineCached = getCachedSprite(outlineData, zoom);
       const olDrawX = drawX - zoom; // 1 sprite-pixel offset, scaled
@@ -780,11 +784,18 @@ function renderBubbles(
     if (ch.bubbleType === 'waiting' && ch.waitingAwaitingInput) continue;
 
     const sprite =
-      ch.bubbleType === 'permission' ? BUBBLE_PERMISSION_SPRITE : BUBBLE_WAITING_SPRITE;
+      ch.bubbleType === 'permission'
+        ? BUBBLE_PERMISSION_SPRITE
+        : ch.bubbleType === 'goodbye'
+          ? BUBBLE_GOODBYE_SPRITE
+          : BUBBLE_WAITING_SPRITE;
 
-    // Compute opacity: permission = full, waiting = fade in last 0.5s
+    // Compute opacity: permission = full, waiting/goodbye = fade in last 0.5s
     let alpha = 1.0;
-    if (ch.bubbleType === 'waiting' && ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC) {
+    if (
+      (ch.bubbleType === 'waiting' || ch.bubbleType === 'goodbye') &&
+      ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC
+    ) {
       alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC;
     }
 

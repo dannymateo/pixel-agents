@@ -338,6 +338,10 @@ export const FEED_DIFF_REMOVE_COLOR = '#e05a5a';
 export const DOOR_OPEN_HOLD_MS = 900;
 /** How long the goodbye bubble shows before an agent walks out. */
 export const GOODBYE_BUBBLE_MS = 1500;
+/** State suffixes of a door's asset ids (`DOOR_CLOSED` / `DOOR_OPEN`): the
+ *  catalog only pairs on/off states, so the engine finds the open variant by name. */
+export const DOOR_CLOSED_SUFFIX = '_CLOSED';
+export const DOOR_OPEN_SUFFIX = '_OPEN';
 /** Area label the user gives their own lounge in the Areas editor. */
 export const LOUNGE_AREA_LABEL = 'Descanso';
 /** Empty columns between the user's office and the first team module (and between modules). */

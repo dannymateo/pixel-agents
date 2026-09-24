@@ -200,14 +200,15 @@ export interface Character {
   isActive: boolean;
   /** Assigned seat uid, or null if no seat */
   seatId: string | null;
-  /** Active speech bubble type, or null if none showing */
-  bubbleType: 'permission' | 'waiting' | null;
+  /** Active speech bubble type, or null if none showing. 'goodbye' is the
+   *  wave a derived agent gives at the door on its way out of the office. */
+  bubbleType: 'permission' | 'waiting' | 'goodbye' | null;
   /** Only meaningful while bubbleType === 'waiting': true when the agent went
    *  idle waiting on the user (surfaces the "Waiting for input" label);
    *  false/undefined when the agent simply finished its turn (checkmark only,
    *  label falls through to idle). */
   waitingAwaitingInput?: boolean;
-  /** Countdown timer for bubble (waiting: 2→0, permission: unused) */
+  /** Countdown timer for bubble (waiting: 2→0, goodbye: GOODBYE_BUBBLE_MS→0, permission: unused) */
   bubbleTimer: number;
   /** Timer to stay seated while inactive after seat reassignment (counts down to 0) */
   seatTimer: number;
@@ -233,6 +234,19 @@ export interface Character {
    *  per-consumer guard reads this flag. It exists for the render/e2e snapshot
    *  (testHooks.getCharacters) to tell the greeter from agents. */
   isGreeter?: boolean;
+
+  // -- Living office (docs/adr/0003) --
+  /** Server-owned presence, as last animated. undefined = working. */
+  presence?: 'working' | 'available' | 'lounge' | 'leaving';
+  /** A lifecycle scene (entering, going to or resting in the lounge, walking
+   *  back, leaving) is steering this character. While set, the FSM only
+   *  advances the walk along `path` and animates — it never re-paths to the
+   *  seat, stands up to wander, or sits on arrival; OfficeState finishes the
+   *  scene. */
+  scripted?: boolean;
+  /** Render opacity while fading in at, or out through, the door (0..1).
+   *  undefined = fully opaque. */
+  sceneAlpha?: number;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */

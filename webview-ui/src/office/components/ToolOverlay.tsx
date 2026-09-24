@@ -47,7 +47,7 @@ function getActivityText(
   agentId: number,
   agentTools: Record<number, ToolActivity[]>,
   isActive: boolean,
-  bubbleType: 'permission' | 'waiting' | null,
+  bubbleType: 'permission' | 'waiting' | 'goodbye' | null,
   waitingAwaitingInput: boolean,
 ): string {
   if (bubbleType === 'permission') return 'Needs approval';

@@ -89,6 +89,68 @@ export function createCharacter(
   };
 }
 
+/** Advance one frame along `ch.path` (the path must be non-empty). */
+function stepAlongPath(ch: Character, dt: number): void {
+  const nextTile = ch.path[0];
+  ch.dir = directionBetween(ch.tileCol, ch.tileRow, nextTile.col, nextTile.row);
+
+  ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt;
+
+  const fromCenter = tileCenter(ch.tileCol, ch.tileRow);
+  const toCenter = tileCenter(nextTile.col, nextTile.row);
+  const t = Math.min(ch.moveProgress, 1);
+  ch.x = fromCenter.x + (toCenter.x - fromCenter.x) * t;
+  ch.y = fromCenter.y + (toCenter.y - fromCenter.y) * t;
+
+  if (ch.moveProgress >= 1) {
+    // Arrived at next tile
+    ch.tileCol = nextTile.col;
+    ch.tileRow = nextTile.row;
+    ch.x = toCenter.x;
+    ch.y = toCenter.y;
+    ch.path.shift();
+    ch.moveProgress = 0;
+  }
+}
+
+/**
+ * A scripted character (a living-office scene is steering it) only walks the
+ * path it was given and animates. Every autonomous decision of the FSM —
+ * re-pathing to the seat when active, standing up to wander, sitting down on
+ * arrival — is left to the scene in OfficeState, so the two never fight.
+ * When the path runs out it stops (IDLE) on the last tile.
+ */
+function updateScriptedCharacter(ch: Character, dt: number): void {
+  switch (ch.state) {
+    case CharacterState.TYPE:
+      if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC) {
+        ch.frameTimer -= TYPE_FRAME_DURATION_SEC;
+        ch.frame = (ch.frame + 1) % 2;
+      }
+      return;
+    case CharacterState.IDLE:
+      ch.frame = 0;
+      return;
+    case CharacterState.WALK: {
+      if (ch.frameTimer >= WALK_FRAME_DURATION_SEC) {
+        ch.frameTimer -= WALK_FRAME_DURATION_SEC;
+        ch.frame = (ch.frame + 1) % 4;
+      }
+      if (ch.path.length === 0) {
+        const center = tileCenter(ch.tileCol, ch.tileRow);
+        ch.x = center.x;
+        ch.y = center.y;
+        ch.state = CharacterState.IDLE;
+        ch.frame = 0;
+        ch.frameTimer = 0;
+        return;
+      }
+      stepAlongPath(ch, dt);
+      return;
+    }
+  }
+}
+
 export function updateCharacter(
   ch: Character,
   dt: number,
@@ -98,6 +160,11 @@ export function updateCharacter(
   blockedTiles: Set<string>,
 ): void {
   ch.frameTimer += dt;
+
+  if (ch.scripted) {
+    updateScriptedCharacter(ch, dt);
+    return;
+  }
 
   switch (ch.state) {
     case CharacterState.TYPE: {
@@ -268,27 +335,7 @@ export function updateCharacter(
         break;
       }
 
-      // Move toward next tile in path
-      const nextTile = ch.path[0];
-      ch.dir = directionBetween(ch.tileCol, ch.tileRow, nextTile.col, nextTile.row);
-
-      ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt;
-
-      const fromCenter = tileCenter(ch.tileCol, ch.tileRow);
-      const toCenter = tileCenter(nextTile.col, nextTile.row);
-      const t = Math.min(ch.moveProgress, 1);
-      ch.x = fromCenter.x + (toCenter.x - fromCenter.x) * t;
-      ch.y = fromCenter.y + (toCenter.y - fromCenter.y) * t;
-
-      if (ch.moveProgress >= 1) {
-        // Arrived at next tile
-        ch.tileCol = nextTile.col;
-        ch.tileRow = nextTile.row;
-        ch.x = toCenter.x;
-        ch.y = toCenter.y;
-        ch.path.shift();
-        ch.moveProgress = 0;
-      }
+      stepAlongPath(ch, dt);
 
       // If became active while wandering, repath to seat
       if (ch.isActive && ch.seatId) {

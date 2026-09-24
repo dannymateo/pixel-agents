@@ -6,11 +6,16 @@ import {
   CHARACTER_HIT_HEIGHT,
   CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
+  DOOR_CLOSED_SUFFIX,
+  DOOR_OPEN_HOLD_MS,
+  DOOR_OPEN_SUFFIX,
   FURNITURE_ANIM_INTERVAL_SEC,
+  GOODBYE_BUBBLE_MS,
   GREETER_ID,
   GREETER_TILE_MARGIN,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
+  MATRIX_EFFECT_DURATION_SEC,
   MAX_PET_ID_LENGTH,
   PET_HIT_HALF_WIDTH,
   PET_HIT_HEIGHT,
@@ -42,6 +47,55 @@ import { createCharacter, updateCharacter } from './characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
 import { createPet, updatePet } from './petEntity.js';
 import { anchorTile, closestFreeSeat } from './seatPlacement.js';
+
+/** Presence as the server broadcasts it (core AgentPresence). */
+export type LivingPresence = 'working' | 'available' | 'lounge' | 'leaving';
+
+/** Where the living office's lifecycle scenes happen — the `door` and
+ *  `loungeSeats` of a composed LivingOffice (office/living/composeOffice.ts). */
+export interface LivingTargets {
+  /** The floor tile in front of the door (the walk target), and the door
+   *  furniture's uid (the item that swaps to its open variant). */
+  door: { col: number; row: number; uid: string };
+  /** Seat uids that are rest seats. Never handed out as desks. */
+  loungeSeats: string[];
+}
+
+/**
+ * One lifecycle scene steering a character (docs/adr/0003). While a scene is
+ * live the character is `scripted`: the FSM only walks the path it was given,
+ * and OfficeState decides what happens on arrival.
+ *
+ *   enter:  door tile → own seat, then back to the FSM.
+ *   lounge: desk → a free rest seat (or beside the lounge), then rests there.
+ *   return: wherever → own seat, then back to the FSM.
+ *   leave:  → door tile, goodbye bubble, fade out, deleted, onGone.
+ */
+interface LifecycleScene {
+  kind: 'enter' | 'lounge' | 'return' | 'leave';
+  phase: 'walk' | 'rest' | 'goodbye' | 'exit';
+  /** Seconds left in the goodbye / exit phase. */
+  timer: number;
+  /** The rest seat this character holds (lounge scene only). */
+  loungeSeat: string | null;
+}
+
+/**
+ * The open variant of a door type. The catalog only pairs `on`/`off` states,
+ * while the bundled DOOR declares `closed`/`open`, so the pair is also found by
+ * the asset naming convention `{BASE}[_{ORIENTATION}][_{STATE}]`
+ * (`DOOR_CLOSED` → `DOOR_OPEN`). Returns the type unchanged when there is no
+ * open variant, so an unknown door simply never swaps.
+ */
+function openDoorType(type: string): string {
+  const on = getOnStateType(type);
+  if (on !== type) return on;
+  if (type.endsWith(DOOR_CLOSED_SUFFIX)) {
+    const open = type.slice(0, -DOOR_CLOSED_SUFFIX.length) + DOOR_OPEN_SUFFIX;
+    if (getCatalogEntry(open)) return open;
+  }
+  return type;
+}
 
 /** Internal helper: facing-tile coords for a seat. Returns null for invalid direction. */
 function seatFacingOffset(direction: Direction): { dCol: number; dRow: number } {
@@ -101,6 +155,18 @@ export class OfficeState {
    *  overlay's per-frame updates stop re-centering. Reset on spawn/despawn. */
   private greeterCameraCancelled = false;
 
+  // ── Living office (docs/adr/0003) ──
+  /** Door + rest seats of the composed office; null until S8 wires them. */
+  private livingTargets: LivingTargets | null = null;
+  private loungeSeatSet: Set<string> = new Set();
+  /** Live lifecycle scenes, by character id. */
+  private scenes: Map<number, LifecycleScene> = new Map();
+  /** Callbacks to fire once a leaving character is actually gone. */
+  private goneCallbacks: Map<number, Array<() => void>> = new Map();
+  /** Seconds the door stays open after its tile was last occupied. */
+  private doorHoldTimer = 0;
+  private doorOpen = false;
+
   setAreaMappings(mappings: Record<string, string[]>): void {
     this.areaMappings = mappings;
   }
@@ -156,9 +222,36 @@ export class OfficeState {
       seat.assigned = false;
     }
 
+    // Rest seats held by lounge scenes stay held when they survived the rebuild.
+    for (const scene of this.scenes.values()) {
+      if (!scene.loungeSeat) continue;
+      const seat = this.seats.get(scene.loungeSeat);
+      if (seat && this.loungeSeatSet.has(scene.loungeSeat)) {
+        seat.assigned = true;
+      } else {
+        // Lost its rest seat: replanScenes() sends it looking for another.
+        scene.loungeSeat = null;
+        scene.phase = 'walk';
+      }
+    }
+
     // First pass: try to keep characters at their existing seats
     for (const ch of this.characters.values()) {
-      if (ch.seatId && this.seats.has(ch.seatId)) {
+      const scene = this.scenes.get(ch.id);
+      if (scene) {
+        // Mid-scene characters keep their seat but are NOT snapped onto it —
+        // that would teleport someone walking in, resting, or leaving.
+        // replanScenes() below re-routes them from where they stand.
+        if (scene.kind === 'leave') continue; // a leaver has no seat any more
+        const own = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+        if (own && !own.assigned) {
+          own.assigned = true;
+        } else {
+          ch.seatId = null;
+        }
+        continue;
+      }
+      if (ch.seatId && this.seats.has(ch.seatId) && !this.loungeSeatSet.has(ch.seatId)) {
         const seat = this.seats.get(ch.seatId)!;
         if (!seat.assigned) {
           seat.assigned = true;
@@ -179,7 +272,15 @@ export class OfficeState {
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
       if (ch.seatId) continue;
+      const scene = this.scenes.get(ch.id);
+      if (scene?.kind === 'leave') continue;
       const seatId = this.findFreeSeat(ch.folderName);
+      if (seatId && scene) {
+        // Mid-scene: take the seat, keep walking (no snap).
+        this.seats.get(seatId)!.assigned = true;
+        ch.seatId = seatId;
+        continue;
+      }
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
         ch.seatId = seatId;
@@ -194,7 +295,7 @@ export class OfficeState {
 
     // Relocate any characters that ended up outside bounds or on non-walkable tiles
     for (const ch of this.characters.values()) {
-      if (ch.seatId) continue; // seated characters are fine
+      if (ch.seatId && !this.scenes.has(ch.id)) continue; // seated characters are fine
       if (
         ch.tileCol < 0 ||
         ch.tileCol >= layout.cols ||
@@ -204,6 +305,9 @@ export class OfficeState {
         this.relocateCharacterToWalkable(ch);
       }
     }
+
+    // Re-route every live scene from where its character now stands.
+    this.replanScenes();
 
     // Relocate any pets that ended up outside bounds or on non-walkable tiles
     for (const pet of this.pets) {
@@ -361,7 +465,8 @@ export class OfficeState {
     const electronicsTiles = this.buildElectronicsTileSet();
     const freeSeats: string[] = [];
     for (const [uid, seat] of this.seats) {
-      if (!seat.assigned) freeSeats.push(uid);
+      // Rest seats are for the lounge, never a desk (docs/adr/0003).
+      if (!seat.assigned && !this.loungeSeatSet.has(uid)) freeSeats.push(uid);
     }
     if (freeSeats.length === 0) return null;
 
@@ -388,8 +493,12 @@ export class OfficeState {
   }
 
   /** Closest walkable tile to (col,row) not occupied by another character, or null. */
-  private closestFreeWalkableTile(col: number, row: number): { col: number; row: number } | null {
-    const occupied = new Set<string>();
+  private closestFreeWalkableTile(
+    col: number,
+    row: number,
+    exclude?: ReadonlySet<string>,
+  ): { col: number; row: number } | null {
+    const occupied = new Set<string>(exclude);
     for (const ch of this.characters.values()) {
       occupied.add(`${ch.tileCol},${ch.tileRow}`);
     }
@@ -451,14 +560,19 @@ export class OfficeState {
     const anchor = nearAgentId !== undefined ? this.characters.get(nearAgentId) : undefined;
     const anchorAt = anchorTile(anchor, this.seats);
     let seatId: string | null = null;
-    if (preferredSeatId && this.seats.has(preferredSeatId)) {
+    // A rest seat is never a desk, even when restored or requested.
+    if (
+      preferredSeatId &&
+      this.seats.has(preferredSeatId) &&
+      !this.loungeSeatSet.has(preferredSeatId)
+    ) {
       const seat = this.seats.get(preferredSeatId)!;
       if (!seat.assigned) {
         seatId = preferredSeatId;
       }
     }
     if (!seatId && anchorAt) {
-      seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+      seatId = closestFreeSeat(this.deskSeats(), anchorAt.col, anchorAt.row);
     }
     if (!seatId) {
       seatId = this.findFreeSeat(folderName);
@@ -554,6 +668,16 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (!ch) return;
     if (ch.matrixEffect === 'despawn') return; // already despawning
+    const scene = this.scenes.get(id);
+    if (scene?.kind === 'leave') {
+      // Removed before its walk-out finished (the server does not wait for the
+      // animation): skip straight to the fade. onGone still fires, once.
+      if (scene.phase !== 'exit') this.beginExit(ch, scene);
+      if (this.selectedAgentId === id) this.selectedAgentId = null;
+      if (this.cameraFollowId === id) this.cameraFollowId = null;
+      return;
+    }
+    if (scene) this.dropScene(ch);
     // Free seat and clear selection immediately
     if (ch.seatId) {
       const seat = this.seats.get(ch.seatId);
@@ -578,6 +702,8 @@ export class OfficeState {
   reassignSeat(agentId: number, seatId: string): void {
     const ch = this.characters.get(agentId);
     if (!ch) return;
+    if (this.isLeaving(agentId)) return; // a leaver takes no more orders
+    if (this.scenes.has(agentId)) this.dropScene(ch);
     // Unassign old seat
     if (ch.seatId) {
       const old = this.seats.get(ch.seatId);
@@ -624,7 +750,7 @@ export class OfficeState {
     if (!teammate || !lead) return;
     const anchorAt = anchorTile(lead, this.seats);
     if (!anchorAt) return;
-    const target = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+    const target = closestFreeSeat(this.deskSeats(), anchorAt.col, anchorAt.row);
     if (!target || target === teammate.seatId) return;
     const targetSeat = this.seats.get(target)!;
     const targetDist =
@@ -642,8 +768,14 @@ export class OfficeState {
   sendToSeat(agentId: number): void {
     const ch = this.characters.get(agentId);
     if (!ch || !ch.seatId) return;
+    if (this.isLeaving(agentId)) return;
     const seat = this.seats.get(ch.seatId);
     if (!seat) return;
+    if (this.scenes.has(agentId)) {
+      // Walking in / resting / walking back: the scene's own route to the desk.
+      this.returnToDesk(agentId);
+      return;
+    }
     const path = this.withOwnSeatUnblocked(ch, () =>
       findPath(ch.tileCol, ch.tileRow, seat.seatCol, seat.seatRow, this.tileMap, this.blockedTiles),
     );
@@ -669,6 +801,7 @@ export class OfficeState {
   walkToTile(agentId: number, col: number, row: number): boolean {
     const ch = this.characters.get(agentId);
     if (!ch || ch.isSubagent) return false;
+    if (this.isLeaving(agentId)) return false;
     if (!isWalkable(col, row, this.tileMap, this.blockedTiles)) {
       // Also allow walking to own seat tile (blocked for others but not self)
       const key = this.ownSeatKey(ch);
@@ -678,6 +811,8 @@ export class OfficeState {
       findPath(ch.tileCol, ch.tileRow, col, row, this.tileMap, this.blockedTiles),
     );
     if (path.length === 0) return false;
+    // The user's order outranks a walk-in / lounge / walk-back scene.
+    if (this.scenes.has(agentId)) this.dropScene(ch);
     ch.path = path;
     ch.moveProgress = 0;
     ch.state = CharacterState.WALK;
@@ -792,13 +927,17 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (ch) {
       ch.isActive = active;
-      if (!active) {
+      // A scene owns the path of a scripted character; its end sets seatTimer.
+      if (!active && !ch.scripted) {
         // Sentinel -1: signals turn just ended, skip next seat rest timer.
         // Prevents the WALK handler from setting a 2-4 min rest on arrival.
         ch.seatTimer = -1;
         ch.path = [];
         ch.moveProgress = 0;
       }
+      // Activity in the lounge (an agentToolStart) walks it back to its desk
+      // first; the work animation starts once it sits down.
+      if (active && this.scenes.get(id)?.kind === 'lounge') this.returnToDesk(id);
       this.rebuildFurnitureInstances();
     }
   }
@@ -837,7 +976,11 @@ export class OfficeState {
       }
     }
 
-    if (autoOnTiles.size === 0) {
+    // The living office's door is never auto-state furniture: it shows its open
+    // variant exactly while someone crosses it (+ DOOR_OPEN_HOLD_MS), whatever
+    // a seated agent happens to face.
+    const doorUid = this.livingTargets?.door.uid;
+    if (autoOnTiles.size === 0 && !(doorUid && this.doorOpen)) {
       this.furniture = layoutToFurnitureInstances(this.layout.furniture);
       return;
     }
@@ -845,6 +988,9 @@ export class OfficeState {
     // Build modified furniture list with auto-state and animation applied
     const animFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
     const modifiedFurniture: PlacedFurniture[] = this.layout.furniture.map((item) => {
+      if (doorUid !== undefined && item.uid === doorUid) {
+        return this.doorOpen ? { ...item, type: openDoorType(item.type) } : item;
+      }
       const entry = getCatalogEntry(item.type);
       if (!entry) return item;
       // Check if any tile of this furniture overlaps an auto-on tile
@@ -880,7 +1026,7 @@ export class OfficeState {
 
   showPermissionBubble(id: number): void {
     const ch = this.characters.get(id);
-    if (ch) {
+    if (ch && !this.isLeaving(id)) {
       ch.bubbleType = 'permission';
       ch.bubbleTimer = 0;
     }
@@ -896,7 +1042,7 @@ export class OfficeState {
 
   showWaitingBubble(id: number, awaitingInput = false): void {
     const ch = this.characters.get(id);
-    if (ch) {
+    if (ch && !this.isLeaving(id)) {
       ch.bubbleType = 'waiting';
       ch.waitingAwaitingInput = awaitingInput;
       ch.bubbleTimer = WAITING_BUBBLE_DURATION_SEC;
@@ -913,6 +1059,535 @@ export class OfficeState {
     } else if (ch.bubbleType === 'waiting') {
       // Trigger immediate fade (0.3s remaining)
       ch.bubbleTimer = Math.min(ch.bubbleTimer, DISMISS_BUBBLE_FAST_FADE_SEC);
+    }
+  }
+
+  // ── Living office: enter, rest, return, leave (docs/adr/0003) ──
+  // The server owns presence; these animate it. Derived agents enter and leave
+  // through the door; root sessions keep the matrix effect (addAgent /
+  // removeAgent) — which of the two a character gets is the caller's choice.
+
+  /** Door and rest seats of the composed office. Rest seats stop being
+   *  offered as desks from here on. */
+  setLivingTargets(t: LivingTargets): void {
+    this.livingTargets = {
+      door: { col: t.door.col, row: t.door.row, uid: t.door.uid },
+      loungeSeats: [...t.loungeSeats],
+    };
+    this.loungeSeatSet = new Set(t.loungeSeats);
+    for (const ch of [...this.characters.values()]) {
+      if (this.scenes.has(ch.id)) continue;
+      // Someone working on what is now a rest seat moves to a real desk.
+      if (ch.seatId && this.loungeSeatSet.has(ch.seatId)) {
+        const old = this.seats.get(ch.seatId);
+        if (old) old.assigned = false;
+        ch.seatId = null;
+        const desk = this.findFreeSeat(ch.folderName);
+        if (desk) this.reassignSeat(ch.id, desk);
+      }
+    }
+    // A leaver already walking re-routes to the (possibly moved) door.
+    for (const [id, scene] of this.scenes) {
+      if (scene.kind !== 'leave' || scene.phase !== 'walk') continue;
+      const ch = this.characters.get(id);
+      if (ch) this.routeToDoor(ch, scene);
+    }
+    // A lounge presence that arrived before the targets did.
+    for (const ch of [...this.characters.values()]) {
+      if (ch.presence === 'lounge' && !this.scenes.has(ch.id)) this.goToLounge(ch.id);
+    }
+    this.rebuildFurnitureInstances();
+  }
+
+  /** Whether the door currently shows its open variant. */
+  isDoorOpen(): boolean {
+    return this.doorOpen;
+  }
+
+  /** Spawn at the door tile (the door opens), walk to `seatId`, sit. Creates
+   *  the character when it does not exist yet; an existing one is moved back
+   *  to the door, so call it only for NEW derived agents (not on restore /
+   *  existingAgents). Without living targets it
+   *  falls back to the ordinary placement (matrix spawn at the seat). */
+  enterThroughDoor(id: number, seatId: string): void {
+    const existing = this.characters.get(id);
+    // A leaver, or one already raining out after removeAgent, stays gone.
+    if (existing && (this.isLeaving(id) || existing.matrixEffect === 'despawn')) return;
+    if (!this.livingTargets) {
+      if (!existing) this.addAgent(id, undefined, undefined, seatId);
+      else this.reassignSeat(id, seatId);
+      return;
+    }
+    if (!existing) this.addAgent(id, undefined, undefined, seatId, true);
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    if (this.scenes.has(id)) this.dropScene(ch);
+
+    // Move to the requested seat when it is free (or already ours).
+    if (seatId !== ch.seatId) {
+      const wanted = this.seats.get(seatId);
+      if (wanted && !wanted.assigned) {
+        if (ch.seatId) {
+          const old = this.seats.get(ch.seatId);
+          if (old) old.assigned = false;
+        }
+        wanted.assigned = true;
+        ch.seatId = seatId;
+      }
+    }
+
+    // Appear in the doorway: no matrix rain, a short fade-in instead.
+    const door = this.livingTargets.door;
+    ch.matrixEffect = null;
+    ch.matrixEffectTimer = 0;
+    ch.bubbleType = null;
+    this.placeAt(ch, door.col, door.row);
+    ch.dir = Direction.DOWN;
+    ch.state = CharacterState.IDLE;
+    ch.sceneAlpha = 0;
+
+    const scene: LifecycleScene = { kind: 'enter', phase: 'walk', timer: 0, loungeSeat: null };
+    const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+    if (!seat) {
+      // No seat anywhere: stand in the office like any seatless agent.
+      ch.scripted = false;
+      return;
+    }
+    this.scenes.set(id, scene);
+    ch.scripted = true;
+    const path = this.scenePath(ch, seat.seatCol, seat.seatRow, scene);
+    if (path.length > 0) {
+      this.startWalk(ch, path);
+    } else {
+      // Unreachable from the door: appear at the seat instead.
+      this.placeAt(ch, seat.seatCol, seat.seatRow);
+      this.arrive(ch, scene);
+    }
+  }
+
+  /** Stand up and walk to a free rest seat (or beside the lounge when all are
+   *  taken), then rest there. Keeps the desk. No-op without a lounge, while
+   *  leaving, or when already resting / on the way. */
+  goToLounge(id: number): void {
+    const ch = this.characters.get(id);
+    if (!ch || !this.livingTargets) return;
+    const current = this.scenes.get(id);
+    if (current?.kind === 'leave' || current?.kind === 'lounge') return;
+
+    let restSeat: string | null = null;
+    let anchor: Seat | undefined;
+    for (const uid of this.livingTargets.loungeSeats) {
+      const seat = this.seats.get(uid);
+      if (!seat) continue;
+      anchor ??= seat;
+      if (!seat.assigned) {
+        restSeat = uid;
+        break;
+      }
+    }
+    if (!anchor) return; // no rest seat exists in this layout
+
+    let target: { col: number; row: number } | null;
+    if (restSeat) {
+      const seat = this.seats.get(restSeat)!;
+      target = { col: seat.seatCol, row: seat.seatRow };
+    } else {
+      // Beside the lounge, avoiding tiles other resters are heading to and
+      // the door tile (standing there would hold the door open).
+      const taken = new Set<string>();
+      for (const [otherId, other] of this.scenes) {
+        if (other.kind !== 'lounge') continue;
+        const och = this.characters.get(otherId);
+        const last = och?.path[och.path.length - 1];
+        if (last) taken.add(`${last.col},${last.row}`);
+      }
+      const door = this.livingTargets.door;
+      taken.add(`${door.col},${door.row}`);
+      target = this.closestFreeWalkableTile(anchor.seatCol, anchor.seatRow, taken);
+    }
+    if (!target) return;
+
+    const scene: LifecycleScene = { kind: 'lounge', phase: 'walk', timer: 0, loungeSeat: restSeat };
+    const path = this.scenePath(ch, target.col, target.row, scene);
+    const already = ch.tileCol === target.col && ch.tileRow === target.row;
+    if (path.length === 0 && !already) return; // unreachable: stay at the desk
+
+    if (current) this.dropScene(ch);
+    if (restSeat) this.seats.get(restSeat)!.assigned = true;
+    this.scenes.set(id, scene);
+    ch.scripted = true;
+    if (path.length > 0) this.startWalk(ch, path);
+    else this.arrive(ch, scene);
+  }
+
+  /** Walk back to its own seat and hand it back to the FSM. Releases a rest
+   *  seat at once. Ignored while leaving. */
+  returnToDesk(id: number): void {
+    const ch = this.characters.get(id);
+    if (!ch || this.isLeaving(id)) return;
+    const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+    const previous = this.scenes.get(id);
+    if (!seat) {
+      if (previous) this.dropScene(ch);
+      return;
+    }
+    const scene: LifecycleScene = { kind: 'return', phase: 'walk', timer: 0, loungeSeat: null };
+    // Route while the rest seat is still ours (its tile is blocked for others).
+    const path = this.scenePath(ch, seat.seatCol, seat.seatRow, previous);
+    if (previous) this.dropScene(ch);
+    this.scenes.set(id, scene);
+    ch.scripted = true;
+    if (path.length > 0) {
+      this.startWalk(ch, path);
+    } else {
+      // Already there, or boxed in: sit at the desk either way — it has work.
+      this.placeAt(ch, seat.seatCol, seat.seatRow);
+      this.arrive(ch, scene);
+    }
+  }
+
+  /**
+   * Walk to the door, wave goodbye for GOODBYE_BUBBLE_MS, fade out through the
+   * (open) door, then drop the character and call `onGone` exactly once. Frees
+   * the desk and any rest seat immediately. From here on every other movement
+   * order is ignored. With no door or no path, it waves and fades where it
+   * stands. `onGone` runs at once for an unknown id.
+   */
+  leaveThroughDoor(id: number, onGone: () => void): void {
+    const ch = this.characters.get(id);
+    if (!ch) {
+      this.safeCall(onGone);
+      return;
+    }
+    const callbacks = this.goneCallbacks.get(id) ?? [];
+    callbacks.push(onGone);
+    this.goneCallbacks.set(id, callbacks);
+    // Already on its way out (door or matrix rain): just wait for it.
+    if (this.isLeaving(id) || ch.matrixEffect === 'despawn') return;
+
+    const previous = this.scenes.get(id);
+    const scene: LifecycleScene = { kind: 'leave', phase: 'walk', timer: 0, loungeSeat: null };
+    // Route before releasing seats: its own seat / rest seat tile is blocked.
+    const door = this.livingTargets?.door;
+    const path = door ? this.scenePath(ch, door.col, door.row, previous) : [];
+
+    if (previous) this.dropScene(ch);
+    if (ch.seatId) {
+      const seat = this.seats.get(ch.seatId);
+      if (seat) seat.assigned = false;
+      ch.seatId = null;
+    }
+    ch.presence = 'leaving';
+    ch.bubbleType = null;
+    ch.scripted = true;
+    this.scenes.set(id, scene);
+    if (path.length > 0) {
+      this.startWalk(ch, path);
+    } else {
+      // At the door already, or no way there: wave and fade in place.
+      this.placeAt(ch, ch.tileCol, ch.tileRow);
+      this.beginGoodbye(ch, scene);
+    }
+  }
+
+  /** Animate a presence change broadcast by the server. Leaving is final. */
+  setPresence(id: number, presence: LivingPresence): void {
+    const ch = this.characters.get(id);
+    if (!ch || this.isLeaving(id)) return;
+    ch.presence = presence;
+    switch (presence) {
+      case 'working':
+      case 'available':
+        if (this.scenes.get(id)?.kind === 'lounge') this.returnToDesk(id);
+        break;
+      case 'lounge':
+        this.goToLounge(id);
+        break;
+      case 'leaving':
+        this.leaveThroughDoor(id, () => {});
+        break;
+    }
+  }
+
+  private isLeaving(id: number): boolean {
+    return this.scenes.get(id)?.kind === 'leave';
+  }
+
+  /** Seats that may be handed out as desks (every seat but the rest seats). */
+  private deskSeats(): Map<string, Seat> {
+    if (this.loungeSeatSet.size === 0) return this.seats;
+    const out = new Map<string, Seat>();
+    for (const [uid, seat] of this.seats) {
+      if (!this.loungeSeatSet.has(uid)) out.set(uid, seat);
+    }
+    return out;
+  }
+
+  /** Path for a scene walk, with the character's own desk tile, the rest seat
+   *  its current scene holds, and the target seat (if the target is one)
+   *  unblocked for the query. */
+  private scenePath(
+    ch: Character,
+    col: number,
+    row: number,
+    scene: LifecycleScene | undefined,
+  ): Array<{ col: number; row: number }> {
+    const keys: string[] = [];
+    const own = this.ownSeatKey(ch);
+    if (own) keys.push(own);
+    if (scene?.loungeSeat) {
+      const s = this.seats.get(scene.loungeSeat);
+      if (s) keys.push(`${s.seatCol},${s.seatRow}`);
+    }
+    const targetSeat = this.getSeatAtTile(col, row);
+    if (targetSeat) keys.push(`${col},${row}`);
+    const removed = keys.filter((k) => this.blockedTiles.delete(k));
+    try {
+      return findPath(ch.tileCol, ch.tileRow, col, row, this.tileMap, this.blockedTiles);
+    } finally {
+      for (const k of removed) this.blockedTiles.add(k);
+    }
+  }
+
+  private placeAt(ch: Character, col: number, row: number): void {
+    ch.tileCol = col;
+    ch.tileRow = row;
+    ch.x = col * TILE_SIZE + TILE_SIZE / 2;
+    ch.y = row * TILE_SIZE + TILE_SIZE / 2;
+    ch.path = [];
+    ch.moveProgress = 0;
+  }
+
+  private startWalk(ch: Character, path: Array<{ col: number; row: number }>): void {
+    ch.path = path;
+    ch.moveProgress = 0;
+    ch.state = CharacterState.WALK;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+  }
+
+  /** Sit on a seat tile, facing the seat's direction. */
+  private sitOn(ch: Character, seat: Seat): void {
+    this.placeAt(ch, seat.seatCol, seat.seatRow);
+    ch.state = CharacterState.TYPE;
+    ch.dir = seat.facingDir;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+  }
+
+  /** End a scene without finishing it: release its rest seat, hand the
+   *  character back to the FSM. Never used on a leaver. */
+  private dropScene(ch: Character): void {
+    const scene = this.scenes.get(ch.id);
+    if (!scene) return;
+    this.scenes.delete(ch.id);
+    ch.scripted = false;
+    if (scene.loungeSeat) {
+      const seat = this.seats.get(scene.loungeSeat);
+      if (seat) seat.assigned = false;
+      this.offerRestSeat();
+    }
+  }
+
+  /** A rest seat was freed: the first rester standing beside the lounge
+   *  (every seat was taken when it arrived) goes to sit down. */
+  private offerRestSeat(): void {
+    for (const [id, scene] of this.scenes) {
+      if (scene.kind !== 'lounge' || scene.loungeSeat) continue;
+      const ch = this.characters.get(id);
+      if (!ch) continue;
+      this.dropScene(ch); // holds no rest seat: no recursion
+      this.goToLounge(id);
+      return;
+    }
+  }
+
+  /** The walk of a scene ended: what happens at its destination. */
+  private arrive(ch: Character, scene: LifecycleScene): void {
+    switch (scene.kind) {
+      case 'enter':
+      case 'return': {
+        const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+        if (seat) this.sitOn(ch, seat);
+        this.scenes.delete(ch.id);
+        ch.scripted = false;
+        // Same settle-in rule as sendToSeat: an idle agent sits a moment
+        // before the FSM lets it wander.
+        ch.seatTimer = ch.isActive
+          ? 0
+          : INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC;
+        return;
+      }
+      case 'lounge': {
+        scene.phase = 'rest';
+        const seat = scene.loungeSeat ? this.seats.get(scene.loungeSeat) : undefined;
+        if (seat) {
+          this.sitOn(ch, seat); // sits — "plays" when the seat faces the arcade
+        } else {
+          ch.state = CharacterState.IDLE;
+          ch.frame = 0;
+        }
+        return;
+      }
+      case 'leave':
+        this.beginGoodbye(ch, scene);
+        return;
+    }
+  }
+
+  private beginGoodbye(ch: Character, scene: LifecycleScene): void {
+    scene.phase = 'goodbye';
+    scene.timer = GOODBYE_BUBBLE_MS / 1000;
+    ch.state = CharacterState.IDLE;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+    ch.dir = Direction.DOWN; // wave at the room
+    ch.bubbleType = 'goodbye';
+    ch.bubbleTimer = scene.timer;
+  }
+
+  private beginExit(ch: Character, scene: LifecycleScene): void {
+    scene.phase = 'exit';
+    scene.timer = MATRIX_EFFECT_DURATION_SEC; // same beat as a root's despawn
+    ch.path = [];
+    ch.moveProgress = 0;
+    ch.state = CharacterState.IDLE;
+    ch.frame = 0;
+    ch.bubbleType = null;
+    ch.bubbleTimer = 0;
+    const door = this.livingTargets?.door;
+    if (door && ch.tileCol === door.col && ch.tileRow === door.row) {
+      ch.dir = Direction.UP; // turn and step through the door
+    }
+    ch.sceneAlpha = 1;
+  }
+
+  /** Advance one scene by a frame. Returns true when the character is gone. */
+  private tickScene(ch: Character, scene: LifecycleScene, dt: number): boolean {
+    switch (scene.phase) {
+      case 'walk':
+        if (ch.state !== CharacterState.WALK) this.arrive(ch, scene);
+        return false;
+      case 'rest':
+        return false;
+      case 'goodbye':
+        scene.timer -= dt;
+        ch.bubbleTimer = Math.max(0, scene.timer);
+        if (scene.timer <= 0) this.beginExit(ch, scene);
+        return false;
+      case 'exit':
+        scene.timer -= dt;
+        ch.sceneAlpha = Math.max(0, scene.timer / MATRIX_EFFECT_DURATION_SEC);
+        return scene.timer <= 0;
+    }
+  }
+
+  /** Point a walking leaver at the door (again); wave in place if unreachable. */
+  private routeToDoor(ch: Character, scene: LifecycleScene): void {
+    const door = this.livingTargets?.door;
+    const path = door ? this.scenePath(ch, door.col, door.row, scene) : [];
+    if (path.length > 0) {
+      this.startWalk(ch, path);
+    } else {
+      this.placeAt(ch, ch.tileCol, ch.tileRow);
+      this.beginGoodbye(ch, scene);
+    }
+  }
+
+  /** After a layout rebuild: every walking scene re-routes from where its
+   *  character stands now; a rest that lost its seat goes looking again. */
+  private replanScenes(): void {
+    for (const [id, scene] of [...this.scenes]) {
+      const ch = this.characters.get(id);
+      if (!ch) {
+        this.scenes.delete(id);
+        continue;
+      }
+      switch (scene.kind) {
+        case 'leave':
+          if (scene.phase === 'walk') this.routeToDoor(ch, scene);
+          break;
+        case 'enter':
+        case 'return': {
+          const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+          if (!seat) {
+            this.dropScene(ch);
+            break;
+          }
+          const path = this.scenePath(ch, seat.seatCol, seat.seatRow, scene);
+          if (path.length > 0) {
+            this.startWalk(ch, path);
+          } else {
+            this.placeAt(ch, seat.seatCol, seat.seatRow);
+            this.arrive(ch, scene);
+          }
+          break;
+        }
+        case 'lounge': {
+          const seat = scene.loungeSeat ? this.seats.get(scene.loungeSeat) : undefined;
+          if (seat) {
+            if (ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
+              this.sitOn(ch, seat);
+              scene.phase = 'rest';
+              break;
+            }
+            const path = this.scenePath(ch, seat.seatCol, seat.seatRow, scene);
+            if (path.length > 0) {
+              scene.phase = 'walk';
+              this.startWalk(ch, path);
+              break;
+            }
+          } else if (scene.phase === 'rest' && !scene.loungeSeat) {
+            break; // standing beside the lounge: stays put
+          }
+          // Lost its rest seat (or its way there): look for another.
+          this.dropScene(ch);
+          this.goToLounge(id);
+          break;
+        }
+      }
+    }
+  }
+
+  /** The door is open while any character stands on its tile, and for
+   *  DOOR_OPEN_HOLD_MS after the tile is vacated. */
+  private updateDoor(dt: number): void {
+    const door = this.livingTargets?.door;
+    let occupied = false;
+    if (door) {
+      for (const ch of this.characters.values()) {
+        if (ch.tileCol === door.col && ch.tileRow === door.row) {
+          occupied = true;
+          break;
+        }
+      }
+    }
+    if (occupied) this.doorHoldTimer = DOOR_OPEN_HOLD_MS / 1000;
+    else this.doorHoldTimer = Math.max(0, this.doorHoldTimer - dt);
+    const open = occupied || this.doorHoldTimer > 0;
+    if (open !== this.doorOpen) {
+      this.doorOpen = open;
+      this.rebuildFurnitureInstances();
+    }
+  }
+
+  /** A character left the map: forget its scene, selection, and tell whoever
+   *  waited on its departure. */
+  private finishGone(id: number): void {
+    this.scenes.delete(id);
+    if (this.selectedAgentId === id) this.selectedAgentId = null;
+    if (this.cameraFollowId === id) this.cameraFollowId = null;
+    if (this.hoveredAgentId === id) this.hoveredAgentId = null;
+    const callbacks = this.goneCallbacks.get(id);
+    this.goneCallbacks.delete(id);
+    for (const cb of callbacks ?? []) this.safeCall(cb);
+  }
+
+  private safeCall(cb: () => void): void {
+    try {
+      cb();
+    } catch (err) {
+      console.error('[Webview] living-office onGone callback failed:', err);
     }
   }
 
@@ -1114,6 +1789,17 @@ export class OfficeState {
         updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
       );
 
+      // Living-office scene (enter / lounge / return / leave) and door fade-in.
+      const scene = this.scenes.get(ch.id);
+      if (scene && this.tickScene(ch, scene, dt)) {
+        toDelete.push(ch.id);
+        continue;
+      }
+      if (ch.sceneAlpha !== undefined && scene?.phase !== 'exit') {
+        ch.sceneAlpha += dt / MATRIX_EFFECT_DURATION_SEC;
+        if (ch.sceneAlpha >= 1) ch.sceneAlpha = undefined;
+      }
+
       // Tick bubble timer for waiting bubbles
       if (ch.bubbleType === 'waiting') {
         ch.bubbleTimer -= dt;
@@ -1123,10 +1809,13 @@ export class OfficeState {
         }
       }
     }
-    // Remove characters that finished despawn
+    // Remove characters that finished despawn (matrix rain or door fade)
     for (const id of toDelete) {
       this.characters.delete(id);
+      this.finishGone(id);
     }
+
+    this.updateDoor(dt);
 
     // ── Pet FSM ────────────────────────────────────────────────
     for (const pet of this.pets) {
@@ -1153,7 +1842,7 @@ export class OfficeState {
   > {
     const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {};
     for (const ch of this.characters.values()) {
-      if (ch.isSubagent) continue;
+      if (ch.isSubagent || this.isLeaving(ch.id)) continue;
       seats[ch.id] = { palette: ch.palette, hueShift: ch.hueShift, seatId: ch.seatId };
     }
     return seats;
@@ -1174,8 +1863,9 @@ export class OfficeState {
   getCharacterAt(worldX: number, worldY: number): number | null {
     const chars = Array.from(this.characters.values()).sort((a, b) => b.y - a.y);
     for (const ch of chars) {
-      // Skip characters that are despawning
+      // Skip characters that are despawning or fading out through the door
       if (ch.matrixEffect === 'despawn') continue;
+      if (this.scenes.get(ch.id)?.phase === 'exit') continue;
       // Character sprite is 16x24, anchored bottom-center
       // Apply sitting offset to match visual position
       const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;

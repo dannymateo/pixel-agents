@@ -21,6 +21,11 @@ with its `tool_result` and cannot be resumed.
 - **Finishing ≠ leaving.** `completed`/`failed` make the agent **available**: it
   stays at its desk. After `IDLE_TO_LOUNGE_MS` (30 min by default, a user setting)
   without activity it walks to the **lounge**; any new activity walks it back.
+- **Unused rest ends too.** An agent that rests in the lounge for
+  `LOUNGE_TO_LEAVE_MS` (60 min by default, a user setting) without being resumed
+  says goodbye and leaves: leads rarely `TaskStop` a finished agent, and without
+  this a long session's office grows forever. On adoption only agents finished
+  within both windows come back, placed where their real finish time puts them.
 - **Leaving needs a real signal**: `killed`/`stopped`, a parent's `TaskStop` for
   its task id, the user closing it, its foreground spawn's result, or its root
   session ending (the subtree leaves leaves-first, staggered). A leaving agent

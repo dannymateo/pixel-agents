@@ -384,6 +384,8 @@ export function processTranscriptLine(
     } else if (record.type === 'progress') {
       processProgressRecord(agentId, record, agents, waitingTimers, permissionTimers);
     } else if (record.type === 'user') {
+      // A notice delivered while this agent was idle is its own user turn.
+      if (isTaskNotice(record) !== undefined) applyTaskNotice(agent, agentId, record, agents);
       const content = record.message?.content ?? record.content;
       if (Array.isArray(content)) {
         const blocks = content as Array<{
@@ -603,39 +605,7 @@ export function processTranscriptLine(
       // spawn (isTaskNotice): a queued user prompt is written as the same
       // record and merely quoting the tag must not end a live background
       // agent or workflow.
-      const content = isTaskNotice(record);
-      if (content) {
-        const completedToolId = completedSpawnToolId(agent, agentId, content, agents);
-        if (completedToolId !== undefined && agent.backgroundAgentToolIds.has(completedToolId)) {
-          // Finishing is not leaving (docs/adr/0003): a completed (or failed)
-          // agent stays, available — its parent may resume it and the same
-          // task notifies again. Only killed/stopped end it, and a workflow's
-          // notice ends its whole run.
-          const status = hookProvider?.team?.completionStatus?.(content);
-          if (
-            status === 'killed' ||
-            status === 'stopped' ||
-            isWorkflowSpawn(agent, agentId, completedToolId, agents)
-          ) {
-            console.log(
-              `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
-            );
-            endBackgroundSpawn(agent, agentId, completedToolId, agents);
-          } else {
-            console.log(
-              `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
-            );
-            // The parent no longer runs it as a tool; the spawn itself stays
-            // live (backgroundAgentToolIds) so it can be resumed and the tree
-            // gate keeps its agent.
-            const wasRunning = agent.activeToolIds.has(completedToolId);
-            finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
-            markSpawnFinished(agent, completedToolId, recordTime(record));
-            spawnFinishedCallback?.(agentId, completedToolId);
-            releaseOldestFinished(agent, agentId, agents);
-          }
-        }
-      }
+      applyTaskNotice(agent, agentId, record, agents);
     } else if (record.type === 'system' && record.subtype === 'turn_duration') {
       cancelWaitingTimer(agentId, waitingTimers);
       cancelPermissionTimer(agentId, permissionTimers);
@@ -1287,11 +1257,26 @@ function isTaskNotice(record: Record<string, unknown>): string | undefined {
     if (att && att.type === 'queued_command' && att.commandMode === 'task-notification') {
       content = att.prompt;
     }
+  } else if (record.type === 'user') {
+    // Third shape: delivered while the parent was idle, the notice is its own
+    // user turn behind the CLI's system-notification banner (no attachment).
+    const message = record.message as { content?: unknown } | undefined;
+    const text = message?.content;
+    if (typeof text === 'string' && text.startsWith(SYSTEM_NOTIFICATION_BANNER)) {
+      const start = text.indexOf('<task-notification>');
+      const end = text.indexOf('</task-notification>', start);
+      if (start >= 0 && end > start) {
+        content = text.slice(start, end + '</task-notification>'.length);
+      }
+    }
   }
   return typeof content === 'string' && content.startsWith('<task-notification>')
     ? content
     : undefined;
 }
+
+/** How the CLI opens a notice it delivers as a user turn. */
+const SYSTEM_NOTIFICATION_BANNER = '[SYSTEM NOTIFICATION - NOT USER INPUT]';
 
 /**
  * Seed `agentId`'s live spawns from `lines` (its history, oldest first, up to
@@ -1451,28 +1436,28 @@ export function seedSpawnsFromHistory(
       }
     } else if (record.type === 'system' && record.subtype === 'turn_duration') {
       dropForeground();
-    } else {
-      const notice = isTaskNotice(record);
-      if (notice === undefined) continue;
+    }
+    const notice = isTaskNotice(record);
+    if (notice !== undefined) {
       const id = completedSpawnToolId(agent, agentId, notice, agents, (t) => {
         const s = live.get(t);
         return s ? s.kind !== 'foreground' : persisted.has(t);
       });
-      if (id === undefined) continue;
-      const spawn = live.get(id);
-      if (spawn?.kind === 'foreground') continue;
-      // Finishing is not leaving (docs/adr/0003): a completed or failed agent
-      // stays alive, available; killed/stopped end it, and so does any notice
-      // of a workflow run.
-      const status = team?.completionStatus?.(notice);
-      if (status === 'killed' || status === 'stopped' || spawn?.kind === 'workflow') {
-        ended(id);
-      } else if (spawn?.kind === 'background') {
-        spawn.finished = true;
-        spawn.finishedAt = recordTime(record);
-      } else if (!spawn && persisted.has(id)) {
-        // Launched before the window: still live, and finished.
-        finishedPersisted.set(id, recordTime(record));
+      const spawn = id === undefined ? undefined : live.get(id);
+      if (id !== undefined && spawn?.kind !== 'foreground') {
+        // Finishing is not leaving (docs/adr/0003): a completed or failed agent
+        // stays alive, available; killed/stopped end it, and so does any notice
+        // of a workflow run.
+        const status = team?.completionStatus?.(notice);
+        if (status === 'killed' || status === 'stopped' || spawn?.kind === 'workflow') {
+          ended(id);
+        } else if (spawn?.kind === 'background') {
+          spawn.finished = true;
+          spawn.finishedAt = recordTime(record);
+        } else if (!spawn && persisted.has(id)) {
+          // Launched before the window: still live, and finished.
+          finishedPersisted.set(id, recordTime(record));
+        }
       }
     }
   }
@@ -1577,6 +1562,49 @@ export function seedSpawnsFromHistory(
     });
   }
   return seeded;
+}
+
+/** Apply one CLI completion notice seen in `agent`'s transcript (any of the
+ *  shapes isTaskNotice accepts). */
+function applyTaskNotice(
+  agent: AgentState,
+  agentId: number,
+  record: Record<string, unknown>,
+  agents: AgentStateStore,
+): void {
+  const content = isTaskNotice(record);
+  if (!content) return;
+  const completedToolId = completedSpawnToolId(agent, agentId, content, agents);
+
+  if (completedToolId !== undefined && agent.backgroundAgentToolIds.has(completedToolId)) {
+    // Finishing is not leaving (docs/adr/0003): a completed (or failed)
+    // agent stays, available — its parent may resume it and the same
+    // task notifies again. Only killed/stopped end it, and a workflow's
+    // notice ends its whole run.
+    const status = hookProvider?.team?.completionStatus?.(content);
+    if (
+      status === 'killed' ||
+      status === 'stopped' ||
+      isWorkflowSpawn(agent, agentId, completedToolId, agents)
+    ) {
+      console.log(
+        `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
+      );
+      endBackgroundSpawn(agent, agentId, completedToolId, agents);
+    } else {
+      console.log(
+        `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
+      );
+      // The parent no longer runs it as a tool; the spawn itself stays
+      // live (backgroundAgentToolIds) so it can be resumed and the tree
+      // gate keeps its agent.
+      const wasRunning = agent.activeToolIds.has(completedToolId);
+      finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
+      markSpawnFinished(agent, completedToolId, recordTime(record));
+      spawnFinishedCallback?.(agentId, completedToolId);
+      releaseOldestFinished(agent, agentId, agents);
+    }
+  }
 }
 
 /** Check if a tool_result block indicates an async/background agent launch */

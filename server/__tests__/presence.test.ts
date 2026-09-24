@@ -606,6 +606,31 @@ describe('living office lifecycle (runtime)', () => {
     expect(byKey('aaa').backgroundAgentToolIds.has('toolu_A')).toBe(true);
   });
 
+  it('a notice delivered as a system-notification user turn (parent was idle) counts too', () => {
+    nestedBackgroundChild();
+    const bbb = byKey('bbb');
+    appendLine(
+      'aaa',
+      userPrompt(
+        '[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\n\n<task-notification>\n<task-id>bbb</task-id>\n<status>completed</status>\n<summary>Agent "x" finished</summary>\n</task-notification>',
+      ),
+    );
+    expect(bbb.presence).toBe('available');
+  });
+
+  it('the same notice delivered twice (queue-operation + user turn) is harmless', () => {
+    twoBackgroundChildren();
+    const aaa = byKey('aaa');
+    leadLine(notice({ taskId: 'aaa', status: 'killed' }));
+    leadLine(
+      userPrompt(
+        '[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>\n<task-id>aaa</task-id>\n<status>killed</status>\n</task-notification>',
+      ),
+    );
+    expect(aaa.presence).toBe('leaving');
+    expect(presenceMessages(messages, aaa.id)).toEqual([`${aaa.id}:leaving`]);
+  });
+
   it('a killed notice inside a sub-agent transcript walks the child out', () => {
     nestedBackgroundChild();
     const bbb = byKey('bbb');

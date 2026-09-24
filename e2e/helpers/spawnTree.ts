@@ -272,3 +272,73 @@ export function subagentToolHook(
   if (event === 'PostToolUse') payload['tool_response'] = { success: true };
   return payload;
 }
+
+// ── Living office (docs/adr/0003) ────────────────────────────────────────────
+//
+// Team modules, the door and presence are canvas-only, so the specs read them
+// through the webview test hooks — the same rationale as getAreas/getPets.
+
+interface LivingHooksWindow extends Window {
+  __pixelAgentsTestHooks?: {
+    getCharacters?: () => Array<{
+      id: number;
+      matrixEffect: 'spawn' | 'despawn' | null;
+      bubbleType: string | null;
+    }>;
+    addAgentLog?: Array<{
+      id: number;
+      skipSpawnEffect: boolean | undefined;
+      matrixEffectAtCreation: 'spawn' | 'despawn' | null;
+    }>;
+  };
+}
+
+/** Ids of every character on the office floor (agents only, walking out included). */
+export async function readCharacterIds(frame: OverlaySurface): Promise<number[]> {
+  return frame.evaluate(() =>
+    ((window as LivingHooksWindow).__pixelAgentsTestHooks?.getCharacters?.() ?? []).map(
+      (c) => c.id,
+    ),
+  );
+}
+
+/** The bubble a character shows right now ('goodbye' while it waves at the door). */
+export async function readCharacterBubble(
+  frame: OverlaySurface,
+  id: number,
+): Promise<string | null | undefined> {
+  return frame.evaluate(
+    (agentId) =>
+      (window as LivingHooksWindow).__pixelAgentsTestHooks
+        ?.getCharacters?.()
+        .find((c) => c.id === agentId)?.bubbleType,
+    id,
+  );
+}
+
+/** How the office created `id`: a door entrance has no matrix rain. */
+export async function readCreation(
+  frame: OverlaySurface,
+  id: number,
+): Promise<{ skipSpawnEffect: boolean | undefined; matrixEffectAtCreation: string | null } | null> {
+  return frame.evaluate(
+    (agentId) =>
+      (window as LivingHooksWindow).__pixelAgentsTestHooks?.addAgentLog?.find(
+        (e) => e.id === agentId,
+      ) ?? null,
+    id,
+  );
+}
+
+/** The `<task-notification>` the CLI queues when a background spawn stops. */
+export function buildTaskNotificationRecord(
+  taskId: string,
+  toolUseId: string,
+  status: 'completed' | 'failed' | 'killed' | 'stopped',
+): Record<string, unknown> {
+  return {
+    type: 'queue-operation',
+    operation: 'enqueue',
+    content: `<task-notification>\n<task-id>${taskId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n<summary>Agent "${taskId}" ${status}</summary>\n</task-notification>`,
+  };
+}

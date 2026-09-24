@@ -162,7 +162,7 @@ test.describe('Hooks OFF / spawn tree', () => {
     narrator.check('still only the lead');
   });
 
-  test('spawn tree background spawn without SubagentStart materializes from a late sidecar and leaves on completion @area:teams', async ({
+  test('spawn tree background spawn without SubagentStart materializes from a late sidecar and leaves when stopped @area:teams', async ({
     pixelAgents,
   }) => {
     const { frame, window, tmpHome, mockLogFile, narrator } = pixelAgents;
@@ -173,7 +173,7 @@ test.describe('Hooks OFF / spawn tree', () => {
     await setSettings(frame, { hooksEnabled: false });
 
     narrator.step(
-      'arranging: background spawn, async result, sidecar lands 3 s later, completion at t+20s',
+      'arranging: background spawn, async result, sidecar lands 3 s later, killed at t+20s',
     );
     let scenario = withSubagentTranscript(
       claudeScenario('spawn tree background spawn late sidecar'),
@@ -208,7 +208,8 @@ test.describe('Hooks OFF / spawn tree', () => {
         session: subagentAlias(explorer.key),
       })
       .at(20_000)
-      .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId))
+      // Killed, not completed: a completed spawn stays available (docs/adr/0003).
+      .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId, 'killed'))
       .holdOpenFor(12_000);
     await arrangeNextClaudeInvocation(tmpHome, scenario.build());
 
@@ -223,15 +224,15 @@ test.describe('Hooks OFF / spawn tree', () => {
     await expectOverlayCount(panelFrame, 2);
     narrator.check('"Explorar repo" is a character of its own, driven by its own transcript');
 
-    narrator.step('the completion queue-operation lands — the derived agent leaves');
+    narrator.step('the killed notification lands — the derived agent walks out');
     await expectDerivedAgentGone(panelFrame, explorer.label, CASCADE_TIMEOUT_MS);
     await expectAgentCharacterCount(panelFrame, 1);
     await expectOverlayCount(panelFrame, 1);
     narrator.check('back to the lead alone');
 
     // Stability check: the sidecar is still on disk; a gate that kept the
-    // completed spawn live would re-materialize it on the next scan.
-    narrator.step('holding — the completed spawn must not come back from its sidecar');
+    // stopped spawn live would re-materialize it on the next scan.
+    narrator.step('holding — the stopped spawn must not come back from its sidecar');
     await panelFrame.waitForTimeout(STABILITY_WINDOW_MS);
     await expectAgentCharacterCount(panelFrame, 1, 1_000);
     await expectOverlayCount(panelFrame, 1, 1_000);

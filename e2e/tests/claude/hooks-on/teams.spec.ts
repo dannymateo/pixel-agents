@@ -298,7 +298,7 @@ test.describe('Hooks ON / teams', () => {
     const spawnToolId = 'toolu-bg-spawn';
 
     narrator.step(
-      'arranging the run: unnamed async spawn with a sidecar, Stop mid-run, then completion',
+      'arranging the run: unnamed async spawn with a sidecar, Stop mid-run, then killed',
     );
     await arrangeNextClaudeInvocation(
       tmpHome,
@@ -329,7 +329,7 @@ test.describe('Hooks ON / teams', () => {
         .at(7_000)
         .emitHook(stop('{{sessionId}}') as Record<string, unknown>)
         .at(14_000)
-        .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId))
+        .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId, 'killed'))
         .holdOpenFor(18_000)
         .build(),
     );
@@ -350,9 +350,10 @@ test.describe('Hooks ON / teams', () => {
     await expectOverlayCount(panelFrame, 2);
     await expectOverlayVisibleWithTexts(panelFrame, ['Say hello']);
     narrator.check('still two characters after Stop — the sub survives in place');
-    narrator.step('waiting for the completion queue-operation to despawn it');
+    // Killed, not completed: a completed spawn stays available (docs/adr/0003).
+    narrator.step('waiting for the killed notification to despawn it');
     await expectOverlayCount(panelFrame, 1);
-    narrator.check('the sub-agent despawned on completion — the lead remains');
+    narrator.check('the sub-agent despawned once killed — the lead remains');
   });
 
   test('named background spawn becomes a teammate and badges the spawner LEAD @area:teams', async ({
@@ -366,7 +367,7 @@ test.describe('Hooks ON / teams', () => {
     // derived-team LEAD badge with no CLI team registry anywhere.
     const spawnToolId = 'toolu-bg-named';
 
-    narrator.step('arranging the run: NAMED async spawn with a sidecar, then completion');
+    narrator.step('arranging the run: NAMED async spawn with a sidecar, then killed');
     await arrangeNextClaudeInvocation(
       tmpHome,
       claudeScenario('named background spawn becomes a teammate')
@@ -396,7 +397,7 @@ test.describe('Hooks ON / teams', () => {
           { session: 'bg-agent' },
         )
         .at(12_000)
-        .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId))
+        .appendJsonl(buildBackgroundAgentDoneRecord(spawnToolId, 'killed'))
         .holdOpenFor(16_000)
         .build(),
     );
@@ -414,9 +415,10 @@ test.describe('Hooks ON / teams', () => {
     narrator.step("waiting for the teammate's own transcript to animate it");
     await expectOverlayVisibleWithTexts(panelFrame, ['ghost-writer', 'Searching the web']);
     narrator.check('"Searching the web" on the teammate — its own transcript drives it');
-    narrator.step('waiting for the completion queue-operation to despawn it');
+    // Killed, not completed: a completed spawn stays available (docs/adr/0003).
+    narrator.step('waiting for the killed notification to despawn it');
     await expectOverlayCount(panelFrame, 1);
-    narrator.check('the teammate despawned on completion — the LEAD remains');
+    narrator.check('the teammate left once killed — the LEAD remains');
   });
 
   test('external session lead with inline teammate routes tools to teammate @area:teams', async ({

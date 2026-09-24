@@ -145,11 +145,16 @@ export function buildAsyncAgentLaunchResultRecord(toolUseId: string): Record<str
 /** The CLI's completion notice for a background spawn, in its real shape: a
  *  `<task-notification>` envelope (only that envelope completes a spawn — a
  *  queued user prompt quoting the tag must not). */
-export function buildBackgroundAgentDoneRecord(toolUseId: string): Record<string, unknown> {
+export function buildBackgroundAgentDoneRecord(
+  toolUseId: string,
+  status: 'completed' | 'failed' | 'killed' | 'stopped' = 'completed',
+): Record<string, unknown> {
+  // `completed`/`failed` leave the spawn available (resumable); only
+  // `killed`/`stopped` end it (docs/adr/0003).
   return {
     type: 'queue-operation',
     operation: 'enqueue',
-    content: `<task-notification>\n<task-id>e2e-task</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n</task-notification>`,
+    content: `<task-notification>\n<task-id>e2e-task</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n</task-notification>`,
   };
 }
 

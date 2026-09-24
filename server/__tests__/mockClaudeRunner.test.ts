@@ -10,8 +10,12 @@ let tmpBase: string;
 let tmpHome: string;
 let workspaceDir: string;
 
+/** A shell command line the way the real installer writes one: paths wrapped in
+ *  plain double quotes, NOT JSON-escaped. JSON.stringify doubles every Windows
+ *  backslash, which the runner's path normalization turns into `//`, so the
+ *  Pixel Agents hook was never recognized as ours on Windows. */
 function makeNodeCommand(scriptPath: string): string {
-  return `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  return `"${process.execPath}" "${scriptPath}"`;
 }
 
 function writeHookScript(scriptPath: string, outputPath: string): void {
@@ -54,6 +58,7 @@ function runMockClaude(
       env: {
         ...process.env,
         HOME: tmpHome,
+        USERPROFILE: tmpHome,
       },
       stdio: ['ignore', 'ignore', 'pipe'],
     });

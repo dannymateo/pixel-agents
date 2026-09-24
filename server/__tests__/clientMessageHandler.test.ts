@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentStateStore } from '../src/agentStateStore.js';
 import {
@@ -13,6 +13,25 @@ import { getHooksEnabled, readConfig, setHooksEnabled } from '../src/configPersi
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import { CLAUDE_HOOK_EVENTS } from '../src/providers/hook/claude/constants.js';
 import type { AgentState } from '../src/types.js';
+
+// Redirect os.homedir() to a per-test temp dir. Overriding process.env.HOME is
+// not portable: on Windows os.homedir() reads USERPROFILE, so a HOME-only
+// override read and wrote the developer's REAL ~/.pixel-agents/config.json and
+// ~/.claude/settings.json. The mock throws while no test home is set, so a
+// call can't fall back to a CWD-relative path; after a test it keeps pointing
+// at that test's (deleted) temp dir, so a late async write lands in
+// os.tmpdir(). Both the named export and `default` are patched, so
+// `import * as os`, `import { homedir }` and `import os from 'os'` all see it
+// (a createRequire('os') in src would still bypass it — src doesn't do that).
+const testHome = vi.hoisted(() => ({ dir: '' }));
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  const homedir = (): string => {
+    if (!testHome.dir) throw new Error('os.homedir() called before a test home was set');
+    return testHome.dir;
+  };
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 /** Let the setHooksEnabled dispatch's async chain (side effect →
  *  areHooksInstalled → persist → send) run to completion. */
@@ -52,12 +71,11 @@ function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
 /**
  * These tests exercise the area-related dispatch branches and the load-order
  * invariant in handleWebviewReady. They isolate the on-disk config + state
- * files by redirecting $HOME to a fresh temp dir for every test, so the
+ * files by redirecting os.homedir() to a fresh temp dir for every test, so the
  * standalone adapter writes its config.json there.
  */
 describe('clientMessageHandler: areas + carpet wire ordering', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let store: AgentStateStore;
   let sent: Array<Record<string, unknown>>;
   let ctx: ClientMessageContext;
@@ -68,8 +86,7 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-test-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    testHome.dir = tempHome;
 
     store = new AgentStateStore();
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
@@ -78,11 +95,6 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     store.dispose();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
@@ -424,7 +436,6 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
 
 describe('clientMessageHandler: saveAgentSeats palette sync', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let store: AgentStateStore;
   let sent: Array<Record<string, unknown>>;
   let ctx: ClientMessageContext;
@@ -435,8 +446,7 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-seats-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    testHome.dir = tempHome;
 
     store = new AgentStateStore();
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
@@ -445,11 +455,6 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     store.dispose();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });

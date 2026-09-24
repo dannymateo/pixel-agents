@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { type ClientMessageContext, handleClientMessage } from '../src/clientMessageHandler.js';
@@ -18,6 +18,25 @@ import {
 } from '../src/providers/hook/claude/consentCopy.js';
 import { CLAUDE_HOOK_EVENTS } from '../src/providers/hook/claude/constants.js';
 
+// Redirect os.homedir() to a per-test temp dir. Overriding process.env.HOME is
+// not portable: on Windows os.homedir() reads USERPROFILE, so a HOME-only
+// override read and wrote the developer's REAL ~/.pixel-agents/config.json and
+// ~/.claude/settings.json. The mock throws while no test home is set, so a
+// call can't fall back to a CWD-relative path; after a test it keeps pointing
+// at that test's (deleted) temp dir, so a late async write lands in
+// os.tmpdir(). Both the named export and `default` are patched, so
+// `import * as os`, `import { homedir }` and `import os from 'os'` all see it
+// (a createRequire('os') in src would still bypass it — src doesn't do that).
+const testHome = vi.hoisted(() => ({ dir: '' }));
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  const homedir = (): string => {
+    if (!testHome.dir) throw new Error('os.homedir() called before a test home was set');
+    return testHome.dir;
+  };
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
+
 /** Let a dispatch's async chain (side effect → areHooksInstalled → persist →
  *  send) run to completion. */
 function settle(): Promise<void> {
@@ -32,7 +51,6 @@ function settle(): Promise<void> {
  */
 describe('clientMessageHandler: hooks consent flow', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let store: AgentStateStore;
   let sent: Array<Record<string, unknown>>;
   let ctx: ClientMessageContext;
@@ -75,8 +93,7 @@ describe('clientMessageHandler: hooks consent flow', () => {
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-consent-flow-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    testHome.dir = tempHome;
 
     store = new AgentStateStore();
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
@@ -85,11 +102,6 @@ describe('clientMessageHandler: hooks consent flow', () => {
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     store.dispose();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });

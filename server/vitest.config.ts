@@ -7,7 +7,11 @@ export default defineConfig({
     globals: true,
     testTimeout: 10_000,
     include: ['__tests__/**/*.test.ts'],
-    setupFiles: ['allure-vitest/setup'],
+    // Point HOME + USERPROFILE at a throwaway dir for the whole run (inherited
+    // by workers and spawned children) and refuse to run if os.homedir() still
+    // resolves to the developer's real home. See isolatedHome.globalSetup.ts.
+    globalSetup: ['__tests__/isolatedHome.globalSetup.ts'],
+    setupFiles: ['__tests__/isolatedHome.setup.ts', 'allure-vitest/setup'],
     reporters: [
       'default',
       [

@@ -49,10 +49,17 @@ async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.exitCode === null) child.kill('SIGKILL');
 }
 
-/** Run the real bundled CLI as a subprocess, returns exit code + output. */
+/** Run the real bundled CLI as a subprocess, returns exit code + output.
+ *  The child gets an isolated, throwaway home (HOME for POSIX, USERPROFILE for
+ *  Windows' os.homedir()): these runs are meant to exit on argument errors, but
+ *  a parseArgs regression would boot the full server — which installs hooks into
+ *  ~/.claude/settings.json and overwrites ~/.pixel-agents/server.json — so it
+ *  must never inherit the developer's real home. */
 function runCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cli-args-home-'));
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
     const child = spawn('node', [CLI_BUNDLE, ...args], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 5000,
     });
@@ -61,7 +68,7 @@ function runCli(args: string[]): Promise<{ code: number | null; stdout: string; 
     child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
     child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
     child.on('close', (code) => resolve({ code, stdout, stderr }));
-  });
+  }).finally(() => fs.rmSync(home, { recursive: true, force: true }));
 }
 
 describe('parseArgs', () => {
@@ -416,12 +423,33 @@ describe('dist/cli.js entry-point guard', () => {
         expect(fs.statSync(installedHook).mode & 0o100).toBeTruthy();
       }
 
+      // Events whose parsed hook commands run the installed script. Compare the
+      // parsed command strings, not JSON.stringify(settings): serializing doubles
+      // every Windows backslash, so the raw path never matched there.
       const settingsPath = path.join(tmpHome, '.claude', 'settings.json');
-      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<
-        string,
-        unknown
-      >;
-      expect(JSON.stringify(settings)).toContain(installedHook);
+      const eventsRunningInstalledHook = (): string[] => {
+        let settings: {
+          hooks?: Record<string, Array<{ hooks?: Array<{ command?: unknown }> }>>;
+        };
+        try {
+          settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as typeof settings;
+        } catch {
+          return []; // not written yet: the script is copied BEFORE the entries
+        }
+        return Object.entries(settings.hooks ?? {})
+          .filter(([, entries]) =>
+            entries.some((entry) =>
+              (entry.hooks ?? []).some(
+                (hook) => typeof hook.command === 'string' && hook.command.includes(installedHook),
+              ),
+            ),
+          )
+          .map(([event]) => event);
+      };
+      await waitForCondition(
+        () => eventsRunningInstalledHook().length === CLAUDE_HOOK_EVENTS.length,
+      ).catch(() => undefined); // fall through to the assertion's readable diff
+      expect(eventsRunningInstalledHook().sort()).toEqual([...CLAUDE_HOOK_EVENTS].sort());
     } finally {
       await stopChild(child);
       fs.rmSync(tmpHome, { recursive: true, force: true });

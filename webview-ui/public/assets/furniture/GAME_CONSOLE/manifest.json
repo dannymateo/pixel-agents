@@ -1,0 +1,53 @@
+{
+  "id": "GAME_CONSOLE",
+  "name": "Game Console",
+  "category": "electronics",
+  "type": "group",
+  "groupType": "state",
+  "canPlaceOnWalls": false,
+  "canPlaceOnSurfaces": false,
+  "backgroundTiles": 0,
+  "members": [
+    {
+      "type": "group",
+      "groupType": "animation",
+      "orientation": "front",
+      "state": "on",
+      "members": [
+        {
+          "type": "asset",
+          "id": "GAME_CONSOLE_ON_1",
+          "file": "GAME_CONSOLE_ON_1.png",
+          "width": 32,
+          "height": 16,
+          "footprintW": 2,
+          "footprintH": 1,
+          "orientation": "front",
+          "frame": 0
+        },
+        {
+          "type": "asset",
+          "id": "GAME_CONSOLE_ON_2",
+          "file": "GAME_CONSOLE_ON_2.png",
+          "width": 32,
+          "height": 16,
+          "footprintW": 2,
+          "footprintH": 1,
+          "orientation": "front",
+          "frame": 1
+        }
+      ]
+    },
+    {
+      "type": "asset",
+      "id": "GAME_CONSOLE_OFF",
+      "file": "GAME_CONSOLE_OFF.png",
+      "width": 32,
+      "height": 16,
+      "footprintW": 2,
+      "footprintH": 1,
+      "orientation": "front",
+      "state": "off"
+    }
+  ]
+}

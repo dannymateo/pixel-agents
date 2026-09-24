@@ -1,0 +1,53 @@
+{
+  "id": "ARCADE",
+  "name": "Arcade",
+  "category": "electronics",
+  "type": "group",
+  "groupType": "state",
+  "canPlaceOnWalls": false,
+  "canPlaceOnSurfaces": false,
+  "backgroundTiles": 1,
+  "members": [
+    {
+      "type": "group",
+      "groupType": "animation",
+      "orientation": "front",
+      "state": "on",
+      "members": [
+        {
+          "type": "asset",
+          "id": "ARCADE_ON_1",
+          "file": "ARCADE_ON_1.png",
+          "width": 16,
+          "height": 32,
+          "footprintW": 1,
+          "footprintH": 2,
+          "orientation": "front",
+          "frame": 0
+        },
+        {
+          "type": "asset",
+          "id": "ARCADE_ON_2",
+          "file": "ARCADE_ON_2.png",
+          "width": 16,
+          "height": 32,
+          "footprintW": 1,
+          "footprintH": 2,
+          "orientation": "front",
+          "frame": 1
+        }
+      ]
+    },
+    {
+      "type": "asset",
+      "id": "ARCADE_OFF",
+      "file": "ARCADE_OFF.png",
+      "width": 16,
+      "height": 32,
+      "footprintW": 1,
+      "footprintH": 2,
+      "orientation": "front",
+      "state": "off"
+    }
+  ]
+}

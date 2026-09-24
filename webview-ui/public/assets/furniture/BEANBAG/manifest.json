@@ -1,0 +1,33 @@
+{
+  "id": "BEANBAG",
+  "name": "Beanbag",
+  "category": "chairs",
+  "type": "group",
+  "groupType": "rotation",
+  "canPlaceOnWalls": false,
+  "canPlaceOnSurfaces": false,
+  "backgroundTiles": 0,
+  "restSeat": true,
+  "members": [
+    {
+      "type": "asset",
+      "id": "BEANBAG",
+      "file": "BEANBAG.png",
+      "width": 16,
+      "height": 16,
+      "footprintW": 1,
+      "footprintH": 1,
+      "orientation": "front"
+    },
+    {
+      "type": "asset",
+      "id": "BEANBAG_BACK",
+      "file": "BEANBAG_BACK.png",
+      "width": 16,
+      "height": 16,
+      "footprintW": 1,
+      "footprintH": 1,
+      "orientation": "back"
+    }
+  ]
+}

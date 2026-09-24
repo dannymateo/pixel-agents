@@ -61,7 +61,9 @@ function runCli(args: string[]): Promise<{ code: number | null; stdout: string; 
     const child = spawn('node', [CLI_BUNDLE, ...args], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 5000,
+      // Bundle load alone takes 1-2 s on Windows and >5 s under the full
+      // parallel suite; this bounds a hang, it does not measure speed.
+      timeout: 15_000,
     });
     let stdout = '';
     let stderr = '';
@@ -153,11 +155,15 @@ describe('dist/cli.js entry-point guard', () => {
   const itBuilt = it.skipIf(!fs.existsSync(CLI_BUNDLE));
 
   // 11. Direct execution still runs main() (--help exits 0 with usage)
-  itBuilt('runs main() when executed directly: --help prints usage and exits 0', async () => {
-    const { code, stdout } = await runCli(['--help']);
-    expect(code).toBe(0);
-    expect(stdout).toContain('Usage: pixel-agents');
-  });
+  itBuilt(
+    'runs main() when executed directly: --help prints usage and exits 0',
+    async () => {
+      const { code, stdout } = await runCli(['--help']);
+      expect(code).toBe(0);
+      expect(stdout).toContain('Usage: pixel-agents');
+    },
+    20_000,
+  );
 
   // 12. Direct execution still runs main()'s port validation (rejects before listen())
   itBuilt(
@@ -167,6 +173,7 @@ describe('dist/cli.js entry-point guard', () => {
       expect(code).toBe(1);
       expect(stderr).toContain('Invalid --port');
     },
+    20_000,
   );
 
   /** Spawn the real bundled CLI against an isolated HOME, wait for /api/health,

@@ -392,7 +392,7 @@ describe('workflow nodes (spec §2.1b)', () => {
     expect(derived()).toHaveLength(MAX_DERIVED_AGENTS_PER_TREE);
     expect(warn.mock.calls.filter((c) => String(c[0]).includes('Spawn tree'))).toHaveLength(1);
     warn.mockRestore();
-  });
+  }, 30_000); // thousands of run agents: a load bound, not a speed claim
 
   // ── (c) and the session gate ──────────────────────────────────
 

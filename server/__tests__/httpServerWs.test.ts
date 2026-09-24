@@ -465,3 +465,90 @@ describe('/ws privileged-message gate', () => {
     expect(readHooksConsent()).toBe(true);
   });
 });
+
+// A derived agent's `label` is transcript content (its task description; for a
+// workflow agent, the first line of its prompt). The tree itself is public —
+// every viewer watches the office — but the text only goes to connections that
+// proved the out-of-band token.
+describe('/ws transcript-derived text gate', () => {
+  let server: InstanceType<typeof PixelAgentsServer>;
+  let store: InstanceType<typeof AgentStateStore>;
+  const sockets: WebSocket[] = [];
+
+  beforeEach(() => {
+    tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-ws-label-'));
+    fs.mkdirSync(path.join(tmpBase, '.pixel-agents'), { recursive: true });
+    server = new PixelAgentsServer();
+    store = new AgentStateStore();
+  });
+
+  afterEach(() => {
+    for (const socket of sockets) socket.terminate();
+    sockets.length = 0;
+    server?.stop();
+    try {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it('sends a derived agent label only to the tokened connection', async () => {
+    const config = await server.start({ embedded: false, store });
+    const base = `ws://127.0.0.1:${config.port.toString()}/ws`;
+    const tokened = await connectTo(`${base}?token=${encodeURIComponent(config.token)}`);
+    const untokened = await connectTo(base);
+    sockets.push(tokened.socket, untokened.socket);
+    expect(tokened.accepted && untokened.accepted).toBe(true);
+
+    const fromTokened = waitForMessage(tokened.socket, 'agentCreated');
+    const fromUntokened = waitForMessage(untokened.socket, 'agentCreated');
+    store.set(7, {
+      id: 7,
+      sessionId: 's',
+      isExternal: true,
+      projectDir: tmpBase,
+      jsonlFile: path.join(tmpBase, 'agent-k.jsonl'),
+      fileOffset: 0,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      lastDataAt: 0,
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      hookDelivered: false,
+      contextTokens: 0,
+      maxContextTokens: 200_000,
+      parentAgentId: 1,
+      spawnAgentKey: 'k',
+      spawnToolUseId: 'toolu_x',
+      role: 'desarrollador',
+      label: 'Implementa el login OAuth con PKCE',
+      depth: 1,
+    });
+
+    const privileged = (await fromTokened) as Record<string, unknown> | null;
+    const unprivileged = (await fromUntokened) as Record<string, unknown> | null;
+    expect(privileged).toMatchObject({
+      id: 7,
+      parentAgentId: 1,
+      role: 'desarrollador',
+      depth: 1,
+      label: 'Implementa el login OAuth con PKCE',
+    });
+    expect(unprivileged).toMatchObject({
+      id: 7,
+      parentAgentId: 1,
+      role: 'desarrollador',
+      depth: 1,
+    });
+    expect(unprivileged).not.toHaveProperty('label');
+  });
+});

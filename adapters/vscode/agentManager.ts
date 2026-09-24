@@ -11,6 +11,7 @@ import {
   ensureProjectScan,
   readNewLines,
   reassignAgentToFile,
+  restorableSpawnToolIds,
   startFileWatching,
 } from '../../server/src/fileWatcher.js';
 import { loadLayout } from '../../server/src/layoutPersistence.js';
@@ -372,8 +373,16 @@ export function restoreAgents(
       activeSubagentToolIds: new Map(),
       activeSubagentToolNames: new Map(),
       // Live spawn ids survive the reload so the 1s scan can re-adopt the
-      // spawns' transcripts and the completion queue-op still matches.
-      backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
+      // spawns' transcripts and the completion queue-op still matches --
+      // unless the session went quiet long ago (died without SessionEnd).
+      backgroundAgentToolIds: restorableSpawnToolIds(
+        {
+          jsonlFile: p.jsonlFile,
+          projectDir: p.projectDir,
+          sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+        },
+        p.backgroundAgentToolIds,
+      ),
       isWaiting: false,
       permissionSent: false,
       hadToolsInTurn: false,

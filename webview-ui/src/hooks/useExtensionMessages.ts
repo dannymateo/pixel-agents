@@ -9,6 +9,8 @@ import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../off
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
+import type { TreeNodeFields } from '../office/scope/treeDisplay.js';
+import { treeDisplayName } from '../office/scope/treeDisplay.js';
 import { setCarpetSprites } from '../office/sprites/carpetTiles.js';
 import { setPetTemplates } from '../office/sprites/petSpriteData.js';
 import { setCharacterTemplates } from '../office/sprites/spriteData.js';
@@ -175,6 +177,19 @@ export function useExtensionMessages(
     // Buffer agents from existingAgents until layout is loaded
     let pendingAgents: PendingAgent[] = [];
 
+    // Spawn-tree metadata of restored agents (existingAgents), applied once their
+    // characters exist — which may be only after the next layoutLoaded.
+    const treeMeta = new Map<number, ExistingAgentMeta>();
+    const applyTreeMeta = (os: OfficeState) => {
+      for (const [id, m] of treeMeta) {
+        const ch = os.characters.get(id);
+        if (!ch) continue;
+        ch.leadAgentId = m.parentAgentId;
+        ch.agentName = treeDisplayName(m);
+        treeMeta.delete(id);
+      }
+    };
+
     // Accumulate distinct folderNames seen across agents (never removed during the
     // session): the source for the Areas folder-mapping dropdown, so a folder stays
     // editable even after its agents close.
@@ -235,6 +250,7 @@ export function useExtensionMessages(
           os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
           if (p.isHeadless) os.setHeadless(p.id, true);
         }
+        applyTreeMeta(os);
         pendingAgents = [];
         layoutReadyRef.current = true;
         setLayoutReady(true);
@@ -247,22 +263,22 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number;
         const folderName = msg.folderName as string | undefined;
-        const isTeammate = msg.isTeammate as boolean | undefined;
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
         const teamName = msg.teamName as string | undefined;
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
-        // Don't auto-select teammates (keep focus on lead)
-        if (!isTeammate) {
+        // Don't auto-select spawned agents (keep focus on whoever spawned them)
+        if (teammateParentId === undefined) {
           setSelectedAgent(id);
         }
-        if (isTeammate && teammateParentId !== undefined) {
-          // Teammate: inherit parent's palette and workspace folderName (teammate runs
-          // in the same workspace as the lead). Name shown via agentName (teamRoleLabel).
-          // Seat them at the free seat closest to the lead so the team clusters.
+        if (teammateParentId !== undefined) {
+          // Spawned agent (teammate, sub-agent or workflow node; docs/adr/0002):
+          // the server's palette (parent's, with a per-sibling hue) or the parent's,
+          // and the parent's workspace folderName. Seated at the free seat closest
+          // to the parent so the tree clusters. Name shown via agentName.
           const parentCh = os.characters.get(teammateParentId);
-          const palette = parentCh ? parentCh.palette : undefined;
-          const hueShift = parentCh ? parentCh.hueShift : undefined;
+          const palette = (msg.palette as number | undefined) ?? parentCh?.palette;
+          const hueShift = (msg.hueShift as number | undefined) ?? parentCh?.hueShift;
           os.addAgent(
             id,
             palette,
@@ -278,7 +294,12 @@ export function useExtensionMessages(
           if (ch) {
             ch.leadAgentId = teammateParentId;
             ch.teamName = teamName ?? parentCh?.teamName;
-            ch.agentName = teammateName;
+            ch.agentName = treeDisplayName({
+              teammateName,
+              label: msg.label as string | undefined,
+              role: msg.role as string | undefined,
+              nodeKind: msg.nodeKind as TreeNodeFields['nodeKind'],
+            });
           }
         } else {
           const palette = msg.palette as number | undefined;
@@ -344,6 +365,10 @@ export function useExtensionMessages(
         ) {
           saveAgentSeats(os);
         }
+        for (const id of incoming) {
+          if (meta[id]?.parentAgentId !== undefined) treeMeta.set(id, meta[id]);
+        }
+        applyTreeMeta(os);
         setAgents((prev) => {
           const ids = new Set(prev);
           const merged = [...prev];

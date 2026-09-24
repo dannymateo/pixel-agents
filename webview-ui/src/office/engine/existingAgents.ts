@@ -11,11 +11,15 @@
 // Depending on layoutLoaded always arriving last stranded restored agents on any
 // surface that sends layout first (e.g. the VS Code no-assets path), issue #334.
 
-/** Per-agent seat metadata carried by the existingAgents message. */
-export interface ExistingAgentMeta {
+import type { TreeNodeFields } from '../scope/treeDisplay.js';
+
+/** Per-agent metadata carried by the existingAgents message: seat, plus the
+ *  spawn-tree fields a reconnecting client rebuilds the tree from. */
+export interface ExistingAgentMeta extends TreeNodeFields {
   palette?: number;
   hueShift?: number;
   seatId?: string;
+  depth?: number;
 }
 
 /** An agent buffered until the layout (and its seats) has been built. */

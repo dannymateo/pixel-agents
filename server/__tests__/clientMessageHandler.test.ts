@@ -358,6 +358,50 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
       expect(existing.agents).toEqual([1]);
     });
 
+    it('carries spawn-tree metadata in existingAgents, label only when privileged', () => {
+      // A reconnecting client rebuilds the agent tree from agentMeta; the
+      // label is transcript content and stays with privileged connections.
+      store.set(1, createTestAgent({ id: 1 }));
+      store.set(
+        2,
+        createTestAgent({
+          id: 2,
+          parentAgentId: 1,
+          spawnAgentKey: 'k',
+          spawnToolUseId: 'toolu_x',
+          role: 'desarrollador',
+          label: 'Implementa el login',
+          depth: 1,
+        }),
+      );
+      const metaOf = (privileged: boolean): Record<string, Record<string, unknown>> => {
+        sent = [];
+        ctx.privileged = privileged;
+        handleClientMessage({ type: 'webviewReady' }, (m) => sent.push(m), ctx);
+        const existing = sent.find((m) => m.type === 'existingAgents') as {
+          agentMeta: Record<string, Record<string, unknown>>;
+        };
+        return existing.agentMeta;
+      };
+
+      const privileged = metaOf(true);
+      expect(privileged['2']).toMatchObject({
+        parentAgentId: 1,
+        role: 'desarrollador',
+        depth: 1,
+        label: 'Implementa el login',
+      });
+      expect(privileged['1'].parentAgentId).toBeUndefined();
+
+      const unprivileged = metaOf(false);
+      expect(unprivileged['2']).toMatchObject({
+        parentAgentId: 1,
+        role: 'desarrollador',
+        depth: 1,
+      });
+      expect(unprivileged['2'].label).toBeUndefined();
+    });
+
     it('replays agent activity after layoutLoaded so it lands on real characters', () => {
       // Two things at once, both invisible to the helper's own unit tests:
       // that handleWebviewReady calls the replay at all, and that it runs AFTER

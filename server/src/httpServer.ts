@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 
+import { agentCreatedMessage } from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type {
@@ -169,20 +170,8 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
     const { store } = options;
 
     // Pipe store events to WebSocket client
-    const onAgentAdded = (id: number, agent: AgentState) => {
-      safeSend(socket, {
-        type: 'agentCreated',
-        id,
-        folderName: agent.folderName,
-        isExternal: agent.isExternal || undefined,
-        isTeammate: agent.leadAgentId !== undefined || undefined,
-        teammateName: agent.agentName,
-        parentAgentId: agent.leadAgentId,
-        teamName: agent.teamName,
-        hooksOnly: agent.hooksOnly || undefined,
-        palette: agent.palette,
-        hueShift: agent.hueShift,
-      });
+    const onAgentAdded = (_id: number, agent: AgentState) => {
+      safeSend(socket, agentCreatedMessage(agent, privileged));
     };
 
     const onAgentRemoved = (id: number) => {

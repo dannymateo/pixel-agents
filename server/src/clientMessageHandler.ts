@@ -1,6 +1,8 @@
+import type { AgentSeatMeta } from '../../core/src/messages.js';
 import type { HookProvider } from '../../core/src/provider.js';
 import { resendAgentActivity } from './agentActivityResend.js';
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
+import { agentTreeMeta } from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
@@ -482,7 +484,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
   const persistedSeats = adapter?.loadSeats() ?? {};
-  const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string }> = {};
+  const agentMeta: Record<number, AgentSeatMeta> = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -496,6 +498,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
       palette: agent.palette,
       hueShift: agent.hueShift,
       seatId: persisted?.seatId,
+      ...agentTreeMeta(agent, ctx.privileged === true),
     };
   }
   send({

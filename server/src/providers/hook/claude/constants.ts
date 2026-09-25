@@ -105,5 +105,10 @@ export const SUMMARY_MAX_CHARS = 200;
 export const SUMMARY_SCAN_CHARS = 4096;
 /** Tool names and ids longer than this are not real ones: clipped / dropped. */
 export const IDENTIFIER_MAX_CHARS = 128;
+/** Longest team name accepted from a transcript / tool result / persisted
+ *  state (UTF-16 units). It becomes a directory name under ~/.claude/teams/;
+ *  real names are short ASCII like `session-029c4a18`, anything longer is not
+ *  one and is read as "no team". */
+export const CLAUDE_TEAM_NAME_MAX_CHARS = 128;
 /** Longer "timestamps" are not ISO-8601 ones and are dropped. */
 export const TIMESTAMP_MAX_CHARS = 64;

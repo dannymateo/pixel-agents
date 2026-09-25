@@ -11,6 +11,7 @@ import {
 } from './claudeWorkflow.js';
 import {
   CLAUDE_AGENT_KEY_PATTERN,
+  CLAUDE_TEAM_NAME_MAX_CHARS,
   IDENTIFIER_MAX_CHARS,
   SIDECAR_COLD_READS_PER_SCAN,
   SIDECAR_MAX_BYTES,
@@ -74,6 +75,53 @@ export function normalizeClaudeAgentKey(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const key = value.trim();
   return CLAUDE_AGENT_KEY_PATTERN.test(key) ? key : undefined;
+}
+
+/** Characters a team name may never hold: path separators (both, on every OS),
+ *  the rest of Windows' invalid filename set (`:` also opens drive-relative
+ *  paths and alternate data streams), C0/C1 controls (NUL truncates, newlines
+ *  forge log lines), invisible format characters (bidi overrides, zero-width
+ *  spaces) and line/paragraph separators. The zero-width JOINER stays: it
+ *  builds composed emoji (as in sidecarText). Windows' rules apply on every OS
+ *  on purpose: the same name is read on every surface, and a name that is not
+ *  a valid Windows directory name is read as "no team" everywhere. */
+const TEAM_NAME_FORBIDDEN = /[/\\:*?"<>|\p{Cc}\p{Zl}\p{Zp}]|(?!‍)\p{Cf}/u;
+/** Unpaired UTF-16 surrogates: not text, and not a filename on any volume. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** Windows device names, reserved in every directory and with any extension. */
+const WINDOWS_RESERVED_NAME =
+  /^(con|prn|aux|nul|conin\$|conout\$|clock\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
+
+/**
+ * True when an untrusted team name (from a transcript tag, a spawn tool_result,
+ * or persisted state) is safe to use as ONE directory name under
+ * `~/.claude/teams/`. Everything else is treated as "no team" by the provider.
+ *
+ * Refused: non-strings, empty, over CLAUDE_TEAM_NAME_MAX_CHARS, `.`/`..` and
+ * any dots-only name, leading/trailing whitespace or a trailing dot (Windows
+ * strips those, so `.. ` and `team.` would alias `..` and `team`), the
+ * characters in TEAM_NAME_FORBIDDEN, lone surrogates, and Windows device
+ * names. Percent-encoding is never decoded anywhere, so `%2e%2e` is a literal
+ * (harmless) directory name.
+ */
+export function isSafeTeamName(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  if (value.length === 0 || value.length > CLAUDE_TEAM_NAME_MAX_CHARS) return false;
+  if (/^\.+$/.test(value)) return false;
+  if (value !== value.trim() || value.endsWith('.')) return false;
+  if (TEAM_NAME_FORBIDDEN.test(value) || LONE_SURROGATE.test(value)) return false;
+  return !WINDOWS_RESERVED_NAME.test(value);
+}
+
+/** `~/.claude/teams/<teamName>/config.json`, or null when the name is unsafe or
+ *  the resolved path would not be exactly one directory below teams/ (defense
+ *  in depth: isSafeTeamName already rules that out). */
+function teamConfigPath(teamName: string): string | null {
+  if (!isSafeTeamName(teamName)) return null;
+  const teamsRoot = path.resolve(os.homedir(), '.claude', 'teams');
+  const teamDir = path.resolve(teamsRoot, teamName);
+  if (path.dirname(teamDir) !== teamsRoot || path.basename(teamDir) !== teamName) return null;
+  return path.join(teamDir, 'config.json');
 }
 
 /** Raw characters of a sidecar text field ever looked at: anything past the cap
@@ -271,6 +319,8 @@ function readTeamMetadata(
       continue; // partial trailing line or mid-write garbage
     }
     if (typeof record.teamName === 'string') {
+      // An unsafe name is read as untagged: definitively not a team transcript.
+      if (!isSafeTeamName(record.teamName)) return null;
       return {
         teamName: record.teamName,
         agentName: typeof record.agentName === 'string' ? record.agentName : undefined,
@@ -331,7 +381,7 @@ export const claudeTeamProvider: TeamProvider = {
   extractTeammateSpawnFromToolResult(toolName, resultContent) {
     if (!TEAMMATE_SPAWN_TOOLS.has(toolName)) return null;
     const match = AGENT_ID_RESULT_PATTERN.exec(toolResultText(resultContent));
-    if (!match) return null;
+    if (!match || !isSafeTeamName(match[2])) return null;
     return { teammateName: match[1], teamName: match[2] };
   },
 
@@ -413,7 +463,7 @@ export const claudeTeamProvider: TeamProvider = {
     // New-style (implicit teams): teammates are independent TOP-LEVEL sessions in the
     // same project dir, every user/assistant record tagged teamName/agentName. Only
     // scannable once the lead's team is known.
-    if (teamName) {
+    if (isSafeTeamName(teamName)) {
       let topLevel: string[] = [];
       try {
         topLevel = fs.readdirSync(projectDir);
@@ -451,7 +501,7 @@ export const claudeTeamProvider: TeamProvider = {
 
   extractTeamMetadataFromRecord(record) {
     const teamName = record.teamName;
-    if (typeof teamName !== 'string') return null;
+    if (!isSafeTeamName(teamName)) return null;
     const agentName = record.agentName;
     return {
       teamName,
@@ -460,7 +510,10 @@ export const claudeTeamProvider: TeamProvider = {
   },
 
   getTeamMembers(teamName) {
-    const configPath = path.join(os.homedir(), '.claude', 'teams', teamName, 'config.json');
+    // The name may come from persisted state or an older provider build: it is
+    // re-checked here, at the one place it becomes a path. Unsafe = unreadable.
+    const configPath = teamConfigPath(teamName);
+    if (configPath === null) return null;
     let raw: string;
     try {
       raw = fs.readFileSync(configPath, 'utf-8');

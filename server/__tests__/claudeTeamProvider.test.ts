@@ -2,8 +2,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { claudeTeamProvider } from '../src/providers/hook/claude/claudeTeamProvider.js';
 import {
+  claudeTeamProvider,
+  isSafeTeamName,
+} from '../src/providers/hook/claude/claudeTeamProvider.js';
+import {
+  CLAUDE_TEAM_NAME_MAX_CHARS,
   IDENTIFIER_MAX_CHARS,
   SIDECAR_COLD_READS_PER_SCAN,
   SUMMARY_MAX_CHARS,
@@ -971,6 +975,176 @@ describe('claudeTeamProvider', () => {
           `<${body}>the page said <status>killed</status></${body}>\n</task-notification>`;
         expect(claudeTeamProvider.completionStatus?.(content)).toBeUndefined();
       }
+    });
+  });
+
+  // A teamName comes from transcripts, tool results and persisted state, and
+  // getTeamMembers turns it into ~/.claude/teams/<teamName>/config.json. Every
+  // one of these must be refused at the edge (read as "no team") so nothing
+  // outside ~/.claude/teams is ever opened.
+  describe('teamName validation (path traversal)', () => {
+    const fs = require('fs') as typeof import('fs');
+    const ATTACKS: ReadonlyArray<[string, string]> = [
+      ['empty', ''],
+      ['dot', '.'],
+      ['dot-dot', '..'],
+      ['traversal (posix)', '../../x'],
+      ['traversal (windows)', '..\\..\\x'],
+      ['traversal to a sibling', '../secret'],
+      ['nested separator', 'a/b'],
+      ['backslash', 'a\\b'],
+      ['absolute posix', '/etc/passwd'],
+      ['absolute windows', 'C:\\Windows\\System32'],
+      ['drive-relative windows', 'C:secret'],
+      ['alternate data stream', 'team:stream'],
+      ['UNC', '\\\\evil-host\\share'],
+      ['device namespace', '\\\\.\\PhysicalDrive0'],
+      ['long-path namespace', '\\\\?\\C:\\x'],
+      ['NUL byte', 'team\u0000../../x'],
+      ['newline (log injection)', 'team\nforged log line'],
+      ['DEL control', 'team\u007f'],
+      ['C1 control', 'team\u0085'],
+      ['bidi override', 'team\u202Eexe.txt'],
+      ['zero-width space', 'te\u200Bam'],
+      ['lone surrogate', 'team\uD800'],
+      ['trailing dot (windows strips it)', 'team.'],
+      ['dot-dot with trailing space', '.. '],
+      ['dot-dot with trailing dot', '...'],
+      ['trailing space', 'team '],
+      ['leading space', ' team'],
+      ['windows reserved CON', 'CON'],
+      ['windows reserved nul (any case)', 'nul'],
+      ['windows reserved with extension', 'com1.txt'],
+      ['windows reserved LPT9', 'LPT9'],
+      ['windows console device', 'CONIN$'],
+      ['windows clock device', 'clock$'],
+      ['windows wildcard', 'team*'],
+      ['windows invalid char', 'team<1>'],
+      ['too long', 'a'.repeat(CLAUDE_TEAM_NAME_MAX_CHARS + 1)],
+    ];
+
+    it.each(ATTACKS)('isSafeTeamName rejects %s', (_label, name) => {
+      expect(isSafeTeamName(name)).toBe(false);
+    });
+
+    it('rejects non-strings', () => {
+      for (const v of [undefined, null, 42, {}, ['team'], true]) {
+        expect(isSafeTeamName(v)).toBe(false);
+      }
+    });
+
+    it('accepts real team names, unicode and percent-encoded text included', () => {
+      for (const name of [
+        'research',
+        'session-029c4a18',
+        'my team',
+        'equipo-fase-1',
+        'Equipo_Ñandú',
+        '\u{1F468}‍\u{1F4BB}-team', // ZWJ-composed emoji
+        '%2e%2e', // never decoded: a literal directory name inside teams/
+        'con-team', // only the exact reserved stem is reserved
+        'a'.repeat(CLAUDE_TEAM_NAME_MAX_CHARS),
+      ]) {
+        expect(isSafeTeamName(name)).toBe(true);
+      }
+    });
+
+    describe('getTeamMembers never reads outside ~/.claude/teams', () => {
+      beforeEach(() => {
+        testHome.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-agents-teams-attack-'));
+        // A readable, well-formed "config" OUTSIDE teams/ that a traversal would reach.
+        const secretDir = path.join(testHome.dir, '.claude', 'secret');
+        fs.mkdirSync(secretDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(secretDir, 'config.json'),
+          JSON.stringify({ members: [{ name: 'leaked' }] }),
+        );
+        fs.mkdirSync(path.join(testHome.dir, '.claude', 'teams'), { recursive: true });
+        fsReads.paths.length = 0;
+      });
+
+      afterEach(() => {
+        try {
+          fs.rmSync(testHome.dir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+      });
+
+      it.each(ATTACKS)('refuses %s without touching disk', (_label, name) => {
+        expect(claudeTeamProvider.getTeamMembers(name)).toBeNull();
+        expect(fsReads.paths).toEqual([]);
+      });
+
+      it('an absolute path to a real config is refused', () => {
+        const abs = path.join(testHome.dir, '.claude', 'secret');
+        expect(claudeTeamProvider.getTeamMembers(abs)).toBeNull();
+        expect(fsReads.paths).toEqual([]);
+      });
+
+      it('a valid name still reads its own config', () => {
+        const teamDir = path.join(testHome.dir, '.claude', 'teams', 'research');
+        fs.mkdirSync(teamDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(teamDir, 'config.json'),
+          JSON.stringify({ members: [{ name: 'lead' }] }),
+        );
+        expect([...claudeTeamProvider.getTeamMembers('research')!]).toEqual(['lead']);
+        expect(fsReads.paths).toEqual([path.join(teamDir, 'config.json')]);
+      });
+    });
+
+    it('extractTeamMetadataFromRecord treats an unsafe teamName as no team', () => {
+      for (const [, name] of ATTACKS) {
+        expect(
+          claudeTeamProvider.extractTeamMetadataFromRecord({ teamName: name, agentName: 'x' }),
+        ).toBeNull();
+      }
+    });
+
+    it('extractTeammateSpawnFromToolResult treats an unsafe team as no spawn', () => {
+      for (const team of ['../../x', '..\\..\\x', 'C:\\x', '/etc', 'con', '..', 'a:b']) {
+        expect(
+          claudeTeamProvider.extractTeammateSpawnFromToolResult!(
+            'Agent',
+            `agent_id: mate@${team}\nname: mate`,
+          ),
+        ).toBeNull();
+      }
+    });
+
+    describe('transcript tags', () => {
+      const tmpRoot = path.join(os.tmpdir(), 'pixel-agents-team-tags-' + Date.now());
+      const LEAD = '11111111-1111-4111-8111-111111111111';
+      const MATE = '22222222-2222-4222-8222-222222222222';
+
+      afterEach(() => {
+        try {
+          fs.rmSync(tmpRoot, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+      });
+
+      it('getTeamMetadataForSession treats an unsafe teamName tag as no team', () => {
+        fs.mkdirSync(tmpRoot, { recursive: true });
+        const p = path.join(tmpRoot, 'evil.jsonl');
+        fs.writeFileSync(
+          p,
+          JSON.stringify({ type: 'user', teamName: '../../x', agentName: 'mate' }) + '\n',
+        );
+        expect(claudeTeamProvider.getTeamMetadataForSession(p)).toBeNull();
+      });
+
+      it('discoverTeammates never matches a session tagged with an unsafe teamName', () => {
+        fs.mkdirSync(tmpRoot, { recursive: true });
+        fs.writeFileSync(path.join(tmpRoot, `${LEAD}.jsonl`), '');
+        fs.writeFileSync(
+          path.join(tmpRoot, `${MATE}.jsonl`),
+          JSON.stringify({ type: 'user', teamName: '../evil', agentName: 'mate' }) + '\n',
+        );
+        expect(claudeTeamProvider.discoverTeammates(tmpRoot, LEAD, '../evil')).toEqual([]);
+      });
     });
   });
 });

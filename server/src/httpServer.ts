@@ -190,6 +190,13 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
     };
 
     const onBroadcast = (message: Record<string, unknown>) => {
+      // A conversation's text is transcript content: only privileged
+      // connections get it; the rest still see the scene, with `…`.
+      if (message.type === 'agentConversation' && !privileged && 'text' in message) {
+        const { text: _text, ...rest } = message;
+        safeSend(socket, rest);
+        return;
+      }
       safeSend(socket, message);
     };
 

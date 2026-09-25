@@ -125,6 +125,8 @@ components:
         # Living office (presence lifecycle)
         - $ref: '#/components/schemas/AgentPresenceChanged'
         - $ref: '#/components/schemas/LivingOfficeSettings'
+        # Conversations between agents (text stripped for unprivileged connections)
+        - $ref: '#/components/schemas/AgentConversation'
       discriminator: type
 
     ClientMessage:
@@ -911,6 +913,29 @@ components:
         presence:
           $ref: '#/components/schemas/AgentPresence'
 
+    AgentConversation:
+      description: >-
+        One agent addresses another (assigns work, reports back, or sends a
+        message). Broadcast to every client for the animation; `text` is
+        transcript content and is stripped for unprivileged connections.
+      type: object
+      additionalProperties: false
+      required: [type, conversationId, fromId, kind]
+      properties:
+        type:
+          const: agentConversation
+        conversationId:
+          type: string
+        fromId:
+          type: integer
+        toId:
+          type: integer
+          description: Absent when the recipient could not be resolved to a tracked agent.
+        kind:
+          $ref: '#/components/schemas/ConversationKind'
+        text:
+          type: string
+
     # ── Client message variants ────────────────────────────────────
 
     WebviewReady:
@@ -1350,6 +1375,13 @@ components:
         of its own.
       type: string
       enum: [agent, workflow]
+
+    ConversationKind:
+      description: >-
+        What an inter-agent conversation is: a parent assigning work to a
+        child, a child reporting back to its parent, or a direct message.
+      type: string
+      enum: [assign, report, message]
 
     AgentPresence:
       description: >-

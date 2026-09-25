@@ -558,6 +558,32 @@ describe('/ws transcript-derived text gate', () => {
     });
     expect(unprivileged).not.toHaveProperty('label');
   });
+
+  it('sends a conversation text only to the tokened connection', async () => {
+    const config = await server.start({ embedded: false, store });
+    const base = `ws://127.0.0.1:${config.port.toString()}/ws`;
+    const tokened = await connectTo(`${base}?token=${encodeURIComponent(config.token)}`);
+    const untokened = await connectTo(base);
+    sockets.push(tokened.socket, untokened.socket);
+    expect(tokened.accepted && untokened.accepted).toBe(true);
+
+    const fromTokened = waitForMessage(tokened.socket, 'agentConversation');
+    const fromUntokened = waitForMessage(untokened.socket, 'agentConversation');
+    const conversation = {
+      type: 'agentConversation',
+      conversationId: '7:u1',
+      fromId: 7,
+      toId: 1,
+      kind: 'report',
+      text: 'Listo: login OAuth con PKCE y sus pruebas',
+    };
+    store.broadcast(conversation);
+
+    expect(await fromTokened).toEqual(conversation);
+    const unprivileged = (await fromUntokened) as Record<string, unknown> | null;
+    const { text: _text, ...withoutText } = conversation;
+    expect(unprivileged).toEqual(withoutText);
+  });
 });
 
 // The agent screen feed (spec §4) exposes code and command output. It is

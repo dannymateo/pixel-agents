@@ -43,7 +43,8 @@ export type ServerMessage =
   | AgentFeedAppend
   | AgentFeedDenied
   | AgentPresenceChanged
-  | LivingOfficeSettings;
+  | LivingOfficeSettings
+  | AgentConversation;
 
 export type ClientMessage =
   | WebviewReady
@@ -409,6 +410,17 @@ export interface LivingOfficeSettings {
   idleToLoungeMinutes: number;
   loungeToLeaveMinutes: number;
 }
+
+export interface AgentConversation {
+  type: 'agentConversation';
+  conversationId: string;
+  fromId: number;
+  toId?: number;
+  kind: ConversationKind;
+  text?: string;
+}
+
+export type ConversationKind = 'assign' | 'report' | 'message';
 
 export interface WebviewReady {
   type: 'webviewReady';

@@ -410,3 +410,13 @@ export const MODULE_AREA_COLORS = [
   '#e06c6c',
   '#5ec4e0',
 ];
+
+// ── Conversations between agents ────────────────────────────
+/** Typewriter speed of a conversation bubble, in characters per second. */
+export const CONVERSATION_TYPE_CPS = 80;
+/** A scene closes (with "…ver completo") after this long talking. */
+export const CONVERSATION_MAX_MS = 15000;
+export const CONVERSATION_BUBBLE_MAX_W = 220;
+export const CONVERSATION_BUBBLE_MAX_LINES = 8;
+export const CONVERSATION_BUBBLE_BG = '#f4f1e6';
+export const CONVERSATION_BUBBLE_BORDER = '#1e1e2e';

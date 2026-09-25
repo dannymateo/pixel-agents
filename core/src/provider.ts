@@ -155,6 +155,18 @@ export interface HookProvider {
    *  `seq` is assigned by the host. Undefined = this provider has no feed. */
   parseFeedEntries?(record: Record<string, unknown>): Array<Omit<FeedEntry, 'seq'>>;
 
+  /** Recognize an inter-agent communication in one transcript record of the
+   *  agent that wrote it. `to` is a provider reference (Claude: agent key or
+   *  teammate name) the host resolves inside the same root tree; `spawnToolUseId`
+   *  is set for assignments (the spawn call) so the host can emit them when the
+   *  child materializes. Undefined = no conversations for this provider. */
+  parseConversations?(record: Record<string, unknown>): Array<{
+    kind: 'assign' | 'report' | 'message';
+    text: string;
+    to?: string;
+    spawnToolUseId?: string;
+  }>;
+
   // ── Optional team/subagent extension (Agent Teams on Claude; empty for single-agent CLIs) ──
 
   /** Optional reference to a TeamProvider. When set, the hook handler registers team-aware

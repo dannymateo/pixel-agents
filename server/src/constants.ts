@@ -183,3 +183,7 @@ export const LOUNGE_TO_LEAVE_MS_DEFAULT = 60 * 60_000;
 /** Bounds for the user's lounge-to-leave setting, in minutes. */
 export const LOUNGE_TO_LEAVE_MINUTES_MIN = 1;
 export const LOUNGE_TO_LEAVE_MINUTES_MAX = 480;
+
+// ── Conversations between agents ────────────────────────────
+/** Max UTF-8 bytes of a conversation's text sent to clients (truncated at a char boundary). */
+export const CONVERSATION_TEXT_MAX_BYTES = 65536;

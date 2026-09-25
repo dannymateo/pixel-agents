@@ -21,6 +21,7 @@ import {
   IDLE_TO_LOUNGE_MS_DEFAULT,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
 } from './constants.js';
+import { ConversationTracker } from './conversations.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -35,6 +36,7 @@ import {
   scanSpawnTree,
   setAgentRemovalCallback,
   setDismissalTracker,
+  setFileWatcherConversationTracker,
   setHookProvider as setFileWatcherHookProvider,
   setSpawnTreeCallbacks,
   setTeammateRegisterCallback,
@@ -63,6 +65,7 @@ import {
   setAgentPromptedCallback,
   setBackgroundAgentCompletedCallback,
   setBackgroundAgentDetectedCallback,
+  setConversationTracker,
   setHookProvider,
   setSpawnFinishedCallback,
   setSpawnToolClosedCallback,
@@ -130,6 +133,8 @@ export class AgentRuntime {
    *  to an agent's transcript. Hosts route `subscribeAgentFeed` here with a
    *  server-minted connection id and the connection's handshake privilege. */
   readonly feedHub: AgentFeedHub;
+  /** Who talks to whom (spec §4b): broadcasts `agentConversation`. */
+  readonly conversations: ConversationTracker;
   /** The user's idle-to-lounge setting, read from the adapter on first use. */
   private idleToLoungeMinutes: number | undefined;
   /** The user's lounge-to-leave setting, read from the adapter on first use. */
@@ -150,6 +155,9 @@ export class AgentRuntime {
     // required: without it every line of every agent would be parsed twice).
     this.feedHub = new AgentFeedHub(store, provider);
     setTranscriptLineListener(this.feedHub.onRecord, this.feedHub.hasSubscribers);
+    this.conversations = new ConversationTracker(store, provider);
+    setConversationTracker(this.conversations);
+    setFileWatcherConversationTracker(this.conversations);
     this.presence = new PresenceTracker(store, {
       idleToLoungeMs: () => this.idleToLoungeMs(),
       loungeToLeaveMs: () => this.loungeToLeaveMs(),
@@ -986,6 +994,9 @@ export class AgentRuntime {
     this.disposed = true;
     setTranscriptLineListener(null);
     this.feedHub.dispose();
+    setConversationTracker(null);
+    setFileWatcherConversationTracker(null);
+    this.conversations.dispose();
     this.presence.dispose();
     this.pendingTreeScans.clear();
     this.store.off('broadcast', this.onStoreBroadcast);

@@ -239,6 +239,30 @@ describe('mock-claude-runner hook execution', () => {
     });
   });
 
+  it('resolves {{now}} to the write time as an ISO timestamp', async () => {
+    const valuePath = path.join(tmpHome, 'stamped.json');
+    const before = Date.now();
+    writeScenarioQueue(tmpHome, [
+      {
+        schemaVersion: 1,
+        autoInit: false,
+        holdOpenMs: 0,
+        sessions: [],
+        actions: [
+          { kind: 'writeJson', atMs: 300, filePath: valuePath, value: { timestamp: '{{now}}' } },
+        ],
+      },
+    ]);
+
+    const { code, stderr } = await runMockClaude('lead-session');
+
+    expect(code, stderr).toBe(0);
+    const { timestamp } = JSON.parse(fs.readFileSync(valuePath, 'utf8')) as { timestamp: string };
+    expect(new Date(timestamp).toISOString()).toBe(timestamp);
+    expect(Date.parse(timestamp)).toBeGreaterThanOrEqual(before + 300);
+    expect(Date.parse(timestamp)).toBeLessThanOrEqual(Date.now());
+  });
+
   describe('writeFile', () => {
     const projectDirOf = () =>
       path.join(tmpHome, '.claude', 'projects', workspaceDir.replace(/[^a-zA-Z0-9-]/g, '-'));

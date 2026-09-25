@@ -14,14 +14,17 @@ import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
 import { ZoomControls } from './components/ZoomControls.js';
+import { CONVERSATION_MAX_MS, CONVERSATION_TYPE_CPS } from './constants.js';
 import { useEditorActions } from './hooks/useEditorActions.js';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
 import { useIntroTour } from './hooks/useIntroTour.js';
+import { ConversationBubble } from './office/components/ConversationBubble.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
 import { EditorState } from './office/editor/editorState.js';
 import { EditorToolbar } from './office/editor/EditorToolbar.js';
+import { ConversationDirector } from './office/engine/conversationScene.js';
 import { OfficeState } from './office/engine/officeState.js';
 import { exportLayoutToFile } from './office/layout/exportLayout.js';
 import { getCatalogEntry, isRotatable } from './office/layout/furnitureCatalog.js';
@@ -54,6 +57,16 @@ function getOfficeState(): OfficeState {
 // The living office (docs/adr/0003): shared by the message handler (tree,
 // composition, derived agents' lives) and the editor (edits the user's layout only).
 const livingOffice = new LivingOfficeController(getOfficeState);
+
+// Conversations between agents (spec §4b): one director stages every scene in
+// the single living office; the office is its host (walk, face, bubble).
+const conversations = new ConversationDirector(getOfficeState(), {
+  cps: CONVERSATION_TYPE_CPS,
+  maxMs: CONVERSATION_MAX_MS,
+});
+const tickConversations = (dt: number): void => conversations.update(dt);
+const conversationViews = () => conversations.views();
+const skipConversation = (id: string): void => conversations.skip(id);
 
 /** The agent's last known context usage, the screen header's first value. */
 function screenContext(id: number): { tokens: number; max: number } | undefined {
@@ -122,7 +135,13 @@ function App() {
     setShowAreas,
     idleToLoungeMinutes,
     loungeToLeaveMinutes,
-  } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty, livingOffice);
+  } = useExtensionMessages(
+    getOfficeState,
+    editor.setLastSavedLayout,
+    isEditDirty,
+    livingOffice,
+    conversations,
+  );
 
   // Show migration notice once layout reset is detected
   const [migrationNoticeDismissed, setMigrationNoticeDismissed] = useState(false);
@@ -454,6 +473,7 @@ function App() {
         activeAreaLabel={activeAreaLabel}
         onOpenScreen={editor.isEditMode ? undefined : handleOpenScreen}
         canOpenScreen={canOpenAgentScreen}
+        onTick={tickConversations}
       />
 
       {!isDebugMode ? (
@@ -543,6 +563,18 @@ function App() {
             onOpenScreen={editor.isEditMode ? undefined : handleOpenScreen}
             canOpenScreen={canOpenAgentScreen}
           />
+
+          {!editor.isEditMode && (
+            <ConversationBubble
+              officeState={officeState}
+              getViews={conversationViews}
+              containerRef={containerRef}
+              zoom={editor.zoom}
+              panRef={editor.panRef}
+              onSkip={skipConversation}
+              onOpenScreen={handleOpenScreen}
+            />
+          )}
         </>
       ) : (
         <DebugView

@@ -52,6 +52,8 @@ interface OfficeCanvasProps {
   /** Whether an agent has a screen (a workflow node's monitor opens nothing
    *  and takes no click). Absent = every seated agent has one. */
   canOpenScreen?: (agentId: number) => boolean;
+  /** Runs every frame after the office advances (the conversation director). */
+  onTick?: (dt: number) => void;
 }
 
 /** Catalog footprint of a furniture type (for monitor hit-testing). */
@@ -102,8 +104,14 @@ export function OfficeCanvas({
   activeAreaLabel,
   onOpenScreen,
   canOpenScreen,
+  onTick,
 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Read by the running loop, so a new callback never restarts it.
+  const onTickRef = useRef(onTick);
+  useEffect(() => {
+    onTickRef.current = onTick;
+  }, [onTick]);
   const containerRef = useRef<HTMLDivElement>(null);
   const offsetRef = useRef({ x: 0, y: 0 });
   // Middle-mouse pan state (imperative, no re-renders)
@@ -165,6 +173,7 @@ export function OfficeCanvas({
     const stop = startGameLoop(canvas, {
       update: (dt) => {
         officeState.update(dt);
+        onTickRef.current?.(dt);
       },
       render: (ctx) => {
         // Canvas dimensions are in device pixels

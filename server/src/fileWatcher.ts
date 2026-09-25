@@ -25,6 +25,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type * as vscode from 'vscode';
 
+import type { ConversationTracker } from './conversations.js';
+
 const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
 
 import type { HookProvider } from '../../core/src/provider.js';
@@ -899,6 +901,12 @@ export function notifyDerivedRemoved(agent: AgentState): void {
 }
 
 /** Register the active HookProvider for non-team capabilities (session roots, etc.). */
+let fileWatcherConversationTracker: ConversationTracker | null = null;
+
+export function setFileWatcherConversationTracker(tracker: ConversationTracker | null): void {
+  fileWatcherConversationTracker = tracker;
+}
+
 export function setHookProvider(provider: HookProvider): void {
   hookProvider = provider;
 }
@@ -999,6 +1007,8 @@ export function scanForTeammateFiles(
       pollingTimers.delete(existingTeammate.id);
       existingTeammate.jsonlFile = file;
       existingTeammate.fileOffset = 0;
+      // Re-read from the start: its history must not replay as conversations.
+      fileWatcherConversationTracker?.beginReplay(existingTeammate.id);
       existingTeammate.lineBuffer = '';
       existingTeammate.lastDataAt = Date.now();
       existingTeammate.linesProcessed = 0;
@@ -1505,6 +1515,8 @@ function scanSpawnTreeOnce(
     agents.broadcast({ type: 'subagentClear', id: parentId, parentToolId: entry.toolUseId });
     spawnTreeCallbacks?.onDerivedCreated(agent);
     onAgentCreated?.(agent);
+    // After agentCreated (the character exists), before its transcript is read.
+    fileWatcherConversationTracker?.onChildMaterialized(parentId, agent.id, entry.toolUseId);
   }
 
   if (gone.length > 0) {

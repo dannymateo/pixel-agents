@@ -1071,6 +1071,85 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     expect(() => scan()).not.toThrow();
   });
 
+  describe('conversations between agents (spec §4b)', () => {
+    const now = () => new Date(Date.now() + 1000).toISOString();
+    const live = (line: string, uuid: string): string =>
+      JSON.stringify({ ...JSON.parse(line), uuid, timestamp: now() });
+    const conversations = () => messages.filter((m) => m.type === 'agentConversation');
+
+    it('an assignment is spoken when the child materializes, to the child', () => {
+      leadLine(live(spawnToolUse('toolu_L', { prompt: 'Implementa el login' }), 'u-l1'));
+      expect(conversations()).toEqual([]);
+      writeSidecar('aaa', { agentType: 'desarrollador', toolUseId: 'toolu_L', spawnDepth: 1 });
+      scan();
+      const child = byKey('aaa');
+      expect(conversations()).toEqual([
+        expect.objectContaining({
+          fromId: 1,
+          toId: child.id,
+          kind: 'assign',
+          text: 'Implementa el login',
+        }),
+      ]);
+    });
+
+    it('a handback is a report from the child to its parent, spoken once', () => {
+      leadLine(live(spawnToolUse('toolu_L', { prompt: 'Haz algo' }), 'u-l1'));
+      writeSidecar('aaa', { agentType: 'desarrollador', toolUseId: 'toolu_L', spawnDepth: 1 });
+      scan();
+      const child = byKey('aaa');
+      const handback = JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_H',
+              name: 'SubagentHandback',
+              input: { message: 'Listo, todo verde' },
+            },
+          ],
+        },
+      });
+      appendLine('aaa', live(handback, 'u-c1'));
+      readNewLines(child.id, store, runtime.waitingTimers, runtime.permissionTimers);
+      readNewLines(child.id, store, runtime.waitingTimers, runtime.permissionTimers);
+      const reports = conversations().filter((m) => m.kind === 'report');
+      expect(reports).toEqual([
+        expect.objectContaining({ fromId: child.id, toId: 1, text: 'Listo, todo verde' }),
+      ]);
+      // The foreground spawn's own result does not repeat the report.
+      leadLine(live(toolResult('toolu_L', 'Listo, todo verde'), 'u-l2'));
+      expect(conversations().filter((m) => m.kind === 'report')).toHaveLength(1);
+    });
+
+    it('a foreground spawn result without handback is the child reporting back', () => {
+      leadLine(live(spawnToolUse('toolu_L', { prompt: 'Revisa' }), 'u-l1'));
+      writeSidecar('aaa', { agentType: 'qa-revisor', toolUseId: 'toolu_L', spawnDepth: 1 });
+      scan();
+      const child = byKey('aaa');
+      leadLine(live(toolResult('toolu_L', 'Sin hallazgos'), 'u-l2'));
+      expect(conversations().filter((m) => m.kind === 'report')).toEqual([
+        expect.objectContaining({ fromId: child.id, toId: 1, text: 'Sin hallazgos' }),
+      ]);
+    });
+
+    it('history read before the office watched stays silent', () => {
+      const old = new Date(Date.now() - 60_000).toISOString();
+      leadLine(
+        JSON.stringify({
+          ...JSON.parse(spawnToolUse('toolu_L', { prompt: 'Viejo' })),
+          uuid: 'u-old',
+          timestamp: old,
+        }),
+      );
+      writeSidecar('aaa', { agentType: 'desarrollador', toolUseId: 'toolu_L', spawnDepth: 1 });
+      scan();
+      expect(maybeByKey('aaa')).toBeDefined();
+      expect(conversations()).toEqual([]);
+    });
+  });
+
   it('Task-era: a spawn without sidecars keeps the Subtask path', () => {
     leadLine(
       JSON.stringify({

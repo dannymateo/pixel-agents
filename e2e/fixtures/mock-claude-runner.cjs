@@ -301,6 +301,8 @@ function resolveTemplateString(template, context) {
 
   return template.replace(/\{\{([^}]+)\}\}/g, (_match, rawKey) => {
     const key = rawKey.trim();
+    // Real transcripts stamp every record with the moment it was written.
+    if (key === 'now') return new Date().toISOString();
     const value = key.split('.').reduce((accumulator, segment) => {
       if (accumulator && Object.prototype.hasOwnProperty.call(accumulator, segment)) {
         return accumulator[segment];

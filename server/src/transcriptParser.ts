@@ -8,6 +8,7 @@ import {
   TOOL_DONE_DELAY_MS,
 } from './constants.js';
 import { updateContextUsage } from './contextUsage.js';
+import type { ConversationTracker } from './conversations.js';
 import { hasHookAmbiguousTeammates, hasPromotedBackgroundAgent } from './teamUtils.js';
 import {
   cancelPermissionTimer,
@@ -24,6 +25,14 @@ const EMPTY_EXEMPT_TOOLS: ReadonlySet<string> = new Set();
 /** Hook provider: supplies formatToolStatus + team.extractTeamMetadataFromRecord.
  *  Registered once at startup via setHookProvider(). Functions below assume it's set. */
 let hookProvider: HookProvider | null = null;
+
+// Conversations between agents (spec §4b): every parsed record is offered to
+// the tracker, and a closed foreground spawn is its report fallback.
+let conversationTracker: ConversationTracker | null = null;
+
+export function setConversationTracker(tracker: ConversationTracker | null): void {
+  conversationTracker = tracker;
+}
 
 /** Permission-exempt tools come from the active provider. Fail-open if unset. */
 function exemptTools(): ReadonlySet<string> {
@@ -185,6 +194,7 @@ export function processTranscriptLine(
   agent.linesProcessed++;
   try {
     const record = JSON.parse(line);
+    conversationTracker?.onRecord(agentId, record);
 
     // -- Agent Teams: extract team metadata via the active provider --
     // The provider reads its CLI's own field names (Claude: record.teamName + record.agentName).
@@ -542,6 +552,8 @@ export function processTranscriptLine(
                 });
                 // A foreground spawn is done: its derived agent (and subtree) goes.
                 if (!agent.backgroundAgentToolIds.has(completedToolId)) {
+                  // Before the child goes: the fallback report needs it.
+                  conversationTracker?.onSpawnResult(agentId, completedToolId, record);
                   spawnToolClosedCallback?.(agentId, completedToolId);
                 }
               } else if (
@@ -552,6 +564,7 @@ export function processTranscriptLine(
                 // cleared foreground activity) but its result still closes the
                 // spawn: a derived agent for it must not outlive it. The host's
                 // lookup misses for anything that never was a spawn.
+                conversationTracker?.onSpawnResult(agentId, completedToolId, record);
                 spawnToolClosedCallback?.(agentId, completedToolId);
               }
               agent.activeToolIds.delete(completedToolId);

@@ -101,6 +101,10 @@ _Avoid_: track
 **Focus**:
 Bring an agent's terminal to the front. Reserved exclusively for terminals — never the in-office highlight.
 
+**Conversation**:
+One agent addressing another: a parent **assigning** work to a child, a child **reporting** back, or a direct **message**. The speaker walks to the listener's desk and its words appear in a bubble; the walk is visual only and never changes either agent's status. Only conversations that happen while the office watches are staged — history is never replayed.
+_Avoid_: chat, dialog (the UI element is the bubble)
+
 ## First Run
 
 **Intro**:

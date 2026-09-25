@@ -8,6 +8,7 @@ import {
   BASH_COMMAND_DISPLAY_MAX_LENGTH,
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from '../../../constants.js';
+import { parseClaudeConversations } from './claudeConversation.js';
 import { parseClaudeFeedEntries } from './claudeFeed.js';
 import {
   areHooksInstalled as installerAreHooksInstalled,
@@ -324,5 +325,6 @@ export const claudeProvider: HookProvider = {
   buildLaunchCommand,
 
   parseFeedEntries: parseClaudeFeedEntries,
+  parseConversations: parseClaudeConversations,
   team: claudeTeamProvider,
 };

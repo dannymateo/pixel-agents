@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
+import type { ConversationDirector } from '../office/engine/conversationScene.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
 import type { OfficeState } from '../office/engine/officeState.js';
@@ -158,6 +159,7 @@ export function useExtensionMessages(
   onLayoutLoaded?: (layout: OfficeLayout) => void,
   isEditDirty?: () => boolean,
   livingOffice?: LivingOfficeController,
+  conversations?: ConversationDirector,
 ): ExtensionMessageState {
   // The living office (docs/adr/0003): tree, composition and derived agents'
   // lives. App shares its instance with the editor; standalone use gets its own.
@@ -379,7 +381,18 @@ export function useExtensionMessages(
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
         // Roots rain out; derived agents walk out through the door first.
         living.agentClosed(id);
+      } else if (msg.type === 'agentConversation') {
+        // The director validates every field; text is absent for untokened viewers.
+        conversations?.enqueue({
+          conversationId: msg.conversationId,
+          fromId: msg.fromId,
+          toId: msg.toId,
+          kind: msg.kind,
+          text: msg.text,
+        });
       } else if (msg.type === 'existingAgents') {
+        // A (re)connect snapshot: scenes in flight belong to the old view.
+        conversations?.clear();
         const incoming = (Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []).filter(
           isWireAgentId,
         );

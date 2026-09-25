@@ -9,6 +9,7 @@ import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../off
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
+import { applyDirectoryActivity } from '../office/living/directoryActivity.js';
 import type { DerivedAgentInit } from '../office/living/livingOfficeController.js';
 import {
   isWireAgentId,
@@ -259,6 +260,10 @@ export function useExtensionMessages(
           parentToolId: msg.parentToolId,
         });
       }
+
+      // Turn status, running tools and permission wait into the directory the
+      // agent screen's header reads (same rules as the character, below).
+      applyDirectoryActivity(living.directory, msg);
 
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({

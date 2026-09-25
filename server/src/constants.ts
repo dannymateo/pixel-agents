@@ -185,5 +185,17 @@ export const LOUNGE_TO_LEAVE_MINUTES_MIN = 1;
 export const LOUNGE_TO_LEAVE_MINUTES_MAX = 480;
 
 // ── Conversations between agents ────────────────────────────
-/** Max UTF-8 bytes of a conversation's text sent to clients (truncated at a char boundary). */
-export const CONVERSATION_TEXT_MAX_BYTES = 65536;
+/** Max UTF-8 bytes of a conversation's text sent to clients (truncated at a
+ *  char boundary). The bubble types ~1 200 chars before it closes with
+ *  "…ver completo" (the agent screen has the whole transcript), so more is waste. */
+export const CONVERSATION_TEXT_MAX_BYTES = 8192;
+/** Most conversations one transcript record may yield. */
+export const CONVERSATIONS_PER_RECORD_MAX = 8;
+/** Assignments waiting for their child to materialize, per parent. */
+export const CONVERSATION_PENDING_ASSIGNS_MAX = 16;
+/** A pending assignment whose child never materializes is dropped after this. */
+export const CONVERSATION_PENDING_ASSIGN_TTL_MS = 10 * 60_000;
+/** A record stamped further than this in the future does not end a replay. */
+export const CONVERSATION_FUTURE_SKEW_MS = 5 * 60_000;
+/** Conversation ids remembered per agent for dedup. */
+export const CONVERSATION_SEEN_IDS_MAX = 512;

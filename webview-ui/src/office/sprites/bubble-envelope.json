@@ -1,0 +1,28 @@
+{
+  "name": "bubble-envelope",
+  "description": "Envelope bubble: white square with a closed letter, over a speaker whose conversation could not be walked, and a tail pointer (11x13)",
+  "width": 11,
+  "height": 13,
+  "palette": {
+    "_": "",
+    "B": "#555566",
+    "F": "#EEEEFF",
+    "E": "#E8D8A8",
+    "L": "#886644"
+  },
+  "pixels": [
+    ["_", "B", "B", "B", "B", "B", "B", "B", "B", "B", "_"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["B", "F", "L", "L", "L", "L", "L", "L", "L", "F", "B"],
+    ["B", "F", "L", "L", "E", "E", "E", "L", "L", "F", "B"],
+    ["B", "F", "L", "E", "L", "E", "L", "E", "L", "F", "B"],
+    ["B", "F", "L", "E", "E", "L", "E", "E", "L", "F", "B"],
+    ["B", "F", "L", "E", "E", "E", "E", "E", "L", "F", "B"],
+    ["B", "F", "L", "L", "L", "L", "L", "L", "L", "F", "B"],
+    ["B", "F", "F", "F", "F", "F", "F", "F", "F", "F", "B"],
+    ["_", "B", "B", "B", "B", "B", "B", "B", "B", "B", "_"],
+    ["_", "_", "_", "_", "B", "B", "B", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "B", "_", "_", "_", "_", "_"],
+    ["_", "_", "_", "_", "_", "_", "_", "_", "_", "_", "_"]
+  ]
+}

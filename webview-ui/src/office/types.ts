@@ -240,8 +240,9 @@ export interface Character {
   // -- Living office (docs/adr/0003) --
   /** Server-owned presence, as last animated. undefined = working. */
   presence?: 'working' | 'available' | 'lounge' | 'leaving';
-  /** A lifecycle scene (entering, going to or resting in the lounge, walking
-   *  back, leaving) is steering this character. While set, the FSM only
+  /** A scene (entering, going to or resting in the lounge, walking back,
+   *  leaving, or walking over to talk to another agent) is steering this
+   *  character. While set, the FSM only
    *  advances the walk along `path` and animates — it never re-paths to the
    *  seat, stands up to wander, or sits on arrival; OfficeState finishes the
    *  scene. */
@@ -252,6 +253,11 @@ export interface Character {
   /** Seconds before an available agent with no way to its desk searches for
    *  one again (a failed search is not repeated every frame). */
   deskRetryTimer?: number;
+  /** Seconds left on the ✉ envelope over a speaker whose conversation could
+   *  not be walked (no listener, or no way there). A field of its own rather
+   *  than a `bubbleType`: it never displaces a permission / waiting bubble,
+   *  and it is drawn only while no other bubble shows. */
+  envelopeTimer?: number;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */

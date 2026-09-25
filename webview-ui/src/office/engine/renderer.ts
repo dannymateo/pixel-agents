@@ -54,6 +54,7 @@ import {
 import { getPetSprites } from '../sprites/petSpriteData.js';
 import { getCachedSprite, getOutlineSprite } from '../sprites/spriteCache.js';
 import {
+  BUBBLE_ENVELOPE_SPRITE,
   BUBBLE_GOODBYE_SPRITE,
   BUBBLE_HEART_SPRITE,
   BUBBLE_PERMISSION_SPRITE,
@@ -781,26 +782,37 @@ function renderBubbles(
   zoom: number,
 ): void {
   for (const ch of characters) {
-    if (!ch.bubbleType) continue;
-    // The green checkmark bubble only represents "done" (turn finished). The
-    // idle "Waiting for input" state communicates via its overlay label, not a
-    // bubble, so skip the bubble for it.
-    if (ch.bubbleType === 'waiting' && ch.waitingAwaitingInput) continue;
-
-    const sprite =
-      ch.bubbleType === 'permission'
-        ? BUBBLE_PERMISSION_SPRITE
-        : ch.bubbleType === 'goodbye'
-          ? BUBBLE_GOODBYE_SPRITE
-          : BUBBLE_WAITING_SPRITE;
-
-    // Compute opacity: permission = full, waiting/goodbye = fade in last 0.5s
+    let sprite: SpriteData;
     let alpha = 1.0;
-    if (
-      (ch.bubbleType === 'waiting' || ch.bubbleType === 'goodbye') &&
-      ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC
-    ) {
-      alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC;
+    if (ch.bubbleType) {
+      // The green checkmark bubble only represents "done" (turn finished). The
+      // idle "Waiting for input" state communicates via its overlay label, not a
+      // bubble, so skip the bubble for it.
+      if (ch.bubbleType === 'waiting' && ch.waitingAwaitingInput) continue;
+
+      sprite =
+        ch.bubbleType === 'permission'
+          ? BUBBLE_PERMISSION_SPRITE
+          : ch.bubbleType === 'goodbye'
+            ? BUBBLE_GOODBYE_SPRITE
+            : BUBBLE_WAITING_SPRITE;
+
+      // Compute opacity: permission = full, waiting/goodbye = fade in last 0.5s
+      if (
+        (ch.bubbleType === 'waiting' || ch.bubbleType === 'goodbye') &&
+        ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC
+      ) {
+        alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC;
+      }
+    } else if (ch.envelopeTimer !== undefined && ch.envelopeTimer > 0) {
+      // A conversation that could not be walked: the envelope, drawn only
+      // while no other bubble shows, fading out like the waiting bubble.
+      sprite = BUBBLE_ENVELOPE_SPRITE;
+      if (ch.envelopeTimer < BUBBLE_FADE_DURATION_SEC) {
+        alpha = ch.envelopeTimer / BUBBLE_FADE_DURATION_SEC;
+      }
+    } else {
+      continue;
     }
 
     const cached = getCachedSprite(sprite, zoom);

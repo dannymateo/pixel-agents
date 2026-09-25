@@ -3,6 +3,7 @@ import { PALETTE_COUNT } from '../../constants.js';
 import { adjustSprite } from '../colorize.js';
 import type { Direction, SpriteData } from '../types.js';
 import { Direction as Dir } from '../types.js';
+import bubbleEnvelopeData from './bubble-envelope.json';
 import bubbleGoodbyeData from './bubble-goodbye.json';
 import bubblePermissionData from './bubble-permission.json';
 import bubblePetData from './bubble-pet.json';
@@ -28,6 +29,10 @@ export const BUBBLE_WAITING_SPRITE: SpriteData = resolveBubbleSprite(bubbleWaiti
 /** Goodbye bubble: a waving hand, shown at the door by a derived agent
  *  leaving the living office (11x13) */
 export const BUBBLE_GOODBYE_SPRITE: SpriteData = resolveBubbleSprite(bubbleGoodbyeData);
+
+/** Envelope bubble: a letter over a speaker whose conversation could not be
+ *  walked (no listener in the office, or no way there) (11x13) */
+export const BUBBLE_ENVELOPE_SPRITE: SpriteData = resolveBubbleSprite(bubbleEnvelopeData);
 
 /** Heart bubble: pet petting feedback (11x13) */
 export const BUBBLE_HEART_SPRITE: SpriteData = resolveBubbleSprite(bubblePetData);

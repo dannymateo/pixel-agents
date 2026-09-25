@@ -5,6 +5,9 @@ import {
   CHARACTER_HIT_HALF_WIDTH,
   CHARACTER_HIT_HEIGHT,
   CHARACTER_SITTING_OFFSET_PX,
+  CONVERSATION_ENVELOPE_SEC,
+  CONVERSATION_SPOT_MAX_DIST,
+  CONVERSATION_TALK_HOLD_MAX_MS,
   DISMISS_BUBBLE_FAST_FADE_SEC,
   DOOR_OPEN_HOLD_MS,
   FURNITURE_ANIM_INTERVAL_SEC,
@@ -48,6 +51,7 @@ import type {
 } from '../types.js';
 import { CharacterState, Direction, PetState, TILE_SIZE } from '../types.js';
 import { createCharacter, updateCharacter } from './characters.js';
+import type { SceneHost } from './conversationScene.js';
 import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
 import { createPet, updatePet } from './petEntity.js';
 import { anchorTile, closestFreeSeat } from './seatPlacement.js';
@@ -74,14 +78,30 @@ export interface LivingTargets {
  *   lounge: desk → a free rest seat (or beside the lounge), then rests there.
  *   return: wherever → own seat, then back to the FSM.
  *   leave:  → door tile, goodbye bubble, fade out, deleted, onGone.
+ *   talk:   → a free tile beside another agent's desk, then stands there
+ *           (`hold`) until the conversation director sends it back
+ *           (returnToSeat → a `return` scene, or back to the lounge).
  */
 interface LifecycleScene {
-  kind: 'enter' | 'lounge' | 'return' | 'leave';
-  phase: 'walk' | 'rest' | 'goodbye' | 'exit';
-  /** Seconds left in the goodbye / exit phase. */
+  kind: 'enter' | 'lounge' | 'return' | 'leave' | 'talk';
+  phase: 'walk' | 'rest' | 'goodbye' | 'exit' | 'hold';
+  /** Seconds left in the goodbye / exit phase; seconds spent holding (talk). */
   timer: number;
   /** The rest seat this character holds (lounge scene only). */
   loungeSeat: string | null;
+  /** talk only: the listener, and the tile the speaker stands on. */
+  partnerId?: number;
+  target?: { col: number; row: number };
+}
+
+/** The direction to face from (fc,fr) to look at (tc,tr): the dominant axis,
+ *  horizontal on a tie. */
+function directionToward(fc: number, fr: number, tc: number, tr: number): Direction {
+  const dc = tc - fc;
+  const dr = tr - fr;
+  if (dc === 0 && dr === 0) return Direction.DOWN;
+  if (Math.abs(dc) >= Math.abs(dr)) return dc > 0 ? Direction.RIGHT : Direction.LEFT;
+  return dr > 0 ? Direction.DOWN : Direction.UP;
 }
 
 /**
@@ -113,7 +133,7 @@ function seatFacingOffset(direction: Direction): { dCol: number; dRow: number } 
   return { dCol: 0, dRow: -1 };
 }
 
-export class OfficeState {
+export class OfficeState implements SceneHost {
   layout: OfficeLayout;
   tileMap: TileTypeVal[][];
   seats: Map<string, Seat>;
@@ -1363,6 +1383,10 @@ export class OfficeState {
     if (!ch || !this.livingTargets) return;
     const current = this.scenes.get(id);
     if (current?.kind === 'leave' || current?.kind === 'lounge') return;
+    // Mid-conversation — speaking or listening: the talk finishes first; the
+    // speaker's returnToSeat then takes it (or its listener) to the lounge
+    // (the presence already says so).
+    if (current?.kind === 'talk' || this.isListening(id)) return;
 
     let restSeat: string | null = null;
     let anchor: Seat | undefined;
@@ -1615,6 +1639,9 @@ export class OfficeState {
     if (!scene) return;
     this.scenes.delete(ch.id);
     ch.scripted = false;
+    // However a conversation ends (sent back, a user order, leaving, removed),
+    // its listener is let go.
+    if (scene.kind === 'talk') this.releaseListener(scene);
     if (scene.loungeSeat) {
       const seat = this.seats.get(scene.loungeSeat);
       if (seat) seat.assigned = false;
@@ -1627,6 +1654,8 @@ export class OfficeState {
   private offerRestSeat(): void {
     for (const [id, scene] of this.scenes) {
       if (scene.kind !== 'lounge' || scene.loungeSeat) continue;
+      // Listening to someone: it takes a seat once the talk is over.
+      if (this.isListening(id)) continue;
       const ch = this.characters.get(id);
       if (!ch) continue;
       this.dropScene(ch); // holds no rest seat: no recursion
@@ -1665,6 +1694,13 @@ export class OfficeState {
       case 'leave':
         this.beginGoodbye(ch, scene);
         return;
+      case 'talk':
+        scene.phase = 'hold';
+        ch.state = CharacterState.IDLE;
+        ch.frame = 0;
+        ch.frameTimer = 0;
+        if (scene.partnerId !== undefined) this.turnToward(ch, scene.partnerId);
+        return;
     }
   }
 
@@ -1702,6 +1738,12 @@ export class OfficeState {
         if (ch.state !== CharacterState.WALK) this.arrive(ch, scene);
         return false;
       case 'rest':
+        return false;
+      case 'hold':
+        // Safety net: a talk nobody ends (a director dropped without clear())
+        // never leaves its speaker scripted for good.
+        scene.timer += dt;
+        if (scene.timer * 1000 > CONVERSATION_TALK_HOLD_MAX_MS) this.returnToSeat(ch.id);
         return false;
       case 'goodbye':
         scene.timer -= dt;
@@ -1773,9 +1815,27 @@ export class OfficeState {
           } else if (scene.phase === 'rest' && !scene.loungeSeat) {
             break; // standing beside the lounge: stays put
           }
+          // Listening to someone: it looks for a seat once the talk is over.
+          if (this.isListening(id)) break;
           // Lost its rest seat (or its way there): look for another.
           this.dropScene(ch);
           this.goToLounge(id);
+          break;
+        }
+        case 'talk': {
+          if (scene.phase === 'walk') {
+            this.routeTalk(ch, scene);
+            break;
+          }
+          // Holding: stays unless its tile is gone or the listener's desk moved away.
+          const anchor = scene.partnerId !== undefined ? this.talkAnchor(scene.partnerId) : null;
+          const tooFar =
+            !!anchor &&
+            Math.abs(anchor.col - ch.tileCol) + Math.abs(anchor.row - ch.tileRow) >
+              CONVERSATION_SPOT_MAX_DIST;
+          if (tooFar || !isWalkable(ch.tileCol, ch.tileRow, this.tileMap, this.blockedTiles)) {
+            this.routeTalk(ch, scene);
+          }
           break;
         }
       }
@@ -1821,6 +1881,293 @@ export class OfficeState {
       cb();
     } catch (err) {
       console.error('[Webview] living-office onGone callback failed:', err);
+    }
+  }
+
+  // ── Conversations (spec §4b): the director's SceneHost ────────
+  // A conversation is one more scene: the speaker walks (scripted) to a free
+  // tile beside the listener's desk, stands there (`hold`) while the director
+  // types its bubble, and is sent back by returnToSeat. Purely visual: no
+  // presence, activity or seat changes. Leaving always wins over talking.
+
+  /** In the office and free to take part: not removed, not raining out, not leaving. */
+  isPresent(id: number): boolean {
+    const ch = this.characters.get(id);
+    return !!ch && ch.matrixEffect !== 'despawn' && !this.isLeaving(id);
+  }
+
+  canStage(fromId: number, toId: number | undefined): boolean {
+    if (toId === undefined || toId === fromId) return false;
+    return this.isPresent(fromId) && this.isPresent(toId);
+  }
+
+  /**
+   * Walk `fromId` to the free walkable tile closest to `toId`'s desk (its
+   * current tile when it has none). A listener resting in the lounge first
+   * walks back to its desk. False — and nothing moves — when there is no way
+   * there.
+   */
+  walkNextTo(fromId: number, toId: number): boolean {
+    if (!this.canStage(fromId, toId)) return false;
+    const ch = this.characters.get(fromId)!;
+    const partner = this.characters.get(toId)!;
+    const previous = this.scenes.get(fromId);
+    const scene: LifecycleScene = {
+      kind: 'talk',
+      phase: 'walk',
+      timer: 0,
+      loungeSeat: null,
+      partnerId: toId,
+    };
+    // Plan before touching anyone: a failed plan must leave both as they were.
+    const plan = this.planTalk(ch, scene, previous);
+    if (!plan) return false;
+
+    if (previous) this.dropScene(ch);
+    scene.target = plan.target;
+    this.scenes.set(fromId, scene);
+    ch.scripted = true;
+    if (plan.path.length > 0) {
+      this.startWalk(ch, plan.path);
+    } else {
+      this.placeAt(ch, plan.target.col, plan.target.row);
+      this.arrive(ch, scene);
+    }
+
+    // A resting listener comes back to its desk to listen; releaseListener
+    // sends it back to rest (its presence still says 'lounge').
+    if (this.scenes.get(toId)?.kind === 'lounge' && partner.seatId) this.returnToDesk(toId);
+    return true;
+  }
+
+  /** Arrived beside the listener — or no longer steered by a conversation
+   *  (interrupted, removed): either way there is nothing left to wait for. */
+  hasArrived(fromId: number): boolean {
+    const scene = this.scenes.get(fromId);
+    return scene?.kind !== 'talk' || scene.phase === 'hold';
+  }
+
+  /** The speaker looks at the listener; a listener standing or seated (not
+   *  walking) looks back. The listener's desk facing returns with returnToSeat. */
+  faceEachOther(fromId: number, toId: number): void {
+    const speaker = this.characters.get(fromId);
+    const listener = this.characters.get(toId);
+    if (!speaker || !listener) return;
+    if (speaker.state !== CharacterState.WALK) this.turnToward(speaker, toId);
+    if (listener.state !== CharacterState.WALK && !listener.scripted) {
+      listener.dir = directionToward(
+        listener.tileCol,
+        listener.tileRow,
+        speaker.tileCol,
+        speaker.tileRow,
+      );
+    }
+  }
+
+  /** End the conversation walk: back to its desk — or to the lounge when its
+   *  presence says it is resting. A listener pulled out of the lounge goes
+   *  back to rest; one at its desk faces its desk again. No-op unless a
+   *  conversation steers `fromId`. */
+  returnToSeat(fromId: number): void {
+    const ch = this.characters.get(fromId);
+    const scene = this.scenes.get(fromId);
+    if (!ch || scene?.kind !== 'talk') return;
+    this.releaseListener(scene);
+    if (ch.presence === 'lounge' && this.livingTargets) {
+      this.dropScene(ch);
+      this.goToLounge(fromId);
+      if (this.scenes.has(fromId)) return; // on its way to rest
+    }
+    this.returnToDesk(fromId);
+  }
+
+  /** Back where it belongs: no conversation walk and no walk back pending. */
+  isSeated(fromId: number): boolean {
+    if (!this.characters.has(fromId)) return true;
+    const scene = this.scenes.get(fromId);
+    if (!scene) return true;
+    if (scene.kind === 'lounge') return scene.phase === 'rest';
+    return scene.kind !== 'talk' && scene.kind !== 'return';
+  }
+
+  /** The ✉ envelope over a speaker that could not walk its conversation. */
+  showEnvelope(fromId: number): void {
+    const ch = this.characters.get(fromId);
+    if (!ch || !this.isPresent(fromId)) return;
+    ch.envelopeTimer = CONVERSATION_ENVELOPE_SEC;
+  }
+
+  /** Someone is walking up to `id` or talking to it. */
+  private isListening(id: number): boolean {
+    for (const s of this.scenes.values()) {
+      if (s.kind === 'talk' && s.partnerId === id) return true;
+    }
+    return false;
+  }
+
+  /** Where the conversation happens: the listener's desk, or where it stands
+   *  when it has none. */
+  private talkAnchor(id: number): { col: number; row: number } | null {
+    const ch = this.characters.get(id);
+    if (!ch) return null;
+    const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+    return seat ? { col: seat.seatCol, row: seat.seatRow } : { col: ch.tileCol, row: ch.tileRow };
+  }
+
+  /** Face `otherId`: where it stands, or its desk while it walks there. */
+  private turnToward(ch: Character, otherId: number): void {
+    const other = this.characters.get(otherId);
+    if (!other) return;
+    const look =
+      other.state === CharacterState.WALK
+        ? this.talkAnchor(otherId)
+        : { col: other.tileCol, row: other.tileRow };
+    if (look) ch.dir = directionToward(ch.tileCol, ch.tileRow, look.col, look.row);
+  }
+
+  /**
+   * The speaker's spot: the free walkable tile closest to the listener's
+   * anchor (ties: closer to the speaker) that the speaker can reach, skipping
+   * the door tile, tiles other characters stand on and tiles other speakers
+   * are heading to, no farther than CONVERSATION_SPOT_MAX_DIST. One flood fill
+   * decides reachability for every candidate, then one path search walks it —
+   * a walled-off listener costs one fill, not a search per candidate.
+   */
+  private planTalk(
+    ch: Character,
+    scene: LifecycleScene,
+    previous: LifecycleScene | undefined,
+  ): { target: { col: number; row: number }; path: Array<{ col: number; row: number }> } | null {
+    if (scene.partnerId === undefined) return null;
+    const anchor = this.talkAnchor(scene.partnerId);
+    if (!anchor) return null;
+    const taken = new Set<string>();
+    for (const other of this.characters.values()) {
+      if (other.id !== ch.id) taken.add(`${other.tileCol},${other.tileRow}`);
+    }
+    for (const [id, s] of this.scenes) {
+      if (id !== ch.id && s.kind === 'talk' && s.target) {
+        taken.add(`${s.target.col},${s.target.row}`);
+      }
+    }
+    const door = this.livingTargets?.door;
+    if (door) taken.add(`${door.col},${door.row}`);
+
+    const candidates = this.walkableTiles
+      .filter((t) => !taken.has(`${t.col},${t.row}`))
+      .map((t) => ({
+        t,
+        d: Math.abs(t.col - anchor.col) + Math.abs(t.row - anchor.row),
+        s: Math.abs(t.col - ch.tileCol) + Math.abs(t.row - ch.tileRow),
+      }))
+      .filter((c) => c.d > 0 && c.d <= CONVERSATION_SPOT_MAX_DIST)
+      .sort((a, b) => a.d - b.d || a.s - b.s);
+    if (candidates.length === 0) return null;
+    const reach = this.reachableFrom(ch, previous);
+    const cols = this.tileMap[0]?.length ?? 0;
+    for (const { t } of candidates) {
+      if (t.col === ch.tileCol && t.row === ch.tileRow) return { target: t, path: [] };
+      if (!reach[t.row * cols + t.col]) continue;
+      const path = this.scenePath(ch, t.col, t.row, previous);
+      if (path.length > 0) return { target: t, path };
+    }
+    return null;
+  }
+
+  /** Tiles `ch` can walk to (flood fill over the same map scenePath uses),
+   *  as a row-major bitmap. */
+  private reachableFrom(ch: Character, scene: LifecycleScene | undefined): Uint8Array {
+    const rows = this.tileMap.length;
+    const cols = this.tileMap[0]?.length ?? 0;
+    const reach = new Uint8Array(rows * cols);
+    if (ch.tileCol < 0 || ch.tileCol >= cols || ch.tileRow < 0 || ch.tileRow >= rows) return reach;
+    const keys: string[] = [];
+    const own = this.ownSeatKey(ch);
+    if (own) keys.push(own);
+    if (scene?.loungeSeat) {
+      const s = this.seats.get(scene.loungeSeat);
+      if (s) keys.push(`${s.seatCol},${s.seatRow}`);
+    }
+    const removed = keys.filter((k) => this.blockedTiles.delete(k));
+    try {
+      const queue = new Int32Array(rows * cols);
+      let head = 0;
+      let tail = 0;
+      const start = ch.tileRow * cols + ch.tileCol;
+      reach[start] = 1;
+      queue[tail++] = start;
+      while (head < tail) {
+        const cur = queue[head++];
+        const col = cur % cols;
+        const row = (cur - col) / cols;
+        const next: Array<[number, number]> = [
+          [col, row - 1],
+          [col, row + 1],
+          [col - 1, row],
+          [col + 1, row],
+        ];
+        for (const [c, r] of next) {
+          if (c < 0 || c >= cols || r < 0 || r >= rows) continue;
+          const idx = r * cols + c;
+          if (reach[idx]) continue;
+          if (!isWalkable(c, r, this.tileMap, this.blockedTiles)) continue;
+          reach[idx] = 1;
+          queue[tail++] = idx;
+        }
+      }
+    } finally {
+      for (const k of removed) this.blockedTiles.add(k);
+    }
+    return reach;
+  }
+
+  /** Re-route a conversation walk after a layout rebuild; with no way to the
+   *  listener any more, it talks from where it stands. */
+  private routeTalk(ch: Character, scene: LifecycleScene): void {
+    const plan = this.planTalk(ch, scene, scene);
+    scene.phase = 'walk';
+    if (plan && plan.path.length > 0) {
+      scene.target = plan.target;
+      this.startWalk(ch, plan.path);
+      return;
+    }
+    scene.target = { col: ch.tileCol, row: ch.tileRow };
+    this.placeAt(ch, ch.tileCol, ch.tileRow);
+    this.arrive(ch, scene);
+  }
+
+  /** The conversation is over for the listener: back to rest if it was pulled
+   *  out of the lounge, else face its desk again if it sits there. */
+  private releaseListener(scene: LifecycleScene): void {
+    const id = scene.partnerId;
+    if (id === undefined) return;
+    scene.partnerId = undefined; // once: the listener is no longer held
+    const partner = this.characters.get(id);
+    if (!partner || !this.isPresent(id)) return;
+    const partnerScene = this.scenes.get(id);
+    if (partner.presence === 'lounge' && partnerScene?.kind !== 'lounge') {
+      // Pulled out of the lounge for the talk, or told to rest meanwhile.
+      this.goToLounge(id);
+      return;
+    }
+    if (partnerScene?.kind === 'lounge') {
+      // Rested standing (no seat) while listening: a seat freed meanwhile
+      // was held back for after the talk.
+      const seatFree = this.livingTargets?.loungeSeats.some(
+        (uid) => this.seats.get(uid)?.assigned === false,
+      );
+      if (!partnerScene.loungeSeat && seatFree) this.offerRestSeat();
+      return;
+    }
+    if (this.scenes.has(id)) return;
+    const seat = partner.seatId ? this.seats.get(partner.seatId) : undefined;
+    if (
+      seat &&
+      partner.state === CharacterState.TYPE &&
+      partner.tileCol === seat.seatCol &&
+      partner.tileRow === seat.seatRow
+    ) {
+      partner.dir = seat.facingDir;
     }
   }
 
@@ -2031,6 +2378,11 @@ export class OfficeState {
       if (ch.sceneAlpha !== undefined && scene?.phase !== 'exit') {
         ch.sceneAlpha += dt / MATRIX_EFFECT_DURATION_SEC;
         if (ch.sceneAlpha >= 1) ch.sceneAlpha = undefined;
+      }
+
+      if (ch.envelopeTimer !== undefined) {
+        ch.envelopeTimer -= dt;
+        if (ch.envelopeTimer <= 0) ch.envelopeTimer = undefined;
       }
 
       // Tick bubble timer for waiting bubbles

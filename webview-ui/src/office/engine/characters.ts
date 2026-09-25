@@ -140,8 +140,8 @@ function stepAlongPath(ch: Character, dt: number): void {
 }
 
 /**
- * A scripted character (a living-office scene is steering it) only walks the
- * path it was given and animates. Every autonomous decision of the FSM —
+ * A scripted character (a living-office scene, or a conversation walk, is
+ * steering it) only walks the path it was given and animates. Every autonomous decision of the FSM —
  * re-pathing to the seat when active, standing up to wander, sitting down on
  * arrival — is left to the scene in OfficeState, so the two never fight.
  * When the path runs out it stops (IDLE) on the last tile.

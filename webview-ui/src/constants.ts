@@ -420,3 +420,45 @@ export const CONVERSATION_BUBBLE_MAX_W = 220;
 export const CONVERSATION_BUBBLE_MAX_LINES = 8;
 export const CONVERSATION_BUBBLE_BG = '#f4f1e6';
 export const CONVERSATION_BUBBLE_BORDER = '#1e1e2e';
+/** Text color inside a conversation bubble (light background). */
+export const CONVERSATION_BUBBLE_TEXT = '#1e1e2e';
+/** "…ver completo" link color inside a conversation bubble. */
+export const CONVERSATION_BUBBLE_LINK = '#4a2ad0';
+/** Once the whole text is shown, the speaker lingers this long before walking back. */
+export const CONVERSATION_READ_HOLD_MS = 2500;
+/** A walk to the listener (or back to the desk) that takes longer is cut short:
+ *  the scene goes on where the speaker stands. */
+export const CONVERSATION_WALK_MAX_MS = 20000;
+/** Code points a bubble ever holds; longer texts end in "…ver completo". */
+export const CONVERSATION_TEXT_MAX_CHARS = 2000;
+/** Scenes waiting per speaker; the oldest waiting one is dropped past this. */
+export const CONVERSATION_QUEUE_MAX_PER_AGENT = 8;
+/** Scenes waiting in the whole office; the oldest waiting one is dropped past this. */
+export const CONVERSATION_QUEUE_MAX_TOTAL = 64;
+/** Scenes that may start (each one path-searched) in a single frame; the
+ *  rest start on the next frames, so a burst never stalls one. */
+export const CONVERSATION_STARTS_PER_FRAME = 2;
+/** Ids of finished / dropped scenes remembered so a repeated id never replays. */
+export const CONVERSATION_RECENT_IDS_MAX = 512;
+/** Combining marks kept per character (a longer run — "Zalgo" — is cut). */
+export const CONVERSATION_MARKS_PER_CHAR = 3;
+/** Longest conversationId accepted (anything longer is dropped). */
+export const CONVERSATION_ID_MAX_LENGTH = 256;
+/** Farthest (Manhattan tiles) the speaker's spot may be from the listener's
+ *  desk: past it — the listener walled off — the envelope shows instead. */
+export const CONVERSATION_SPOT_MAX_DIST = 3;
+/** Longest a speaker may stand beside its listener before the office sends
+ *  it back on its own (the director always ends a talk well before this). */
+export const CONVERSATION_TALK_HOLD_MAX_MS =
+  CONVERSATION_WALK_MAX_MS + CONVERSATION_MAX_MS + CONVERSATION_READ_HOLD_MS;
+/** A scene whose speaker or listener is not in the office yet (an assign
+ *  racing the child's arrival) is retried this long before the envelope. */
+export const CONVERSATION_STAGE_GRACE_MS = 1500;
+/** How long the ✉ envelope bubble stays over a speaker that could not walk. */
+export const CONVERSATION_ENVELOPE_SEC = 2.5;
+/** Conversation bubble text size and line height (CSS px); max height =
+ *  CONVERSATION_BUBBLE_MAX_LINES lines, scrolled inside. */
+export const CONVERSATION_BUBBLE_FONT_PX = 18;
+export const CONVERSATION_BUBBLE_LINE_HEIGHT_PX = 20;
+/** Above ToolOverlay (41/42), below the intro bubble (45). */
+export const CONVERSATION_BUBBLE_Z_INDEX = 43;

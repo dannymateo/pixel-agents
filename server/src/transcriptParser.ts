@@ -509,7 +509,7 @@ export function processTranscriptLine(
                 isAsyncAgentResult(block)
               ) {
                 console.log(
-                  `[Pixel Agents] Agent ${agentId} background agent launched: ${completedToolId}`,
+                  `[Pixel Agents] Agent ${agentId} background agent launched: ${JSON.stringify(completedToolId)}`,
                 );
                 agent.backgroundAgentToolIds.add(completedToolId);
                 // Current harnesses OMIT run_in_background from the tool_use
@@ -539,7 +539,7 @@ export function processTranscriptLine(
               }
 
               console.log(
-                `[Pixel Agents] JSONL: Agent ${agentId} - tool done: ${block.tool_use_id}`,
+                `[Pixel Agents] JSONL: Agent ${agentId} - tool done: ${JSON.stringify(block.tool_use_id)}`,
               );
               // If the completed tool spawned a subagent, clear its subagent tools
               if (isSubagentTool(completedToolName)) {
@@ -560,12 +560,19 @@ export function processTranscriptLine(
                 completedToolName === undefined &&
                 !agent.backgroundAgentToolIds.has(completedToolId)
               ) {
-                // The tool was already forgotten (a user prompt mid-spawn
-                // cleared foreground activity) but its result still closes the
-                // spawn: a derived agent for it must not outlive it. The host's
-                // lookup misses for anything that never was a spawn.
-                conversationTracker?.onSpawnResult(agentId, completedToolId, record);
-                spawnToolClosedCallback?.(agentId, completedToolId);
+                if (isAsyncAgentResult(block)) {
+                  // Forgotten, but the receipt says it runs in the background:
+                  // nothing closed. Keep the spawn live like any async launch.
+                  agent.backgroundAgentToolIds.add(completedToolId);
+                  backgroundAgentDetectedCallback?.(agentId);
+                } else {
+                  // The tool was already forgotten (a user prompt mid-spawn
+                  // cleared foreground activity) but its result still closes
+                  // the spawn: a derived agent for it must not outlive it. The
+                  // host's lookup misses for anything that never was a spawn.
+                  conversationTracker?.onSpawnResult(agentId, completedToolId, record);
+                  spawnToolClosedCallback?.(agentId, completedToolId);
+                }
               }
               agent.activeToolIds.delete(completedToolId);
               agent.activeToolStatuses.delete(completedToolId);
@@ -1609,12 +1616,12 @@ function applyTaskNotice(
     isWorkflowSpawn(agent, agentId, completedToolId, agents)
   ) {
     console.log(
-      `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
+      `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${JSON.stringify(completedToolId)}`,
     );
     endBackgroundSpawn(agent, agentId, completedToolId, agents);
   } else {
     console.log(
-      `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
+      `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${JSON.stringify(completedToolId)}`,
     );
     // The parent no longer runs it as a tool; the spawn itself stays
     // live (backgroundAgentToolIds) so it can be resumed and the tree

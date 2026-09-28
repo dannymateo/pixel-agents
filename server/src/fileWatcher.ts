@@ -2606,6 +2606,9 @@ export function reassignAgentToFile(
   agent.fileOffset = 0;
   agent.lineBuffer = '';
   agent.skipToNextLine = false;
+  // Read from the start (a resumed session's file is full of history): it
+  // must not replay as conversations.
+  fileWatcherConversationTracker?.beginReplay(agentId);
   persistAgents();
 
   // Start watching new file

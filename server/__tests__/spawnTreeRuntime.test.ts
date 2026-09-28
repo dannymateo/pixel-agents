@@ -414,6 +414,55 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     expect(messages).toEqual([]);
   });
 
+  it('C4: /resume reads the resumed transcript as history: its old conversations stay silent', () => {
+    const sendMessageLine = (uuid: string, timestamp: string, text: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid,
+        timestamp,
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: `sm-${uuid}`,
+              name: 'SendMessage',
+              input: { to: 'x', message: text },
+            },
+          ],
+        },
+      });
+    const conversations = () => messages.filter((m) => m.type === 'agentConversation');
+    lead.isExternal = true;
+    runtime.registerAgent(LEAD_SESSION, 1);
+    // A live message first: the lead's own replay is over.
+    leadLine(sendMessageLine('now1', new Date(Date.now() + 1000).toISOString(), 'ahora'));
+    expect(conversations()).toHaveLength(1);
+
+    const resumed = path.join(tmpRoot, 'old-session.jsonl');
+    fs.writeFileSync(
+      resumed,
+      sendMessageLine('old1', '2026-01-01T00:00:00.000Z', 'de hace meses') + '\n',
+    );
+    messages.length = 0;
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionEnd',
+      session_id: LEAD_SESSION,
+      reason: 'resume',
+      transcript_path: lead.jsonlFile,
+      cwd: tmpRoot,
+    });
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'old-session',
+      source: 'resume',
+      transcript_path: resumed,
+      cwd: tmpRoot,
+    });
+    expect(store.get(1)?.jsonlFile).toBe(resumed);
+    readNewLines(1, store, runtime.waitingTimers, runtime.permissionTimers);
+    expect(conversations()).toEqual([]);
+  });
+
   it('coalesces a burst of scan requests for one root into a single scan', async () => {
     const spy = vi.spyOn(runtime, 'scanTree');
     runtime.scheduleTreeScan(1);
@@ -714,6 +763,21 @@ describe('spawn tree runtime (docs/adr/0002)', () => {
     expect(maybeByKey('aaa')).toBeDefined();
     leadLine(toolResult('toolu_L'));
     expect(gone('aaa')).toBe(true);
+  });
+
+  it('an async-launch receipt landing after a user prompt cleared the tool keeps the spawn live', () => {
+    leadLine(spawnToolUse('toolu_L'));
+    writeSidecar('aaa', { agentType: 'Explore', toolUseId: 'toolu_L', spawnDepth: 1 });
+    scan();
+    leadLine(JSON.stringify({ type: 'user', message: { content: 'also do this' } }));
+    // The receipt says it is running in the background: nothing closed.
+    leadLine(asyncLaunchResult('toolu_L'));
+    expect(maybeByKey('aaa')).toBeDefined();
+    expect(maybeByKey('aaa')?.presence).not.toBe('leaving');
+    expect(lead.backgroundAgentToolIds.has('toolu_L')).toBe(true);
+    // And its completion notice still finds it.
+    leadLine(queueOpCompletion('toolu_L'));
+    expect(maybeByKey('aaa')?.presence).toBe('available');
   });
 
   it('a new sibling never repeats the hue of a live one', () => {

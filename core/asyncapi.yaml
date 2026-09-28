@@ -127,6 +127,12 @@ components:
         - $ref: '#/components/schemas/LivingOfficeSettings'
         # Conversations between agents (text stripped for unprivileged connections)
         - $ref: '#/components/schemas/AgentConversation'
+        # Office consoles (point-to-point, privileged connections only)
+        - $ref: '#/components/schemas/TerminalSnapshot'
+        - $ref: '#/components/schemas/TerminalOutput'
+        - $ref: '#/components/schemas/TerminalExit'
+        - $ref: '#/components/schemas/LaunchResult'
+        - $ref: '#/components/schemas/LaunchOptions'
       discriminator: type
 
     ClientMessage:
@@ -157,6 +163,11 @@ components:
         - $ref: '#/components/schemas/UnsubscribeAgentFeed'
         - $ref: '#/components/schemas/SetIdleToLoungeMinutes'
         - $ref: '#/components/schemas/SetLoungeToLeaveMinutes'
+        - $ref: '#/components/schemas/TerminalAttach'
+        - $ref: '#/components/schemas/TerminalDetach'
+        - $ref: '#/components/schemas/TerminalInput'
+        - $ref: '#/components/schemas/TerminalResize'
+        - $ref: '#/components/schemas/TerminalClose'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -182,6 +193,11 @@ components:
           items:
             type: string
           description: Tool names that spawn sub-agent characters (e.g. Task, Agent).
+        terminals:
+          type: boolean
+          description: >-
+            True when this connection may launch agents and use office consoles
+            (privileged, standalone, loopback bind, node-pty loaded).
 
     AgentCreated:
       description: A new agent has appeared in the office.
@@ -230,6 +246,9 @@ components:
           $ref: '#/components/schemas/AgentNodeKind'
         presence:
           $ref: '#/components/schemas/AgentPresence'
+        terminalId:
+          type: string
+          description: Office console of this agent. Sent only to privileged connections.
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -936,6 +955,79 @@ components:
         text:
           type: string
 
+    TerminalSnapshot:
+      description: Buffered output of an office console, sent point-to-point on terminalAttach.
+      type: object
+      additionalProperties: false
+      required: [type, terminalId, data, exited]
+      properties:
+        type:
+          const: terminalSnapshot
+        terminalId:
+          type: string
+        data:
+          type: string
+        exited:
+          type: boolean
+
+    TerminalOutput:
+      description: New output of an attached office console (point-to-point, coalesced).
+      type: object
+      additionalProperties: false
+      required: [type, terminalId, data]
+      properties:
+        type:
+          const: terminalOutput
+        terminalId:
+          type: string
+        data:
+          type: string
+
+    TerminalExit:
+      description: The console's process ended.
+      type: object
+      additionalProperties: false
+      required: [type, terminalId, exitCode]
+      properties:
+        type:
+          const: terminalExit
+        terminalId:
+          type: string
+        exitCode:
+          type: integer
+
+    LaunchResult:
+      description: Reply to launchAgent (point-to-point).
+      type: object
+      additionalProperties: false
+      required: [type, ok]
+      properties:
+        type:
+          const: launchResult
+        ok:
+          type: boolean
+        agentId:
+          type: integer
+        terminalId:
+          type: string
+        error:
+          type: string
+
+    LaunchOptions:
+      description: Defaults for the launch dialog (privileged connections only).
+      type: object
+      additionalProperties: false
+      required: [type, defaultCwd, recentDirs]
+      properties:
+        type:
+          const: launchOptions
+        defaultCwd:
+          type: string
+        recentDirs:
+          type: array
+          items:
+            type: string
+
     # ── Client message variants ────────────────────────────────────
 
     WebviewReady:
@@ -948,7 +1040,9 @@ components:
           const: webviewReady
 
     LaunchAgent:
-      description: Launch a new Claude agent in a new terminal.
+      description: >-
+        Launch a new Claude agent (VS Code: in a terminal; standalone: in an
+        office console, folderPath = its working directory).
       type: object
       additionalProperties: false
       required: [type]
@@ -1238,6 +1332,67 @@ components:
         id:
           type: integer
 
+    TerminalAttach:
+      description: Receive an office console's snapshot and live output (privileged).
+      type: object
+      additionalProperties: false
+      required: [type, terminalId]
+      properties:
+        type:
+          const: terminalAttach
+        terminalId:
+          type: string
+
+    TerminalDetach:
+      description: Stop receiving an office console's output.
+      type: object
+      additionalProperties: false
+      required: [type, terminalId]
+      properties:
+        type:
+          const: terminalDetach
+        terminalId:
+          type: string
+
+    TerminalInput:
+      description: Keystrokes for an attached office console (privileged).
+      type: object
+      additionalProperties: false
+      required: [type, terminalId, data]
+      properties:
+        type:
+          const: terminalInput
+        terminalId:
+          type: string
+        data:
+          type: string
+
+    TerminalResize:
+      description: New size of an attached office console (privileged).
+      type: object
+      additionalProperties: false
+      required: [type, terminalId, cols, rows]
+      properties:
+        type:
+          const: terminalResize
+        terminalId:
+          type: string
+        cols:
+          type: integer
+        rows:
+          type: integer
+
+    TerminalClose:
+      description: Kill an office console and its agent (privileged).
+      type: object
+      additionalProperties: false
+      required: [type, terminalId]
+      properties:
+        type:
+          const: terminalClose
+        terminalId:
+          type: string
+
     SetLoungeToLeaveMinutes:
       description: Minutes an unused agent rests in the lounge before leaving (clamped by the server; privileged).
       type: object
@@ -1366,6 +1521,9 @@ components:
           $ref: '#/components/schemas/AgentNodeKind'
         presence:
           $ref: '#/components/schemas/AgentPresence'
+        terminalId:
+          type: string
+          description: Office console of this agent. Sent only to privileged connections.
 
     AgentNodeKind:
       description: >-

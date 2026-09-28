@@ -44,7 +44,12 @@ export type ServerMessage =
   | AgentFeedDenied
   | AgentPresenceChanged
   | LivingOfficeSettings
-  | AgentConversation;
+  | AgentConversation
+  | TerminalSnapshot
+  | TerminalOutput
+  | TerminalExit
+  | LaunchResult
+  | LaunchOptions;
 
 export type ClientMessage =
   | WebviewReady
@@ -72,12 +77,18 @@ export type ClientMessage =
   | SubscribeAgentFeed
   | UnsubscribeAgentFeed
   | SetIdleToLoungeMinutes
-  | SetLoungeToLeaveMinutes;
+  | SetLoungeToLeaveMinutes
+  | TerminalAttach
+  | TerminalDetach
+  | TerminalInput
+  | TerminalResize
+  | TerminalClose;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
   readingTools: string[];
   subagentToolNames: string[];
+  terminals?: boolean;
 }
 
 export interface AgentCreated {
@@ -97,6 +108,7 @@ export interface AgentCreated {
   depth?: number;
   nodeKind?: AgentNodeKind;
   presence?: AgentPresence;
+  terminalId?: string;
 }
 
 export type AgentNodeKind = 'agent' | 'workflow';
@@ -132,6 +144,7 @@ export interface AgentSeatMeta {
   teammateName?: string;
   nodeKind?: AgentNodeKind;
   presence?: AgentPresence;
+  terminalId?: string;
 }
 
 export interface AgentStatus {
@@ -422,6 +435,39 @@ export interface AgentConversation {
 
 export type ConversationKind = 'assign' | 'report' | 'message';
 
+export interface TerminalSnapshot {
+  type: 'terminalSnapshot';
+  terminalId: string;
+  data: string;
+  exited: boolean;
+}
+
+export interface TerminalOutput {
+  type: 'terminalOutput';
+  terminalId: string;
+  data: string;
+}
+
+export interface TerminalExit {
+  type: 'terminalExit';
+  terminalId: string;
+  exitCode: number;
+}
+
+export interface LaunchResult {
+  type: 'launchResult';
+  ok: boolean;
+  agentId?: number;
+  terminalId?: string;
+  error?: string;
+}
+
+export interface LaunchOptions {
+  type: 'launchOptions';
+  defaultCwd: string;
+  recentDirs: string[];
+}
+
 export interface WebviewReady {
   type: 'webviewReady';
 }
@@ -555,4 +601,32 @@ export interface SetIdleToLoungeMinutes {
 export interface SetLoungeToLeaveMinutes {
   type: 'setLoungeToLeaveMinutes';
   minutes: number;
+}
+
+export interface TerminalAttach {
+  type: 'terminalAttach';
+  terminalId: string;
+}
+
+export interface TerminalDetach {
+  type: 'terminalDetach';
+  terminalId: string;
+}
+
+export interface TerminalInput {
+  type: 'terminalInput';
+  terminalId: string;
+  data: string;
+}
+
+export interface TerminalResize {
+  type: 'terminalResize';
+  terminalId: string;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalClose {
+  type: 'terminalClose';
+  terminalId: string;
 }

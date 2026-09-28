@@ -263,11 +263,17 @@ function App() {
   // show-areas gate on the test-hooks namespace (module-load installTestHooks
   // can't reach these React callbacks). Bypasses only canvas pixel→tile
   // geometry — the handlers still own undo/dirty/rebuild. Guarded on isE2E.
+  const {
+    handleEditorTileAction,
+    handleEditorEraseAction,
+    zoom: editorZoom,
+    panRef: editorPanRef,
+  } = editor;
   useEffect(() => {
     if (!isE2E || typeof window === 'undefined') return;
     const hooks = (window.__pixelAgentsTestHooks ??= {});
-    hooks.editorTileAction = (col, row) => editor.handleEditorTileAction(col, row);
-    hooks.editorEraseAction = (col, row) => editor.handleEditorEraseAction(col, row);
+    hooks.editorTileAction = (col, row) => handleEditorTileAction(col, row);
+    hooks.editorEraseAction = (col, row) => handleEditorEraseAction(col, row);
     hooks.getShowAreas = () => effectiveShowAreas;
     hooks.monitorClientPoint = (agentId) => {
       const os = getOfficeState();
@@ -302,8 +308,8 @@ function App() {
       const project = overlayProjection(
         layout,
         rect,
-        editor.zoom,
-        editor.panRef.current,
+        editorZoom,
+        editorPanRef.current,
         window.devicePixelRatio || 1,
       );
       return {
@@ -312,11 +318,11 @@ function App() {
       };
     };
   }, [
-    editor.handleEditorTileAction,
-    editor.handleEditorEraseAction,
+    handleEditorTileAction,
+    handleEditorEraseAction,
     effectiveShowAreas,
-    editor.zoom,
-    editor.panRef,
+    editorZoom,
+    editorPanRef,
   ]);
 
   const containerRef = useRef<HTMLDivElement>(null);

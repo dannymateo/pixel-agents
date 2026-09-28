@@ -91,7 +91,7 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
   let ctx: ClientMessageContext;
 
   function freshCtx(cache: AssetCache | null = null): ClientMessageContext {
-    return { store, cache };
+    return { store, cache, privileged: true };
   }
 
   beforeEach(() => {
@@ -704,7 +704,7 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
   let ctx: ClientMessageContext;
 
   function freshCtx(cache: AssetCache | null = null): ClientMessageContext {
-    return { store, cache };
+    return { store, cache, privileged: true };
   }
 
   beforeEach(() => {
@@ -869,5 +869,95 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
       ctx,
     );
     expect(store.get(1)?.palette).toBe(7);
+  });
+});
+
+/**
+ * An untokened connection is a viewer: it watches the office and nothing more.
+ * Every message that writes under ~/.pixel-agents, changes what the server
+ * watches, or reads paths off disk needs the operator's token — gated once,
+ * before dispatch, so a message added later is closed by default.
+ */
+describe('clientMessageHandler: an untokened viewer cannot change anything', () => {
+  let tempHome: string;
+  let store: AgentStateStore;
+  let sent: Array<Record<string, unknown>>;
+  let ctx: ClientMessageContext;
+  const closeAgent = vi.fn();
+  const dismiss = vi.fn();
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-viewer-'));
+    testHome.dir = tempHome;
+    store = new AgentStateStore();
+    store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
+    store.set(1, createTestAgent({ id: 1, palette: 1, hueShift: 10 }));
+    sent = [];
+    closeAgent.mockClear();
+    dismiss.mockClear();
+    const runtime = {
+      closeAgent,
+      dismissalTracker: { dismiss },
+      watchAllSessions: { current: false },
+    } as unknown as AgentRuntime;
+    ctx = { store, cache: null, runtime, privileged: false };
+  });
+
+  afterEach(() => {
+    store.dispose();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const dispatch = (msg: Record<string, unknown>): void =>
+    handleClientMessage(msg, (m) => sent.push(m), ctx);
+
+  it('cannot close an agent', () => {
+    dispatch({ type: 'closeAgent', id: 1 });
+    expect(closeAgent).not.toHaveBeenCalled();
+    expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it('cannot overwrite the layout', () => {
+    dispatch({ type: 'saveLayout', layout: { version: 1, cols: 1, rows: 1, tiles: [0] } });
+    expect(fs.existsSync(path.join(tempHome, '.pixel-agents', 'layout.json'))).toBe(false);
+  });
+
+  it('cannot add or remove an external asset directory', () => {
+    dispatch({ type: 'addExternalAssetDirectory', path: '/etc' });
+    dispatch({ type: 'removeExternalAssetDirectory', path: '/etc' });
+    expect(readConfig().externalAssetDirectories).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('cannot rewrite seats, area mappings or settings', () => {
+    dispatch({ type: 'saveAgentSeats', seats: { '1': { palette: 4, hueShift: 90 } } });
+    dispatch({ type: 'saveAreaMappings', mappings: { x: ['y'] } });
+    dispatch({ type: 'setSoundEnabled', enabled: false });
+    expect(store.get(1)?.palette).toBe(1);
+    expect(store.get(1)?.hueShift).toBe(10);
+    expect(readConfig().standalone.areaMappings).toEqual({});
+    expect(store.getAdapter()?.getSetting('pixel-agents.soundEnabled', true)).toBe(true);
+  });
+
+  it('cannot make the server watch every session on the machine', () => {
+    dispatch({ type: 'setWatchAllSessions', enabled: true });
+    expect(ctx.runtime?.watchAllSessions.current).toBe(false);
+  });
+
+  it('gets no diagnostics (they carry transcript paths)', () => {
+    dispatch({ type: 'requestDiagnostics' });
+    expect(sent).toEqual([]);
+  });
+
+  it('still connects and watches the office', () => {
+    ctx.runtime = undefined;
+    dispatch({ type: 'webviewReady' });
+    expect(sent.some((m) => m.type === 'existingAgents')).toBe(true);
+  });
+
+  it('the operator (tokened) still can', () => {
+    ctx.privileged = true;
+    dispatch({ type: 'closeAgent', id: 1 });
+    expect(closeAgent).toHaveBeenCalledWith(1);
   });
 });

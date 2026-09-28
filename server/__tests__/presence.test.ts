@@ -1019,6 +1019,7 @@ describe('living office lifecycle (runtime)', () => {
       store,
       runtime,
       cache: null,
+      privileged: true,
     });
     expect(store.get(bbb.id)?.presence).toBe('leaving');
     vi.advanceTimersByTime(2 * LEAVE_STAGGER_MS + LEAVE_ANIMATION_MAX_MS);

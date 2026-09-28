@@ -64,11 +64,13 @@ export interface ClientMessageContext {
   /** Reload assets after an external-asset-directory change. Needs the dist root, known only to cli.ts. */
   onReloadAssets?: ReloadAssetsSideEffect;
   /**
-   * Whether this client may send messages that reach OUTSIDE `~/.pixel-agents/`
-   * — today only `setHooksEnabled`, which grants machine-wide consent to modify
-   * `~/.claude/settings.json`. Decided per-connection by the transport
-   * (httpServer's standaloneTokenValid, or the embedded Bearer token); defaults
-   * to false so a caller that forgets to pass it gets the safe answer.
+   * Whether this client is the operator (holds the server token) rather than
+   * a viewer. A viewer may only send `VIEWER_MESSAGES`; everything else — a
+   * write under `~/.pixel-agents/`, a change to what the server watches, a
+   * hooks install, a read of paths off disk — is the operator's. Decided
+   * per-connection by the transport (httpServer's standaloneTokenValid, or
+   * the embedded Bearer token); defaults to false so a caller that forgets to
+   * pass it gets the safe answer.
    */
   privileged?: boolean;
   /**
@@ -93,6 +95,22 @@ const KEY_HOOKS_INFO_SHOWN = 'pixel-agents.hooksInfoShown';
 const KEY_SHOW_AREAS = 'pixel-agents.showAreas';
 
 /**
+ * What an untokened viewer may send: connect, and open an agent's screen (the
+ * feed hub denies it itself, without touching disk). `setHooksEnabled` passes
+ * so its branch can answer a viewer with the real install state instead of
+ * leaving the checkbox showing a toggle that never happened.
+ */
+const VIEWER_MESSAGES: ReadonlySet<unknown> = new Set([
+  'webviewReady',
+  'subscribeAgentFeed',
+  'unsubscribeAgentFeed',
+  'setHooksEnabled',
+]);
+
+/** Message types already warned about, so a viewer cannot flood the log. */
+const warnedViewerMessages = new Set<string>();
+
+/**
  * Handle incoming ClientMessage from a WebSocket client.
  *
  * In standalone mode, the server is the authority for all state: assets,
@@ -106,6 +124,17 @@ export function handleClientMessage(
 ): void {
   const { store, runtime, cache } = ctx;
   const adapter = store.getAdapter();
+
+  if (!ctx.privileged && !VIEWER_MESSAGES.has(msg.type)) {
+    const type = String(msg.type).slice(0, 64);
+    if (!warnedViewerMessages.has(type)) {
+      warnedViewerMessages.add(type);
+      console.warn(
+        `[Pixel Agents] Ignoring ${JSON.stringify(type)} from an untokened client — only the operator can change the office (open the tokened URL the CLI printed).`,
+      );
+    }
+    return;
+  }
 
   switch (msg.type) {
     case 'webviewReady':

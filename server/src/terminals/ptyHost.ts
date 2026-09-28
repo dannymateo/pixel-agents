@@ -15,6 +15,8 @@ interface Console {
   pty: PtyProcess;
   buffer: RingBuffer;
   exited: boolean;
+  dataDispose: () => void;
+  exitDispose: () => void;
 }
 
 export interface OpenSpec {
@@ -66,17 +68,17 @@ export class PtyHost {
       env: spec.env,
     });
     const id = crypto.randomUUID();
-    const entry: Console = { pty, buffer: new RingBuffer(this.bufferChars), exited: false };
+    const entry: Console = { pty, buffer: new RingBuffer(this.bufferChars), exited: false, dataDispose: () => {}, exitDispose: () => {} };
     this.consoles.set(id, entry);
-    pty.onData((data) => {
+    entry.dataDispose = pty.onData((data) => {
       entry.buffer.append(data);
       for (const cb of this.outputCbs) cb(id, data);
-    });
-    pty.onExit(({ exitCode }) => {
+    }).dispose;
+    entry.exitDispose = pty.onExit(({ exitCode }) => {
       if (entry.exited) return;
       entry.exited = true;
       for (const cb of this.exitCbs) cb(id, exitCode);
-    });
+    }).dispose;
     return id;
   }
 
@@ -108,6 +110,9 @@ export class PtyHost {
     if (!c) return false;
     this.consoles.delete(id);
     if (!c.exited) {
+      // Dispose subscriptions before kill() to prevent callbacks for intentional close.
+      c.dataDispose();
+      c.exitDispose();
       try {
         c.pty.kill();
       } catch {

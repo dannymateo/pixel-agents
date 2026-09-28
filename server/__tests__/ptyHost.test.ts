@@ -145,4 +145,20 @@ describe('PtyHost', () => {
     expect(ptys.every((p) => p.killed)).toBe(true);
     expect(h.size).toBe(0);
   });
+
+  it('an intentional close fires no exit event and no late output', () => {
+    const { h, ptys } = host();
+    const out: string[] = [];
+    const exits: number[] = [];
+    h.onOutput((_id, d) => out.push(d));
+    h.onExit((_id, code) => exits.push(code));
+    const id = h.open(SPEC);
+    expect(h.close(id)).toBe(true);
+    // FakePty.kill() emits exit synchronously; it must be suppressed by disposed subscriptions.
+    expect(exits).toEqual([]);
+    expect(out).toEqual([]);
+    // Try to emit more data on the pty (subscription is disposed, so it won't reach listeners).
+    ptys[0].emit('orphaned\n');
+    expect(out).toEqual([]);
+  });
 });

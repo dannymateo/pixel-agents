@@ -1589,35 +1589,68 @@ function applyTaskNotice(
   if (!content) return;
   const completedToolId = completedSpawnToolId(agent, agentId, content, agents);
 
-  if (completedToolId !== undefined && agent.backgroundAgentToolIds.has(completedToolId)) {
-    // Finishing is not leaving (docs/adr/0003): a completed (or failed)
-    // agent stays, available — its parent may resume it and the same
-    // task notifies again. Only killed/stopped end it, and a workflow's
-    // notice ends its whole run.
-    const status = hookProvider?.team?.completionStatus?.(content);
-    if (
-      status === 'killed' ||
-      status === 'stopped' ||
-      isWorkflowSpawn(agent, agentId, completedToolId, agents)
-    ) {
-      console.log(
-        `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
-      );
-      endBackgroundSpawn(agent, agentId, completedToolId, agents);
-    } else {
-      console.log(
-        `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
-      );
-      // The parent no longer runs it as a tool; the spawn itself stays
-      // live (backgroundAgentToolIds) so it can be resumed and the tree
-      // gate keeps its agent.
-      const wasRunning = agent.activeToolIds.has(completedToolId);
-      finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
-      markSpawnFinished(agent, completedToolId, recordTime(record));
-      spawnFinishedCallback?.(agentId, completedToolId);
-      releaseOldestFinished(agent, agentId, agents);
+  if (completedToolId === undefined || !agent.backgroundAgentToolIds.has(completedToolId)) {
+    // The CLI queues a notice in the transcript of whoever last ran the task:
+    // a grandchild the lead resumed with SendMessage notifies the LEAD, not
+    // the parent that spawned it. Apply it on that parent — but only for a
+    // descendant of the receiver, never up or across trees.
+    const spawner = descendantSpawnerOfNotice(agentId, content, agents);
+    if (spawner) applyTaskNotice(spawner.agent, spawner.id, record, agents);
+    return;
+  }
+  // Finishing is not leaving (docs/adr/0003): a completed (or failed)
+  // agent stays, available — its parent may resume it and the same
+  // task notifies again. Only killed/stopped end it, and a workflow's
+  // notice ends its whole run.
+  const status = hookProvider?.team?.completionStatus?.(content);
+  if (
+    status === 'killed' ||
+    status === 'stopped' ||
+    isWorkflowSpawn(agent, agentId, completedToolId, agents)
+  ) {
+    console.log(
+      `[Pixel Agents] Agent ${agentId} background spawn ended (${status ?? 'run done'}): ${completedToolId}`,
+    );
+    endBackgroundSpawn(agent, agentId, completedToolId, agents);
+  } else {
+    console.log(
+      `[Pixel Agents] Agent ${agentId} background agent finished (${status ?? 'no status'}), still available: ${completedToolId}`,
+    );
+    // The parent no longer runs it as a tool; the spawn itself stays
+    // live (backgroundAgentToolIds) so it can be resumed and the tree
+    // gate keeps its agent.
+    const wasRunning = agent.activeToolIds.has(completedToolId);
+    finishSpawnTool(agent, agentId, completedToolId, agents, wasRunning);
+    markSpawnFinished(agent, completedToolId, recordTime(record));
+    spawnFinishedCallback?.(agentId, completedToolId);
+    releaseOldestFinished(agent, agentId, agents);
+  }
+}
+
+/** The parent of the derived agent a notice's `<task-id>` names, when that
+ *  agent is a strict descendant (depth ≥ 2) of `receiverId`. */
+function descendantSpawnerOfNotice(
+  receiverId: number,
+  notice: string,
+  agents: AgentStateStore,
+): { agent: AgentState; id: number } | undefined {
+  const taskId = TASK_ID_NOTICE_PATTERN.exec(notice)?.[1];
+  if (taskId === undefined) return undefined;
+  for (const child of agents.values()) {
+    if (child.spawnAgentKey !== taskId || child.parentAgentId === undefined) continue;
+    if (child.parentAgentId === receiverId) return undefined;
+    const seen = new Set<number>();
+    for (let id = agents.get(child.parentAgentId)?.parentAgentId; id !== undefined;) {
+      if (id === receiverId) {
+        const parent = agents.get(child.parentAgentId);
+        return parent ? { agent: parent, id: child.parentAgentId } : undefined;
+      }
+      if (seen.has(id)) break;
+      seen.add(id);
+      id = agents.get(id)?.parentAgentId;
     }
   }
+  return undefined;
 }
 
 /** Check if a tool_result block indicates an async/background agent launch */

@@ -606,6 +606,25 @@ describe('living office lifecycle (runtime)', () => {
     expect(byKey('aaa').backgroundAgentToolIds.has('toolu_A')).toBe(true);
   });
 
+  it('a grandchild resumed by the lead notifies the LEAD, and that still makes it available', () => {
+    // Seen live 2026-09-25: aaa spawned bbb and finished; the lead resumed bbb
+    // with SendMessage, so the CLI queued bbb's completion in the lead's own
+    // transcript. Resolving only the receiver's own spawns left bbb working.
+    nestedBackgroundChild();
+    const bbb = byKey('bbb');
+    leadLine(notice({ taskId: 'bbb', status: 'completed' }));
+    expect(bbb.presence).toBe('available');
+    expect(byKey('aaa').backgroundAgentToolIds.has('toolu_A')).toBe(true);
+    leadLine(notice({ taskId: 'bbb', status: 'killed' }));
+    expect(bbb.presence).toBe('leaving');
+  });
+
+  it('a descendant notice never reaches up or across: a child cannot finish its parent', () => {
+    nestedBackgroundChild();
+    appendLine('bbb', attachmentNotice({ taskId: 'aaa', status: 'killed' }));
+    expect(byKey('aaa').presence).toBe('working');
+  });
+
   it('a notice delivered as a system-notification user turn (parent was idle) counts too', () => {
     nestedBackgroundChild();
     const bbb = byKey('bbb');

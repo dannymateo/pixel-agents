@@ -8,8 +8,9 @@ import { hasPromotedBackgroundAgent } from './teamUtils.js';
  * 1. Team info first — webview needs team context before tool messages
  * 2. Regular tools
  * 3. Background tools with runInBackground + isTeammateSpawn flags, skipping promoted spawns
- * 4. Waiting status
- * 5. Context usage
+ * 4. Turn status: waiting, or active when the agent works with no tool running
+ * 5. Pending permission — after the tools, since a tool start clears the bubble
+ * 6. Context usage
  */
 export function resendAgentActivity(
   send: (message: Record<string, unknown>) => void,
@@ -31,6 +32,8 @@ export function resendAgentActivity(
       });
     }
 
+    let sentToolStart = false;
+
     // 2. Regular (non-background) tools
     for (const [toolId, status] of agent.activeToolStatuses) {
       // Skip background tools here — they're sent separately below with proper flags
@@ -40,6 +43,7 @@ export function resendAgentActivity(
       if (hasPromotedBackgroundAgent(id, toolId, store)) continue;
 
       const toolName = agent.activeToolNames.get(toolId) ?? '';
+      sentToolStart = true;
       send({
         type: 'agentToolStart',
         id,
@@ -58,6 +62,7 @@ export function resendAgentActivity(
       if (!status) continue;
 
       const toolName = agent.activeToolNames.get(toolId);
+      sentToolStart = true;
       send({
         type: 'agentToolStart',
         id,
@@ -69,16 +74,23 @@ export function resendAgentActivity(
       });
     }
 
-    // 4. Waiting status
+    // 4. Turn status. A tool start already made the character active.
     if (agent.isWaiting) {
       send({
         type: 'agentStatus',
         id,
         status: 'waiting',
       });
+    } else if (agent.turnStatus === 'active' && !sentToolStart) {
+      send({ type: 'agentStatus', id, status: 'active' });
     }
 
-    // 5. Context usage
+    // 5. Pending permission
+    if (agent.permissionSent) {
+      send({ type: 'agentToolPermission', id });
+    }
+
+    // 6. Context usage
     if (agent.contextTokens > 0) {
       send({
         type: 'agentContextUsage',

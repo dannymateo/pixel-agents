@@ -18,6 +18,12 @@ export interface AgentState {
   activeSubagentToolNames: Map<string, Map<string, string>>; // parentToolId → (subToolId → toolName)
   backgroundAgentToolIds: Set<string>; // tool IDs for run_in_background Agent calls (stay alive until queue-operation)
   isWaiting: boolean;
+  /** Turn state the clients were last told ('active' on a tool start or an
+   *  active status, 'waiting' on any other status); undefined until the agent
+   *  first works. Recorded by `AgentStateStore.broadcast` and replayed on
+   *  reconnect: `isWaiting` alone cannot tell a working agent with no tool
+   *  running from one that never started. */
+  turnStatus?: 'active' | 'waiting';
   permissionSent: boolean;
   hadToolsInTurn: boolean;
   /** Workspace folder name (only set for multi-root workspaces) */

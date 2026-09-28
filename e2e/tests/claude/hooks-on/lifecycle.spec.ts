@@ -1364,6 +1364,56 @@ test.describe('Hooks ON / lifecycle', () => {
     narrator.check('playedSounds contains a "permission" entry');
   });
 
+  // A pending permission survives a panel reopen. The reopened webview starts
+  // empty and rebuilds from resendAgentActivity; before the replay of
+  // `permissionSent`, the agent came back with its tool but no approval
+  // bubble, so a user who reopened the office lost sight of the agent that
+  // was blocked on them. Close + reopen disposes the webview (see the
+  // matrix-spawn restore test for why reload() cannot be used).
+  test('a pending permission is still shown after the panel is reopened @area:cross-cutting', async ({
+    pixelAgents,
+  }) => {
+    const { window, tmpHome, workspaceDir, mockLogFile, narrator } = pixelAgents;
+    let frame = pixelAgents.frame;
+
+    narrator.step('enabling Watch All Sessions so the external session is adopted');
+    await setSettings(frame, {
+      watchAllSessions: true,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    const serverConfig = await waitForHookServer(tmpHome);
+    const sessionId = 'permission-reopen-session';
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      scenario: claudeScenario('permission survives panel reopen').holdOpenFor(30_000).build(),
+      sessionId,
+    });
+
+    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
+    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(frame, 1);
+
+    narrator.step('raising the approval bubble');
+    await sendHookEvent(serverConfig, permissionRequest(sessionId));
+    await expectOverlayVisible(frame, 'Needs approval');
+    narrator.check('"Needs approval" before the reopen');
+
+    narrator.step('closing the panel (disposes the webview) and reopening it');
+    await closeBottomPanel(window);
+    await openPixelAgentsPanel(window);
+    frame = await getPixelAgentsFrame(window);
+
+    await expectOverlayCount(frame, 1);
+    await expectOverlayVisible(frame, 'Needs approval');
+    narrator.check('"Needs approval" is back on the restored agent');
+  });
+
   // Hook installer side effects: claudeHookInstaller side effects on ~/.claude/settings.json.
   //
   // Background: when "Instant Detection (Hooks)" is toggled in Settings, the

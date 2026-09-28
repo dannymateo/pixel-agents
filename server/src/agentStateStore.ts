@@ -135,7 +135,20 @@ export class AgentStateStore {
 
   broadcast(message: Record<string, unknown>): void {
     debugLogBroadcast(message);
+    this.recordTurnStatus(message);
     this.emitter.emit('broadcast', message);
+  }
+
+  /** Every turn-state change reaches the clients through here, so this is the
+   *  one place that can remember it for a reconnecting client. */
+  private recordTurnStatus(message: Record<string, unknown>): void {
+    if (typeof message.id !== 'number') return;
+    const agent = this.agents.get(message.id);
+    if (!agent) return;
+    if (message.type === 'agentToolStart') agent.turnStatus = 'active';
+    else if (message.type === 'agentStatus') {
+      agent.turnStatus = message.status === 'active' ? 'active' : 'waiting';
+    }
   }
 
   // ── Lifecycle ───────────────────────────────────────────────

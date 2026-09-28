@@ -256,4 +256,68 @@ describe('resendAgentActivity', () => {
     expect(sent[0]).toMatchObject({ type: 'agentToolStart', id: 1 });
     expect(sent[1]).toMatchObject({ type: 'agentStatus', id: 2, status: 'waiting' });
   });
+  describe('after a reload', () => {
+    it('an agent working with no tool running (thinking, writing text) comes back active', () => {
+      const store = new AgentStateStore();
+      store.set(1, createTestAgent({ id: 1 }));
+      store.broadcast({ type: 'agentStatus', id: 1, status: 'active' });
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent).toEqual([{ type: 'agentStatus', id: 1, status: 'active' }]);
+    });
+
+    it('a tool start counts as working even after its tool is done', () => {
+      const store = new AgentStateStore();
+      store.set(1, createTestAgent({ id: 1 }));
+      store.broadcast({ type: 'agentToolStart', id: 1, toolId: 't1', status: 'Reading' });
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent).toEqual([{ type: 'agentStatus', id: 1, status: 'active' }]);
+    });
+
+    it('a freshly launched agent that never worked stays idle', () => {
+      const store = new AgentStateStore();
+      store.set(1, createTestAgent({ id: 1 }));
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent).toHaveLength(0);
+    });
+
+    it('a turn that ended replays waiting, not active', () => {
+      const store = new AgentStateStore();
+      store.set(1, createTestAgent({ id: 1 }));
+      store.broadcast({ type: 'agentStatus', id: 1, status: 'active' });
+      store.broadcast({ type: 'agentStatus', id: 1, status: 'waiting' });
+      store.get(1)!.isWaiting = true;
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent).toEqual([{ type: 'agentStatus', id: 1, status: 'waiting' }]);
+    });
+
+    it('a pending permission is replayed AFTER the tools (a tool start clears the bubble)', () => {
+      const store = new AgentStateStore();
+      store.set(
+        1,
+        createTestAgent({
+          id: 1,
+          permissionSent: true,
+          activeToolStatuses: new Map([['tool-1', 'Running: rm -rf build']]),
+          activeToolNames: new Map([['tool-1', 'Bash']]),
+        }),
+      );
+      store.broadcast({ type: 'agentToolStart', id: 1, toolId: 'tool-1', status: 'x' });
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent.map((m) => m.type)).toEqual(['agentToolStart', 'agentToolPermission']);
+      expect(sent[1]).toEqual({ type: 'agentToolPermission', id: 1 });
+    });
+
+    it('no permission is replayed when none is pending', () => {
+      const store = new AgentStateStore();
+      store.set(1, createTestAgent({ id: 1, permissionSent: false, isWaiting: true }));
+      const sent: Array<Record<string, unknown>> = [];
+      resendAgentActivity((msg) => sent.push(msg), store);
+      expect(sent.some((m) => m.type === 'agentToolPermission')).toBe(false);
+    });
+  });
 });

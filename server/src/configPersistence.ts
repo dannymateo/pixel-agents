@@ -11,6 +11,7 @@ import {
   LOUNGE_TO_LEAVE_MINUTES_MAX,
   LOUNGE_TO_LEAVE_MINUTES_MIN,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
+  RECENT_LAUNCH_DIRS_MAX,
 } from './constants.js';
 
 export interface AdapterSettings {
@@ -68,6 +69,9 @@ export interface PixelAgentsConfig {
   /** Per-provider hooks preference, machine-global for the same reason as the
    *  consent above. A provider absent from the map takes the default (true). */
   hooksEnabled: Record<string, boolean>;
+  /** Folders an office console was launched into, newest first, capped at
+   *  RECENT_LAUNCH_DIRS_MAX. Feeds the launch dialog's recents list. */
+  recentLaunchDirs: string[];
 }
 
 const DEFAULT_ADAPTER_SETTINGS: AdapterSettings = {
@@ -203,6 +207,7 @@ export function readConfig(): PixelAgentsConfig {
         externalAssetDirectories: [],
         hooksConsent: {},
         hooksEnabled: {},
+        recentLaunchDirs: [],
       };
     }
     const raw = fs.readFileSync(filePath, 'utf-8');
@@ -215,6 +220,9 @@ export function readConfig(): PixelAgentsConfig {
         : [],
       hooksConsent: parseHooksConsent(parsed.hooksConsent),
       hooksEnabled: parseHooksEnabled(parsed.hooksEnabled),
+      recentLaunchDirs: Array.isArray(parsed.recentLaunchDirs)
+        ? (parsed.recentLaunchDirs as unknown[]).filter((d): d is string => typeof d === 'string')
+        : [],
     };
   } catch (err) {
     console.error('[Pixel Agents] Failed to read config file:', err);
@@ -224,6 +232,7 @@ export function readConfig(): PixelAgentsConfig {
       externalAssetDirectories: [],
       hooksConsent: {},
       hooksEnabled: {},
+      recentLaunchDirs: [],
     };
   }
 }
@@ -324,6 +333,24 @@ export function resetHooksConfig(): void {
   for (const ns of ['vscode', 'standalone'] as const) {
     cfg[ns].hooksInfoShown = DEFAULT_ADAPTER_SETTINGS.hooksInfoShown;
   }
+  writeConfig(cfg);
+}
+
+// ── Recent launch dirs (office consoles) ────────────────────
+
+/** Folders an office console was launched into, newest first, capped. */
+export function readRecentLaunchDirs(): string[] {
+  return readConfig().recentLaunchDirs.slice(0, RECENT_LAUNCH_DIRS_MAX);
+}
+
+/** Record a launch folder as the most recent, moving it to the front and
+ *  dropping any earlier duplicate, capped at RECENT_LAUNCH_DIRS_MAX. */
+export function addRecentLaunchDir(dir: string): void {
+  const cfg = readConfig();
+  cfg.recentLaunchDirs = [dir, ...cfg.recentLaunchDirs.filter((d) => d !== dir)].slice(
+    0,
+    RECENT_LAUNCH_DIRS_MAX,
+  );
   writeConfig(cfg);
 }
 

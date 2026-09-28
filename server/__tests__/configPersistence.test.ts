@@ -4,6 +4,7 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  addRecentLaunchDir,
   clearHooksAnswer,
   clearHooksEnabled,
   getHooksConsent,
@@ -11,6 +12,7 @@ import {
   grantHooksConsent,
   parseAreaMappings,
   readConfig,
+  readRecentLaunchDirs,
   recordHooksDecline,
   resetHooksConfig,
   setHooksEnabled,
@@ -284,6 +286,20 @@ describe('configPersistence: areas', () => {
       const reloaded = readConfig();
       expect(reloaded.vscode.areaMappings).toEqual({ frontend: ['Engineering'] });
       expect(reloaded.standalone.areaMappings).toEqual({});
+    });
+  });
+
+  // ── recent launch dirs ────────────────────────────────────────
+
+  describe('recent launch dirs', () => {
+    it('keeps the newest first, without duplicates, capped', () => {
+      for (const d of ['/a', '/b', '/c', '/a', '/d', '/e', '/f']) addRecentLaunchDir(d);
+      expect(readRecentLaunchDirs()).toEqual(['/f', '/e', '/d', '/a', '/c']);
+    });
+
+    it('ignores non-string junk in the file', () => {
+      writeConfig({ ...readConfig(), recentLaunchDirs: ['/ok', 42, null] as unknown as string[] });
+      expect(readRecentLaunchDirs()).toEqual(['/ok']);
     });
   });
 });

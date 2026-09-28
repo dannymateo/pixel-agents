@@ -8,11 +8,13 @@ import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import {
+  addRecentLaunchDir,
   clampIdleToLoungeMinutes,
   clampLoungeToLeaveMinutes,
   getHooksConsent,
   getHooksEnabled,
   readConfig,
+  readRecentLaunchDirs,
   setHooksEnabled,
   writeConfig,
 } from './configPersistence.js';
@@ -171,6 +173,12 @@ export function handleClientMessage(
           cwd,
           bypassPermissions: msg.bypassPermissions === true,
         });
+        // launchOfficeAgent canonicalizes cwd internally (fs.realpathSync.native)
+        // but doesn't hand the result back on AgentState (its projectDir is the
+        // hashed transcript directory, not the folder itself) -- the requested
+        // cwd is the only folder path available here, and it's what the recents
+        // list should offer back to the launch dialog.
+        addRecentLaunchDir(cwd);
         send({ type: 'launchResult', ok: true, agentId, terminalId });
       } catch (err) {
         send({
@@ -561,12 +569,20 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const { store, runtime, cache } = ctx;
   const adapter = store.getAdapter();
 
-  // 1. Provider capabilities (must arrive before any agent messages)
+  // 1. Provider capabilities (must arrive before any agent messages). Office
+  // consoles need all three: an operator connection (not a viewer), the
+  // runtime attached to a live PtyHost (loopback bind + node-pty loaded --
+  // cli.ts only calls attachPtyHost when both hold).
+  const terminals = ctx.privileged === true && !!ctx.runtime?.ptyHost;
   send({
     type: 'providerCapabilities',
     readingTools: [...claudeProvider.readingTools],
     subagentToolNames: [...claudeProvider.subagentToolNames],
+    terminals,
   });
+  if (terminals) {
+    send({ type: 'launchOptions', defaultCwd: process.cwd(), recentDirs: readRecentLaunchDirs() });
+  }
 
   // 2. Assets (from server cache, loaded at startup via pngjs)
   if (cache) {

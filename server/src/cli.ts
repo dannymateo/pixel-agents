@@ -29,6 +29,8 @@ import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import { claudeProvider, copyHookScript, hookProviderById } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
+import { isLoopbackHost, loadNodePty } from './terminals/loadNodePty.js';
+import { PtyHost } from './terminals/ptyHost.js';
 
 // ── Argument parsing ──────────────────────────────────────────
 
@@ -144,6 +146,18 @@ async function main(): Promise<void> {
   try {
     // Create runtime first (before server.start, so we can pass it in)
     const runtime = new AgentRuntime(store, claudeProvider);
+
+    // Office consoles (spec §1): only on a loopback bind, only with node-pty.
+    // A non-loopback --host exposes the office to the network, where a
+    // console would be a remote shell for whoever holds the token.
+    if (isLoopbackHost(args.host)) {
+      const factory = loadNodePty();
+      if (factory) runtime.attachPtyHost(new PtyHost(factory));
+    } else {
+      console.log(
+        `[Pixel Agents] Office consoles disabled: the server is bound to ${args.host}, not loopback.`,
+      );
+    }
 
     // Wire hook events: HTTP POST -> runtime -> hookEventHandler -> agents
     server.onHookEvent((providerId, event) => {

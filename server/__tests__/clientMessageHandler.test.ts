@@ -1060,4 +1060,21 @@ describe('clientMessageHandler: office consoles', () => {
     dispatch({ type: 'terminalClose', terminalId: r.terminalId });
     expect(store.get(r.agentId as number)).toBeUndefined();
   });
+
+  it('webviewReady tells a privileged client it may launch, with the defaults', () => {
+    dispatch({ type: 'webviewReady' });
+    expect(sent.find((m) => m.type === 'providerCapabilities')).toMatchObject({ terminals: true });
+    expect(sent.find((m) => m.type === 'launchOptions')).toMatchObject({
+      defaultCwd: process.cwd(),
+    });
+  });
+
+  it('a viewer is told consoles are unavailable and gets no launch options', () => {
+    handleClientMessage({ type: 'webviewReady' }, (m) => sent.push(m), {
+      ...ctx(false),
+      runtime: undefined,
+    });
+    expect(sent.find((m) => m.type === 'providerCapabilities')?.terminals).toBeFalsy();
+    expect(sent.some((m) => m.type === 'launchOptions')).toBe(false);
+  });
 });

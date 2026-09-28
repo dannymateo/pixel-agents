@@ -246,3 +246,5 @@ export const TERMINAL_INPUT_MAX_CHARS = 64 * 1024;
  *  and pasting stay far below; a flood is dropped). */
 export const TERMINAL_MESSAGE_RATE_MAX = 400;
 export const TERMINAL_MESSAGE_RATE_WINDOW_MS = 1_000;
+/** Recent launch folders remembered for the launch dialog, newest first. */
+export const RECENT_LAUNCH_DIRS_MAX = 5;

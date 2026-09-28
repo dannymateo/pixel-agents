@@ -68,7 +68,13 @@ export class PtyHost {
       env: spec.env,
     });
     const id = crypto.randomUUID();
-    const entry: Console = { pty, buffer: new RingBuffer(this.bufferChars), exited: false, dataDispose: () => {}, exitDispose: () => {} };
+    const entry: Console = {
+      pty,
+      buffer: new RingBuffer(this.bufferChars),
+      exited: false,
+      dataDispose: () => {},
+      exitDispose: () => {},
+    };
     this.consoles.set(id, entry);
     entry.dataDispose = pty.onData((data) => {
       entry.buffer.append(data);

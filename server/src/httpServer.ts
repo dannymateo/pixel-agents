@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 
-import { agentCreatedMessage } from './agentMessages.js';
+import { agentCreatedMessage, conversationForViewer } from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type {
@@ -192,9 +192,8 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
     const onBroadcast = (message: Record<string, unknown>) => {
       // A conversation's text is transcript content: only privileged
       // connections get it; the rest still see the scene, with `…`.
-      if (message.type === 'agentConversation' && !privileged && 'text' in message) {
-        const { text: _text, ...rest } = message;
-        safeSend(socket, rest);
+      if (message.type === 'agentConversation' && !privileged) {
+        safeSend(socket, conversationForViewer(message));
         return;
       }
       safeSend(socket, message);

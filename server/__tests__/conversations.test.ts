@@ -12,6 +12,8 @@ import type { AgentConversation } from '../../core/src/messages.js';
 import type { HookProvider } from '../../core/src/provider.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import {
+  CONVERSATION_EMIT_BURST,
+  CONVERSATION_EMIT_REFILL_MS,
   CONVERSATION_FUTURE_SKEW_MS,
   CONVERSATION_PENDING_ASSIGN_TTL_MS,
   CONVERSATION_PENDING_ASSIGNS_MAX,
@@ -531,14 +533,19 @@ describe('dedup and history', () => {
   });
 
   it('the dedup memory is bounded per agent', () => {
+    // Paced so the emission budget never limits it: this is about memory.
+    const paced = (r: Record<string, unknown>) => {
+      vi.advanceTimersByTime(CONVERSATION_EMIT_REFILL_MS);
+      tracker.onRecord(1, r);
+    };
     const first = sendMessage('nadie', 'x', 1, 'first');
-    tracker.onRecord(1, first);
+    paced(first);
     for (let i = 0; i < CONVERSATION_SEEN_IDS_MAX; i++) {
-      tracker.onRecord(1, sendMessage('nadie', 'x', 1, `fill${i}`));
+      paced(sendMessage('nadie', 'x', 1, `fill${i}`));
     }
     expect(sent).toHaveLength(CONVERSATION_SEEN_IDS_MAX + 1);
     // Evicted: a re-read this old is emitted again (bounded memory is the trade).
-    tracker.onRecord(1, first);
+    paced(first);
     expect(sent).toHaveLength(CONVERSATION_SEEN_IDS_MAX + 2);
   });
 });
@@ -605,5 +612,32 @@ describe('lifecycle and hostile input', () => {
     store.set(8, makeAgent(8));
     tracker.onRecord(8, sendMessage('nadie', 'x'));
     expect(sent).toEqual([]);
+  });
+});
+
+describe('emission limit (per speaker)', () => {
+  it('a burst beyond CONVERSATION_EMIT_BURST is dropped, then tokens refill over time', () => {
+    for (let i = 0; i < 30; i++) tracker.onRecord(1, sendMessage('nadie', `m${i}`, 1, `b${i}`));
+    expect(sent).toHaveLength(CONVERSATION_EMIT_BURST);
+
+    vi.advanceTimersByTime(CONVERSATION_EMIT_REFILL_MS * 3);
+    for (let i = 30; i < 40; i++) tracker.onRecord(1, sendMessage('nadie', `m${i}`, 1, `b${i}`));
+    expect(sent).toHaveLength(CONVERSATION_EMIT_BURST + 3);
+  });
+
+  it('a dropped conversation is not emitted later when its record is read again', () => {
+    for (let i = 0; i < CONVERSATION_EMIT_BURST + 1; i++) {
+      tracker.onRecord(1, sendMessage('nadie', `m${i}`, 1, `d${i}`));
+    }
+    vi.advanceTimersByTime(CONVERSATION_EMIT_REFILL_MS * 10);
+    tracker.onRecord(1, sendMessage('nadie', 'otra vez', 1, `d${CONVERSATION_EMIT_BURST}`));
+    expect(sent).toHaveLength(CONVERSATION_EMIT_BURST);
+  });
+
+  it('each speaker has its own budget', () => {
+    store.set(2, makeAgent(2));
+    for (let i = 0; i < 20; i++) tracker.onRecord(1, sendMessage('nadie', `a${i}`, 1, `x${i}`));
+    tracker.onRecord(2, sendMessage('nadie', 'mío', 1, 'y0'));
+    expect(sent.filter((m) => m.fromId === 2)).toHaveLength(1);
   });
 });

@@ -60,3 +60,16 @@ export function agentTreeMeta(
     presence: agent.presence,
   };
 }
+
+/** What a viewer (unprivileged connection) may see of an `agentConversation`:
+ *  the scene — who, to whom, what kind — never its words. An allowlist, so a
+ *  field added later from transcript content stays out by default. */
+const VIEWER_CONVERSATION_FIELDS = ['type', 'conversationId', 'fromId', 'toId', 'kind'] as const;
+
+export function conversationForViewer(message: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of VIEWER_CONVERSATION_FIELDS) {
+    if (message[key] !== undefined) out[key] = message[key];
+  }
+  return out;
+}

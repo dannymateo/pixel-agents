@@ -2,11 +2,16 @@ import type { AgentConversation, ConversationKind } from '../../core/src/message
 import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import {
+  CONVERSATION_EMIT_BURST,
+  CONVERSATION_EMIT_REFILL_MS,
   CONVERSATION_FUTURE_SKEW_MS,
+  CONVERSATION_ID_PART_MAX_CHARS,
   CONVERSATION_PENDING_ASSIGN_TTL_MS,
   CONVERSATION_PENDING_ASSIGNS_MAX,
+  CONVERSATION_SCAN_BYTES,
   CONVERSATION_SEEN_IDS_MAX,
   CONVERSATION_TEXT_MAX_BYTES,
+  RECORD_TIMESTAMP_MAX_CHARS,
 } from './constants.js';
 import { sanitizeFeedText, truncateUtf8 } from './feedDiff.js';
 import { rootOf } from './fileWatcher.js';
@@ -27,7 +32,9 @@ import { rootOf } from './fileWatcher.js';
  * Only what happens while the office watches is a scene. Anything written
  * before the office saw an agent is history and stays silent, decided three
  * ways (docs: T13 report):
- *  1. the caller flags a record `{ initial: true }` (history seeding paths);
+ *  1. a caller may flag a record `{ initial: true }`. No read path does
+ *     today — seeding never passes records through here — so history is
+ *     covered by the two rules below;
  *  2. every agent starts "replaying" when it enters the store (and whoever is
  *     already there when the tracker is built): its records dated before that
  *     moment are history; the first record dated at or after it ends the
@@ -42,21 +49,15 @@ import { rootOf } from './fileWatcher.js';
  * bounded; an agent's state goes with it when it leaves the store.
  */
 
-/** Longest record uuid / tool id used to build a conversation id. */
-const CONVERSATION_ID_PART_MAX_CHARS = 128;
 /** Conversation ids reach unprivileged connections: only id-shaped text. */
 const ID_PART_RE = /^[A-Za-z0-9_.:-]+$/;
-/** Longest timestamp string parsed (ISO 8601 is 24 characters). */
-const TIMESTAMP_MAX_CHARS = 64;
-/** Raw text examined before sanitizing (sanitizing only shrinks). */
-const CONVERSATION_SCAN_BYTES = CONVERSATION_TEXT_MAX_BYTES * 2;
 
 const KINDS: ReadonlySet<string> = new Set<ConversationKind>(['assign', 'report', 'message']);
 
 type Rec = Record<string, unknown>;
 
 export interface ConversationReadOptions {
-  /** The record is history (seeding / catch-up read): remember it, never emit. */
+  /** The record is history: remember it, never emit. No caller sets it today. */
   initial?: boolean;
 }
 
@@ -88,7 +89,7 @@ function cleanText(v: unknown): string {
 
 function recordTime(record: Rec): number {
   const ts = record.timestamp;
-  if (typeof ts !== 'string' || ts.length > TIMESTAMP_MAX_CHARS) return NaN;
+  if (typeof ts !== 'string' || ts.length > RECORD_TIMESTAMP_MAX_CHARS) return NaN;
   return Date.parse(ts);
 }
 
@@ -133,6 +134,8 @@ export class ConversationTracker {
   private readonly pendingAssigns = new Map<number, Map<string, PendingAssign>>();
   /** Conversation ids already handled, per agent that wrote them. */
   private readonly seenIds = new Map<number, Set<string>>();
+  /** Emission budget per speaker (token bucket, CONVERSATION_EMIT_BURST). */
+  private readonly budgets = new Map<number, { tokens: number; at: number }>();
   /** Per child: how the current round was reported (suppresses the other path). */
   private readonly reported = new Map<number, 'handback' | 'fallback'>();
   /** Ids for messages in records without a uuid (never deduplicated). */
@@ -257,6 +260,7 @@ export class ConversationTracker {
     this.pendingAssigns.clear();
     this.seenIds.clear();
     this.reported.clear();
+    this.budgets.clear();
   }
 
   // ── Internals ──
@@ -388,6 +392,24 @@ export class ConversationTracker {
     this.pendingAssigns.delete(agentId);
     this.seenIds.delete(agentId);
     this.reported.delete(agentId);
+    this.budgets.delete(agentId);
+  }
+
+  /** Spend one of `fromId`'s emissions; false when its budget is empty (a
+   *  catch-up read or a runaway transcript), and the conversation is dropped
+   *  — its id is already seen, so a later read never brings it back. */
+  private spend(fromId: number): boolean {
+    const now = Date.now();
+    const b = this.budgets.get(fromId) ?? { tokens: CONVERSATION_EMIT_BURST, at: now };
+    b.tokens = Math.min(
+      CONVERSATION_EMIT_BURST,
+      b.tokens + Math.max(0, now - b.at) / CONVERSATION_EMIT_REFILL_MS,
+    );
+    b.at = now;
+    this.budgets.set(fromId, b);
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
   }
 
   private emit(
@@ -397,6 +419,7 @@ export class ConversationTracker {
     kind: ConversationKind,
     text: string,
   ): void {
+    if (!this.spend(fromId)) return;
     const msg: AgentConversation = { type: 'agentConversation', conversationId, fromId, kind };
     if (toId !== undefined) msg.toId = toId;
     if (text) msg.text = text;

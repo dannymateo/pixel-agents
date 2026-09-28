@@ -189,6 +189,14 @@ export const LOUNGE_TO_LEAVE_MINUTES_MAX = 480;
  *  char boundary). The bubble types ~1 200 chars before it closes with
  *  "…ver completo" (the agent screen has the whole transcript), so more is waste. */
 export const CONVERSATION_TEXT_MAX_BYTES = 8192;
+/** Raw text examined before sanitizing a conversation's text: sanitizing only
+ *  shrinks, so twice the cap leaves room for escape codes while bounding the
+ *  work per field. */
+export const CONVERSATION_SCAN_BYTES = CONVERSATION_TEXT_MAX_BYTES * 2;
+/** Longest record uuid / tool id used to build a conversation id. */
+export const CONVERSATION_ID_PART_MAX_CHARS = 128;
+/** Longest record timestamp parsed (ISO 8601 is 24 characters). */
+export const RECORD_TIMESTAMP_MAX_CHARS = 64;
 /** Most conversations one transcript record may yield. */
 export const CONVERSATIONS_PER_RECORD_MAX = 8;
 /** Assignments waiting for their child to materialize, per parent. */
@@ -199,6 +207,12 @@ export const CONVERSATION_PENDING_ASSIGN_TTL_MS = 10 * 60_000;
 export const CONVERSATION_FUTURE_SKEW_MS = 5 * 60_000;
 /** Conversation ids remembered per agent for dedup. */
 export const CONVERSATION_SEEN_IDS_MAX = 512;
+/** Conversations one agent may emit back to back (a token bucket). Matches the
+ *  webview's per-speaker queue: more would only be dropped there, after
+ *  crossing every socket. */
+export const CONVERSATION_EMIT_BURST = 8;
+/** One more conversation allowed per this long (a scene lasts seconds). */
+export const CONVERSATION_EMIT_REFILL_MS = 2000;
 
 /** A session id is ONE path segment (`<projectDir>/<sessionId>.jsonl`,
  *  `<projectDir>/<sessionId>/subagents/`): letters, digits, `-` and `_`. Every

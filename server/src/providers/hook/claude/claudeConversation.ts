@@ -1,4 +1,8 @@
-import { CONVERSATION_TEXT_MAX_BYTES, CONVERSATIONS_PER_RECORD_MAX } from '../../../constants.js';
+import {
+  CONVERSATION_SCAN_BYTES,
+  CONVERSATION_TEXT_MAX_BYTES,
+  CONVERSATIONS_PER_RECORD_MAX,
+} from '../../../constants.js';
 import { sanitizeFeedText, truncateUtf8 } from '../../../feedDiff.js';
 import { IDENTIFIER_MAX_CHARS } from './constants.js';
 
@@ -25,10 +29,6 @@ export interface ClaudeConversation {
   to?: string;
   spawnToolUseId?: string;
 }
-
-/** Raw text examined before sanitizing: sanitizing only shrinks, so twice the
- *  cap leaves room for escape codes while bounding the work per field. */
-const CONVERSATION_SCAN_BYTES = CONVERSATION_TEXT_MAX_BYTES * 2;
 
 /** Fields tried, in order, when a message is an object instead of a string. */
 const OBJECT_TEXT_FIELDS = ['text', 'message', 'content', 'reason', 'summary'] as const;

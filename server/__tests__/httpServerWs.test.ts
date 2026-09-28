@@ -584,6 +584,30 @@ describe('/ws transcript-derived text gate', () => {
     const { text: _text, ...withoutText } = conversation;
     expect(unprivileged).toEqual(withoutText);
   });
+
+  it('a viewer gets only the scene fields, whatever else a conversation carries', async () => {
+    const config = await server.start({ embedded: false, store });
+    const untokened = await connectTo(`ws://127.0.0.1:${config.port.toString()}/ws`);
+    sockets.push(untokened.socket);
+    const fromUntokened = waitForMessage(untokened.socket, 'agentConversation');
+    // A field added later from transcript content must not leak by default.
+    store.broadcast({
+      type: 'agentConversation',
+      conversationId: '7:u2',
+      fromId: 7,
+      toId: 1,
+      kind: 'message',
+      text: 'secreto',
+      summary: 'también secreto',
+    });
+    expect(await fromUntokened).toEqual({
+      type: 'agentConversation',
+      conversationId: '7:u2',
+      fromId: 7,
+      toId: 1,
+      kind: 'message',
+    });
+  });
 });
 
 // The agent screen feed (spec §4) exposes code and command output. It is

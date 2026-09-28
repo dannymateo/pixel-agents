@@ -11,6 +11,9 @@ export interface AgentState {
   jsonlFile: string;
   fileOffset: number;
   lineBuffer: string;
+  /** Set when an unterminated line outgrew MAX_TRANSCRIPT_LINE_CHARS and was
+   *  dropped: the reader skips to the next newline before parsing again. */
+  skipToNextLine?: boolean;
   activeToolIds: Set<string>;
   activeToolStatuses: Map<string, string>;
   activeToolNames: Map<string, string>;

@@ -204,3 +204,11 @@ export const CONVERSATION_SEEN_IDS_MAX = 512;
  *  `<projectDir>/<sessionId>/subagents/`): letters, digits, `-` and `_`. Every
  *  real one is a UUID; no dot, separator or drive colon can reach a path. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Longest unterminated transcript line the watcher holds (UTF-16 chars).
+ *  Records carrying images run several MB; past this the line is dropped and
+ *  reading resumes at the next newline, so one never-ending line cannot grow
+ *  an agent's buffer without bound. */
+export const MAX_TRANSCRIPT_LINE_CHARS = 64 * 1024 * 1024;
+/** Most bytes read from a transcript per poll; the rest waits for the next. */
+export const TRANSCRIPT_READ_CHUNK_BYTES = 65536;

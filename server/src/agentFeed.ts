@@ -380,8 +380,8 @@ function remember(feed: AgentFeed, uuid: string, seq: number): void {
  * The complete lines in the last FEED_TAIL_READ_BYTES of the agent's
  * transcript, ending where the watcher has read (`fileOffset`). Only a regular
  * file is read, never through a symlink, and the file opened must be the one
- * checked. That guards the snapshot only: the live appends carry whatever the
- * transcript watcher itself reads (fileWatcher's policy, which follows links). The first line when the window opens mid-record, and an
+ * checked — the same policy as the transcript watcher (`readNewLines`), whose
+ * reads carry the live appends. The first line when the window opens mid-record, and an
  * unterminated last line (still being written — the watcher holds it), are
  * dropped. `windowed` = the window does not start at the beginning.
  */

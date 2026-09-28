@@ -47,11 +47,13 @@ import {
   MAX_DERIVED_AGENTS_PER_TREE,
   MAX_PENDING_WORKFLOW_LAUNCHES,
   MAX_SPAWN_DEPTH,
+  MAX_TRANSCRIPT_LINE_CHARS,
   PROJECT_SCAN_INTERVAL_MS,
   RESTORED_SPAWN_MAX_IDLE_MS,
   SPAWN_SEED_MAX_BYTES,
   SPAWN_SEED_READ_CHUNK_BYTES,
   SPAWN_SIBLING_HUE_STEP_DEG,
+  TRANSCRIPT_READ_CHUNK_BYTES,
 } from './constants.js';
 import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
@@ -309,6 +311,7 @@ function seedLiveSpawns(agentId: number, agents: AgentStateStore): void {
     ) {
       agent.fileOffset = seedWindow.lastLineEnd;
       agent.lineBuffer = '';
+      agent.skipToNextLine = false;
     }
   } catch (e) {
     console.log(`[Pixel Agents] Watcher: Agent ${agentId} - spawn seeding skipped: ${e}`);
@@ -457,23 +460,48 @@ export function readNewLines(
 ): void {
   const agent = agents.get(agentId);
   if (!agent) return;
+  let fd: number | undefined;
   try {
-    const stat = fs.statSync(agent.jsonlFile);
+    // Only a regular file, never through a symlink, and the file opened must
+    // be the one checked: a transcript swapped for a link would otherwise feed
+    // another file's contents to the office and the agent screen.
+    const linkStat = fs.lstatSync(agent.jsonlFile);
+    if (!linkStat.isFile()) {
+      warnUnreadableTranscript(agentId, agent.jsonlFile);
+      return;
+    }
+    // The common poll finds nothing new: answer it without opening the file.
+    if (linkStat.size <= agent.fileOffset) return;
+    fd = fs.openSync(agent.jsonlFile, TRANSCRIPT_OPEN_FLAGS);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.ino !== linkStat.ino || stat.dev !== linkStat.dev) return;
     if (stat.size <= agent.fileOffset) return;
 
-    // Cap single read at 64KB to prevent blocking on massive JSONL dumps.
-    // Remaining data will be picked up on the next poll cycle.
-    const MAX_READ_BYTES = 65536;
-    const bytesToRead = Math.min(stat.size - agent.fileOffset, MAX_READ_BYTES);
+    // Cap a single read to prevent blocking on massive JSONL dumps. Remaining
+    // data will be picked up on the next poll cycle.
+    const bytesToRead = Math.min(stat.size - agent.fileOffset, TRANSCRIPT_READ_CHUNK_BYTES);
     const buf = Buffer.alloc(bytesToRead);
-    const fd = fs.openSync(agent.jsonlFile, 'r');
     fs.readSync(fd, buf, 0, buf.length, agent.fileOffset);
-    fs.closeSync(fd);
     agent.fileOffset += bytesToRead;
 
-    const text = agent.lineBuffer + buf.toString('utf-8');
+    let chunk = buf.toString('utf-8');
+    if (agent.skipToNextLine) {
+      // The rest of a line dropped for its size: never parse its tail.
+      const nl = chunk.indexOf('\n');
+      if (nl === -1) return;
+      chunk = chunk.slice(nl + 1);
+      agent.skipToNextLine = false;
+    }
+    const text = agent.lineBuffer + chunk;
     const lines = text.split('\n');
     agent.lineBuffer = lines.pop() || '';
+    if (agent.lineBuffer.length > MAX_TRANSCRIPT_LINE_CHARS) {
+      console.warn(
+        `[Pixel Agents] Watcher: Agent ${agentId} - dropping a transcript line over ${MAX_TRANSCRIPT_LINE_CHARS} chars`,
+      );
+      agent.lineBuffer = '';
+      agent.skipToNextLine = true;
+    }
 
     const hasLines = lines.some((l) => l.trim());
     if (hasLines) {
@@ -498,7 +526,31 @@ export function readNewLines(
     // ENOENT is expected for hook-detected agents where the JSONL file hasn't been created yet
     if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') return;
     console.log(`[Pixel Agents] Watcher: Agent ${agentId} - read error: ${e}`);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
   }
+}
+
+/** Open flags for a transcript read: never follow a final symlink, never block
+ *  on a FIFO swapped in after the lstat (POSIX; Windows has neither). */
+const TRANSCRIPT_OPEN_FLAGS =
+  fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+
+/** Transcripts already reported as not a regular file (polled every 500 ms). */
+const warnedUnreadableTranscripts = new Set<string>();
+
+function warnUnreadableTranscript(agentId: number, file: string): void {
+  if (warnedUnreadableTranscripts.has(file)) return;
+  warnedUnreadableTranscripts.add(file);
+  console.warn(
+    `[Pixel Agents] Watcher: Agent ${agentId} - transcript is not a regular file (symlinks are not followed), not reading it`,
+  );
 }
 
 // Track all project directories to scan (supports multi-root workspaces)
@@ -1010,6 +1062,7 @@ export function scanForTeammateFiles(
       // Re-read from the start: its history must not replay as conversations.
       fileWatcherConversationTracker?.beginReplay(existingTeammate.id);
       existingTeammate.lineBuffer = '';
+      existingTeammate.skipToNextLine = false;
       existingTeammate.lastDataAt = Date.now();
       existingTeammate.linesProcessed = 0;
       existingTeammate.isWaiting = false;
@@ -2552,6 +2605,7 @@ export function reassignAgentToFile(
   agent.jsonlFile = newFilePath;
   agent.fileOffset = 0;
   agent.lineBuffer = '';
+  agent.skipToNextLine = false;
   persistAgents();
 
   // Start watching new file

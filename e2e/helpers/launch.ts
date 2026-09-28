@@ -356,6 +356,14 @@ export async function launchVSCode(
 
   // --- VS Code launch args ---
   const args = [
+    // Open the workspace folder (single dir) or the generated multi-root file.
+    // FIRST, before any flag: placed right after the Chromium-only
+    // --disable-*background* switches below, VS Code (seen on 1.139, Windows)
+    // opens no folder at all — the argument is apparently consumed by the
+    // switch. The extension then saw no workspace, and every test that hashes
+    // the workspace's project dir (external adoption, multi-root areas) looked
+    // in the wrong place.
+    openTarget,
     // Load our extension in dev mode (this overrides the installed version)
     `--extensionDevelopmentPath=${REPO_ROOT}`,
     // Disable all other extensions so tests are isolated
@@ -382,8 +390,6 @@ export async function launchVSCode(
     // On Linux, use the Ozone headless platform so Electron runs without a
     // display server (equivalent to what --disable-gpu achieves on macOS/Windows).
     ...(process.platform === 'linux' ? ['--ozone-platform=headless'] : []),
-    // Open the workspace folder (single dir) or the generated multi-root file.
-    openTarget,
   ];
 
   const cleanup = async (): Promise<void> => {

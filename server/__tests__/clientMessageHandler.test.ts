@@ -22,6 +22,7 @@ import {
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
 import { CLAUDE_HOOK_EVENTS } from '../src/providers/hook/claude/constants.js';
+import { PtyHost } from '../src/terminals/ptyHost.js';
 import type { AgentState } from '../src/types.js';
 
 // Redirect os.homedir() to a per-test temp dir. Overriding process.env.HOME is
@@ -959,5 +960,104 @@ describe('clientMessageHandler: an untokened viewer cannot change anything', () 
     ctx.privileged = true;
     dispatch({ type: 'closeAgent', id: 1 });
     expect(closeAgent).toHaveBeenCalledWith(1);
+  });
+});
+
+describe('clientMessageHandler: office consoles', () => {
+  let tempHome: string;
+  let store: AgentStateStore;
+  let runtime: AgentRuntime;
+  let sent: Array<Record<string, unknown>>;
+  let written: string[];
+  let workDir: string;
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-console-'));
+    testHome.dir = tempHome;
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-work-'));
+    store = new AgentStateStore();
+    store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
+    runtime = new AgentRuntime(store, claudeProvider);
+    written = [];
+    runtime.attachPtyHost(
+      new PtyHost(() => ({
+        pid: 1,
+        onData: () => ({ dispose() {} }),
+        onExit: () => ({ dispose() {} }),
+        write: (d: string) => written.push(d),
+        resize: () => {},
+        kill: () => {},
+      })),
+    );
+    sent = [];
+  });
+
+  afterEach(() => {
+    runtime.dispose();
+    store.dispose();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  const ctx = (privileged: boolean, connId = 'c1'): ClientMessageContext => ({
+    store,
+    runtime,
+    cache: null,
+    privileged,
+    connId,
+  });
+  const dispatch = (msg: Record<string, unknown>, c = ctx(true)) =>
+    handleClientMessage(msg, (m) => sent.push(m), c);
+
+  it('launchAgent answers launchResult with the new agent and its console', () => {
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const r = sent.find((m) => m.type === 'launchResult')!;
+    expect(r.ok).toBe(true);
+    expect(store.get(r.agentId as number)?.terminalId).toBe(r.terminalId);
+  });
+
+  it('launchAgent into a missing folder answers ok:false with the reason', () => {
+    dispatch({ type: 'launchAgent', folderPath: path.join(workDir, 'nope') });
+    expect(sent.find((m) => m.type === 'launchResult')).toMatchObject({ ok: false });
+    expect(store.size).toBe(0);
+  });
+
+  it('a viewer can neither launch nor attach nor type', () => {
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const id = sent.find((m) => m.type === 'launchResult')!.terminalId as string;
+    sent = [];
+    dispatch({ type: 'launchAgent', folderPath: workDir }, ctx(false, 'v1'));
+    dispatch({ type: 'terminalAttach', terminalId: id }, ctx(false, 'v1'));
+    dispatch({ type: 'terminalInput', terminalId: id, data: 'rm -rf /\r' }, ctx(false, 'v1'));
+    expect(sent).toEqual([]);
+    expect(written).toEqual([]);
+    expect(store.size).toBe(1);
+  });
+
+  it('input only goes to a console this connection attached to', () => {
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const id = sent.find((m) => m.type === 'launchResult')!.terminalId as string;
+    dispatch({ type: 'terminalInput', terminalId: id, data: 'x' }, ctx(true, 'other'));
+    expect(written).toEqual([]);
+    dispatch({ type: 'terminalAttach', terminalId: id }, ctx(true, 'other'));
+    dispatch({ type: 'terminalInput', terminalId: id, data: 'hola\r' }, ctx(true, 'other'));
+    expect(written).toEqual(['hola\r']);
+  });
+
+  it('oversized or non-string input is dropped; unknown ids are ignored', () => {
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const id = sent.find((m) => m.type === 'launchResult')!.terminalId as string;
+    dispatch({ type: 'terminalAttach', terminalId: id });
+    dispatch({ type: 'terminalInput', terminalId: id, data: 'x'.repeat(64 * 1024 + 1) });
+    dispatch({ type: 'terminalInput', terminalId: id, data: 42 });
+    dispatch({ type: 'terminalInput', terminalId: 'nope', data: 'x' });
+    expect(written).toEqual([]);
+  });
+
+  it('terminalClose kills the console and removes its agent', () => {
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const r = sent.find((m) => m.type === 'launchResult')!;
+    dispatch({ type: 'terminalClose', terminalId: r.terminalId });
+    expect(store.get(r.agentId as number)).toBeUndefined();
   });
 });

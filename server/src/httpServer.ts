@@ -19,6 +19,8 @@ import {
   FEED_SUBSCRIBE_RATE_WINDOW_MS,
   HOOK_API_PREFIX,
   MAX_HOOK_BODY_SIZE,
+  TERMINAL_MESSAGE_RATE_MAX,
+  TERMINAL_MESSAGE_RATE_WINDOW_MS,
   WS_CLOSE_FORBIDDEN_ORIGIN,
   WS_CLOSE_UNAUTHORIZED,
 } from './constants.js';
@@ -179,6 +181,10 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
     const connId = crypto.randomUUID();
     const feedHub = options.runtime?.feedHub;
     const allowFeedSubscribe = feedSubscribeLimiter();
+    const allowTerminalMessage = rateLimiter(
+      TERMINAL_MESSAGE_RATE_MAX,
+      TERMINAL_MESSAGE_RATE_WINDOW_MS,
+    );
 
     // Pipe store events to WebSocket client
     const onAgentAdded = (_id: number, agent: AgentState) => {
@@ -211,6 +217,11 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
           console.log('[Pixel Agents] WS client message:', msg.type);
         }
         if (msg.type === 'subscribeAgentFeed' && !allowFeedSubscribe()) return;
+        if (
+          (msg.type === 'terminalInput' || msg.type === 'terminalResize') &&
+          !allowTerminalMessage()
+        )
+          return;
         // Replies (the feed included) go to THIS socket only.
         handleClientMessage(msg, (m) => safeSend(socket, m), {
           store,
@@ -234,6 +245,7 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
       store.off('agentRemoved', onAgentRemoved);
       store.off('broadcast', onBroadcast);
       feedHub?.dropConnection(connId);
+      options.runtime?.terminalHub?.dropConnection(connId);
     };
     socket.on('close', release);
     socket.on('error', release);
@@ -365,16 +377,21 @@ export function redactTokenInUrl(url: string): string {
   return `${url.slice(0, q)}?${query}`;
 }
 
-/** Per-connection sliding-window limit on feed subscriptions: true = allowed. */
-function feedSubscribeLimiter(): () => boolean {
+/** Per-connection sliding-window rate limiter: true = allowed, false = drop. */
+function rateLimiter(max: number, windowMs: number): () => boolean {
   const recent: number[] = [];
   return () => {
     const now = Date.now();
-    while (recent.length > 0 && now - recent[0] >= FEED_SUBSCRIBE_RATE_WINDOW_MS) recent.shift();
-    if (recent.length >= FEED_SUBSCRIBE_RATE_MAX) return false;
+    while (recent.length > 0 && now - recent[0] >= windowMs) recent.shift();
+    if (recent.length >= max) return false;
     recent.push(now);
     return true;
   };
+}
+
+/** Per-connection sliding-window limit on feed subscriptions: true = allowed. */
+function feedSubscribeLimiter(): () => boolean {
+  return rateLimiter(FEED_SUBSCRIBE_RATE_MAX, FEED_SUBSCRIBE_RATE_WINDOW_MS);
 }
 
 function safeSend(

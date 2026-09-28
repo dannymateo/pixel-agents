@@ -62,6 +62,7 @@ import { persistedSessionId, SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { CLAUDE_COMMAND_OVERRIDE_ENV, resolveLaunch } from './terminals/launchCommand.js';
 import type { PtyHost } from './terminals/ptyHost.js';
+import { TerminalHub } from './terminals/terminalHub.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
   clearSpawnFinished,
@@ -97,6 +98,9 @@ export class AgentRuntime {
   /** Office consoles (standalone). Null when node-pty is unavailable or the
    *  server is not bound to loopback: launching is then refused. */
   ptyHost: PtyHost | null = null;
+  /** Point-to-point console output/attach routing (spec §2). Created in
+   *  attachPtyHost alongside the host it fronts. */
+  terminalHub: TerminalHub | null = null;
   private readonly agentByTerminal = new Map<string, number>();
   private unsubscribePtyExit: (() => void) | null = null;
 
@@ -407,6 +411,7 @@ export class AgentRuntime {
 
   attachPtyHost(host: PtyHost): void {
     this.ptyHost = host;
+    this.terminalHub = new TerminalHub(host);
     this.unsubscribePtyExit = host.onExit((terminalId) => {
       const agentId = this.agentByTerminal.get(terminalId);
       this.agentByTerminal.delete(terminalId);
@@ -1125,6 +1130,7 @@ export class AgentRuntime {
   dispose(): void {
     this.disposed = true;
     this.unsubscribePtyExit?.();
+    this.terminalHub?.dispose();
     this.ptyHost?.closeAll();
     setTranscriptLineListener(null);
     this.feedHub.dispose();

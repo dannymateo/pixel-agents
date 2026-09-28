@@ -21,6 +21,7 @@ import {
   IDLE_TO_LOUNGE_MS_DEFAULT,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
   PALETTE_COUNT,
+  TERMINAL_INPUT_MAX_CHARS,
 } from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
 import { IDLE_TO_LOUNGE_SETTING_KEY, LOUNGE_TO_LEAVE_SETTING_KEY } from './presence.js';
@@ -153,6 +154,73 @@ export function handleClientMessage(
         if (agent.jsonlFile) runtime.dismissalTracker.dismiss(agent.jsonlFile);
         runtime.closeAgent(id);
       }
+      break;
+    }
+
+    case 'launchAgent': {
+      // Standalone: an office console (spec §2). VS Code handles launchAgent in
+      // its own view provider and never reaches this handler.
+      if (!runtime?.ptyHost) {
+        send({ type: 'launchResult', ok: false, error: 'Office consoles are not available' });
+        break;
+      }
+      const cwd =
+        typeof msg.folderPath === 'string' && msg.folderPath ? msg.folderPath : process.cwd();
+      try {
+        const { agentId, terminalId } = runtime.launchOfficeAgent({
+          cwd,
+          bypassPermissions: msg.bypassPermissions === true,
+        });
+        send({ type: 'launchResult', ok: true, agentId, terminalId });
+      } catch (err) {
+        send({
+          type: 'launchResult',
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'terminalAttach': {
+      const hub = runtime?.terminalHub;
+      if (!hub || !ctx.connId || typeof msg.terminalId !== 'string') break;
+      hub.attach(ctx.connId, msg.terminalId, send);
+      break;
+    }
+
+    case 'terminalDetach': {
+      if (ctx.connId && typeof msg.terminalId === 'string') {
+        runtime?.terminalHub?.detach(ctx.connId, msg.terminalId);
+      }
+      break;
+    }
+
+    case 'terminalInput': {
+      const hub = runtime?.terminalHub;
+      const id = msg.terminalId;
+      if (!hub || !ctx.connId || typeof id !== 'string') break;
+      if (typeof msg.data !== 'string' || msg.data.length > TERMINAL_INPUT_MAX_CHARS) break;
+      // Only a console this connection attached to: typing blind is refused.
+      if (!hub.isAttached(ctx.connId, id)) break;
+      runtime?.ptyHost?.write(id, msg.data);
+      break;
+    }
+
+    case 'terminalResize': {
+      const hub = runtime?.terminalHub;
+      const id = msg.terminalId;
+      if (!hub || !ctx.connId || typeof id !== 'string' || !hub.isAttached(ctx.connId, id)) break;
+      if (typeof msg.cols !== 'number' || typeof msg.rows !== 'number') break;
+      runtime?.ptyHost?.resize(id, msg.cols, msg.rows);
+      break;
+    }
+
+    case 'terminalClose': {
+      if (!runtime || typeof msg.terminalId !== 'string') break;
+      const agentId = runtime.agentIdForTerminal(msg.terminalId);
+      if (agentId !== undefined) runtime.removeAgent(agentId);
+      else runtime.ptyHost?.close(msg.terminalId);
       break;
     }
 

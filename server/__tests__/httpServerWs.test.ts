@@ -6,6 +6,7 @@ import { WebSocket } from 'ws';
 
 import {
   FEED_SUBSCRIBE_RATE_MAX,
+  TERMINAL_MESSAGE_RATE_MAX,
   WS_CLOSE_FORBIDDEN_ORIGIN,
   WS_CLOSE_UNAUTHORIZED,
 } from '../src/constants.js';
@@ -25,6 +26,7 @@ const { grantHooksConsent } = await import('../src/configPersistence.js');
 const { AgentRuntime } = await import('../src/agentRuntime.js');
 const { claudeProvider } = await import('../src/providers/hook/claude/claude.js');
 const { readNewLines } = await import('../src/fileWatcher.js');
+const { PtyHost } = await import('../src/terminals/ptyHost.js');
 
 /** How long to wait, after the handshake, for a server-side rejection close.
  *  The gate runs synchronously in the route handler, so a rejection lands
@@ -833,6 +835,94 @@ describe('/ws agent screen feed gate', () => {
     await waitUntil(() => feedMessages(got).length >= FEED_SUBSCRIBE_RATE_MAX);
     await pause(300);
     expect(feedMessages(got)).toHaveLength(FEED_SUBSCRIBE_RATE_MAX);
+  });
+});
+
+describe('/ws office console rate limit', () => {
+  let server: InstanceType<typeof PixelAgentsServer>;
+  let store: InstanceType<typeof AgentStateStore>;
+  let runtime: InstanceType<typeof AgentRuntime>;
+  let written: string[];
+  const sockets: WebSocket[] = [];
+
+  beforeEach(() => {
+    tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-ws-terminal-rate-'));
+    fs.mkdirSync(path.join(tmpBase, '.pixel-agents'), { recursive: true });
+    server = new PixelAgentsServer();
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    written = [];
+    runtime.attachPtyHost(
+      new PtyHost(() => ({
+        pid: 1,
+        onData: () => ({ dispose() {} }),
+        onExit: () => ({ dispose() {} }),
+        write: (d: string) => written.push(d),
+        resize: () => {},
+        kill: () => {},
+      })),
+    );
+  });
+
+  afterEach(() => {
+    for (const socket of sockets) socket.terminate();
+    sockets.length = 0;
+    runtime.dispose();
+    server?.stop();
+    try {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  function recordMessages(socket: WebSocket): Array<Record<string, unknown>> {
+    const got: Array<Record<string, unknown>> = [];
+    socket.on('message', (data: Buffer) => {
+      try {
+        got.push(JSON.parse(data.toString()) as Record<string, unknown>);
+      } catch {
+        /* ignore non-JSON frames */
+      }
+    });
+    return got;
+  }
+
+  async function waitUntil(cond: () => boolean, ms = 2_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!cond() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('drops terminalInput past the per-connection rate limit', async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-ws-terminal-work-'));
+    try {
+      const { terminalId } = runtime.launchOfficeAgent({ cwd: workDir });
+
+      const config = await server.start({ embedded: false, store, runtime });
+      const base = `ws://127.0.0.1:${config.port.toString()}/ws`;
+      const withToken = `${base}?token=${encodeURIComponent(config.token)}`;
+      const { accepted, socket } = await connectTo(withToken);
+      expect(accepted).toBe(true);
+      sockets.push(socket);
+      const got = recordMessages(socket);
+
+      socket.send(JSON.stringify({ type: 'terminalAttach', terminalId }));
+      await waitUntil(() => got.some((m) => m.type === 'terminalSnapshot'));
+
+      for (let i = 0; i < TERMINAL_MESSAGE_RATE_MAX + 50; i++) {
+        socket.send(JSON.stringify({ type: 'terminalInput', terminalId, data: 'x' }));
+      }
+      await waitUntil(() => written.length >= TERMINAL_MESSAGE_RATE_MAX);
+      await pause(300);
+
+      expect(written).toHaveLength(TERMINAL_MESSAGE_RATE_MAX);
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
   });
 });
 

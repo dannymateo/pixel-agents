@@ -237,3 +237,12 @@ export const TERMINAL_DEFAULT_ROWS = 32;
 /** A resize past these is clamped: a client cannot ask for a giant screen. */
 export const TERMINAL_MAX_COLS = 500;
 export const TERMINAL_MAX_ROWS = 200;
+/** Console output is coalesced per connection for this long: a burst (a big
+ *  `cat`) goes out as a few messages, not one per pty chunk. */
+export const TERMINAL_OUTPUT_FLUSH_MS = 16;
+/** Longest terminalInput accepted in one message (a paste). */
+export const TERMINAL_INPUT_MAX_CHARS = 64 * 1024;
+/** terminalInput + terminalResize accepted per connection per window (typing
+ *  and pasting stay far below; a flood is dropped). */
+export const TERMINAL_MESSAGE_RATE_MAX = 400;
+export const TERMINAL_MESSAGE_RATE_WINDOW_MS = 1_000;

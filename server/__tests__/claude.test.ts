@@ -32,6 +32,35 @@ describe('claudeProvider', () => {
     });
   });
 
+  describe('normalizeHookEvent session_id', () => {
+    // The session id becomes a path segment (<projectDir>/<sessionId>/subagents).
+    it.each([
+      ['a UUID', '5b3c1f0e-2a4d-4e8f-9c1b-7d6e5f4a3b2c'],
+      ['a test-style id', 'external-hook-session'],
+    ])('accepts %s', (_label, sessionId) => {
+      const r = claudeProvider.normalizeHookEvent({
+        hook_event_name: 'Stop',
+        session_id: sessionId,
+      });
+      expect(r?.sessionId).toBe(sessionId);
+    });
+
+    it.each([
+      ['a parent traversal', '../../etc'],
+      ['dot-dot alone', '..'],
+      ['a forward slash', 'a/b'],
+      ['a backslash', 'a\\b'],
+      ['a drive colon', 'C:x'],
+      ['empty', ''],
+      ['a newline', 'abc\ndef'],
+      ['oversized', 'a'.repeat(129)],
+    ])('drops %s', (_label, sessionId) => {
+      expect(
+        claudeProvider.normalizeHookEvent({ hook_event_name: 'Stop', session_id: sessionId }),
+      ).toBeNull();
+    });
+  });
+
   describe('normalizeHookEvent agentKey (spawned-agent events)', () => {
     it('carries agent_id as agentKey for events fired inside a subagent', () => {
       const r = claudeProvider.normalizeHookEvent({

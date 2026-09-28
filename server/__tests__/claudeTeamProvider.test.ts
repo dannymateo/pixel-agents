@@ -132,6 +132,17 @@ describe('claudeTeamProvider', () => {
       }
     });
 
+    it('never leaves <projectDir> for a session id that is not one safe segment', () => {
+      // <tmpRoot>/proj/../outside/subagents would be read for leadSessionId '../outside'.
+      const outside = path.join(tmpRoot, 'outside', 'subagents');
+      fsMod.mkdirSync(outside, { recursive: true });
+      fsMod.writeFileSync(path.join(outside, 'agent-a.jsonl'), '');
+      fsMod.writeFileSync(path.join(outside, 'agent-a.meta.json'), '{"agentType":"x"}');
+      const projectDir = path.join(tmpRoot, 'proj');
+      fsMod.mkdirSync(projectDir, { recursive: true });
+      expect(claudeTeamProvider.discoverTeammates(projectDir, '../outside')).toEqual([]);
+    });
+
     it('returns empty array when teammate directory does not exist', () => {
       const result = claudeTeamProvider.discoverTeammates(tmpRoot, 'nonexistent-sess');
       expect(result).toEqual([]);

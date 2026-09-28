@@ -199,3 +199,8 @@ export const CONVERSATION_PENDING_ASSIGN_TTL_MS = 10 * 60_000;
 export const CONVERSATION_FUTURE_SKEW_MS = 5 * 60_000;
 /** Conversation ids remembered per agent for dedup. */
 export const CONVERSATION_SEEN_IDS_MAX = 512;
+
+/** A session id is ONE path segment (`<projectDir>/<sessionId>.jsonl`,
+ *  `<projectDir>/<sessionId>/subagents/`): letters, digits, `-` and `_`. Every
+ *  real one is a UUID; no dot, separator or drive colon can reach a path. */
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;

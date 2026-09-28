@@ -1,8 +1,27 @@
+import * as path from 'path';
+
 import {
   HOOK_EVENT_BUFFER_MS,
   MAX_BUFFERED_HOOK_EVENTS,
   MAX_BUFFERED_HOOK_EVENTS_PER_SPAWN,
+  SESSION_ID_PATTERN,
 } from './constants.js';
+
+/** True when an untrusted session id (a hook payload, persisted state) is safe
+ *  to use as one path segment — see SESSION_ID_PATTERN. */
+export function isSafeSessionId(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
+}
+
+/** The session id of a persisted agent (falling back to its transcript's
+ *  name), or undefined when it is not safe — such a record is not restored. */
+export function persistedSessionId(p: {
+  sessionId?: string;
+  jsonlFile: string;
+}): string | undefined {
+  const id = p.sessionId || path.basename(p.jsonlFile, '.jsonl');
+  return isSafeSessionId(id) ? id : undefined;
+}
 
 /** Pending external session info (waiting for confirmation event before creating agent). */
 export interface PendingExternalSession {

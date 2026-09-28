@@ -56,7 +56,7 @@ import {
   LOUNGE_TO_LEAVE_SETTING_KEY,
   PresenceTracker,
 } from './presence.js';
-import { SessionRouter } from './sessionRouter.js';
+import { persistedSessionId, SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
@@ -897,6 +897,8 @@ export class AgentRuntime {
       // is live. Restoring them directly would resurrect immortal characters
       // (also skips stale entries written by older builds that persisted them).
       if (p.leadAgentId !== undefined && !p.teamName) continue;
+      const sessionId = persistedSessionId(p);
+      if (sessionId === undefined) continue;
       try {
         if (!fs.existsSync(p.jsonlFile)) continue;
       } catch {
@@ -910,7 +912,7 @@ export class AgentRuntime {
 
       const agent: AgentState = {
         id: p.id,
-        sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+        sessionId,
         terminalRef: undefined,
         isExternal: true,
         projectDir: p.projectDir,
@@ -929,7 +931,7 @@ export class AgentRuntime {
           {
             jsonlFile: p.jsonlFile,
             projectDir: p.projectDir,
-            sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+            sessionId,
           },
           p.backgroundAgentToolIds,
         ),

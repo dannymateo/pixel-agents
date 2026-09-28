@@ -8,6 +8,7 @@ import {
   BASH_COMMAND_DISPLAY_MAX_LENGTH,
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from '../../../constants.js';
+import { isSafeSessionId } from '../../../sessionRouter.js';
 import { parseClaudeConversations } from './claudeConversation.js';
 import { parseClaudeFeedEntries } from './claudeFeed.js';
 import {
@@ -129,6 +130,7 @@ function getAllSessionRoots(): string[] {
 // the real tool id arrives later via JSONL polling.
 
 let warnedInvalidAgentId = false;
+let warnedInvalidSessionId = false;
 
 function normalizeHookEvent(
   raw: Record<string, unknown>,
@@ -136,6 +138,16 @@ function normalizeHookEvent(
   const eventName = raw.hook_event_name;
   const sessionId = raw.session_id;
   if (typeof eventName !== 'string' || typeof sessionId !== 'string') return null;
+  if (!isSafeSessionId(sessionId)) {
+    // Once per process, value not logged (untrusted): it becomes a path segment.
+    if (!warnedInvalidSessionId) {
+      warnedInvalidSessionId = true;
+      console.warn(
+        '[Pixel Agents] Dropping hook event: session_id is not a valid session id (further drops are silent)',
+      );
+    }
+    return null;
+  }
 
   // Claude stamps `agent_id` (the `<key>` of the spawn's `agent-<key>.jsonl`) on
   // events fired INSIDE a spawned agent; `session_id` stays the root session's.

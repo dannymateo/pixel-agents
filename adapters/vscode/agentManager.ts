@@ -18,6 +18,7 @@ import { loadLayout } from '../../server/src/layoutPersistence.js';
 import { assignPaletteIfNeeded } from '../../server/src/paletteAssigner.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from '../../server/src/providers/hook/claude/constants.js';
 import { claudeProvider } from '../../server/src/providers/index.js';
+import { persistedSessionId } from '../../server/src/sessionRouter.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from '../../server/src/timerManager.js';
 import type { AgentState, PersistedAgent } from '../../server/src/types.js';
 
@@ -341,6 +342,8 @@ export function restoreAgents(
     // state re-materialized by the 1s scan — never restored directly (also
     // skips stale entries written by older builds that persisted them).
     if (p.leadAgentId !== undefined && !p.teamName) continue;
+    const sessionId = persistedSessionId(p);
+    if (sessionId === undefined) continue;
 
     let terminal: vscode.Terminal | undefined;
     const isExternal = p.isExternal ?? false;
@@ -360,7 +363,7 @@ export function restoreAgents(
 
     const agent: AgentState = {
       id: p.id,
-      sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+      sessionId,
       terminalRef: terminal,
       isExternal,
       projectDir: p.projectDir,
@@ -379,7 +382,7 @@ export function restoreAgents(
         {
           jsonlFile: p.jsonlFile,
           projectDir: p.projectDir,
-          sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
+          sessionId,
         },
         p.backgroundAgentToolIds,
       ),

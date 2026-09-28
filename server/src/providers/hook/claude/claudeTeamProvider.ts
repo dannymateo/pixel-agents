@@ -4,6 +4,7 @@ import * as path from 'path';
 
 import type { TeamProvider } from '../../../../../core/src/teamProvider.js';
 import { sanitizeFeedText } from '../../../feedDiff.js';
+import { isSafeSessionId } from '../../../sessionRouter.js';
 import {
   discoverClaudeWorkflowAgents,
   extractClaudeWorkflowLaunch,
@@ -254,8 +255,10 @@ function spawnKeyFromFileName(fileName: string): string | undefined {
   return CLAUDE_AGENT_KEY_PATTERN.test(key) ? key : undefined;
 }
 
-/** Claude stores teammate JSONL files at `<projectDir>/<leadSessionId>/subagents/`. */
-function teammateDir(projectDir: string, leadSessionId: string): string {
+/** Claude stores teammate JSONL files at `<projectDir>/<leadSessionId>/subagents/`;
+ *  null when the id is not one safe path segment (it would leave projectDir). */
+function teammateDir(projectDir: string, leadSessionId: string): string | null {
+  if (!isSafeSessionId(leadSessionId)) return null;
   return path.join(projectDir, leadSessionId, 'subagents');
 }
 
@@ -416,6 +419,7 @@ export const claudeTeamProvider: TeamProvider = {
 
     // Old-style: sidecar-tagged transcripts under <projectDir>/<leadSessionId>/subagents/.
     const dir = teammateDir(projectDir, leadSessionId);
+    if (dir === null) return result;
     let entries: string[] = [];
     try {
       entries = fs.readdirSync(dir);

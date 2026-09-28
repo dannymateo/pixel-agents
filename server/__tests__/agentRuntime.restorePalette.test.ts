@@ -111,6 +111,26 @@ describe('AgentRuntime -- restore preserves palette/hueShift', () => {
     expect(agent?.hueShift).toBe(90);
   });
 
+  it('restoreExternalAgents skips a record whose session id is not one safe path segment', () => {
+    const persisted: PersistedAgent[] = [
+      {
+        id: 8,
+        sessionId: '../../escape',
+        terminalName: '',
+        isExternal: true,
+        jsonlFile: jsonlPath,
+        projectDir: tmpDir,
+      },
+    ];
+    const store = new AgentStateStore();
+    store.setAdapter(createMockAdapter(persisted));
+    runtime = new AgentRuntime(store, claudeProvider);
+
+    runtime.restoreExternalAgents();
+
+    expect(store.get(8)).toBeUndefined();
+  });
+
   it('persist() writes palette/hueShift onto the record that restoreExternalAgents copies back', () => {
     // Phase 1: persist an agent with palette/hueShift and capture the
     // record the adapter received.

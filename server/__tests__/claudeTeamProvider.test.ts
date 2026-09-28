@@ -1158,4 +1158,75 @@ describe('claudeTeamProvider', () => {
       });
     });
   });
+  describe('agent names reach logs and the UI as one clean line', () => {
+    // A name is untrusted text (hook payloads, transcript tags, team configs,
+    // spawn results): ANSI escapes and line breaks would forge log lines.
+    const DIRTY = 'evil\u001b[31m\r\nname\u0007';
+    const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+    const clean = (v: string | undefined): void => {
+      expect(v).toBeDefined();
+      expect(CONTROL.test(v!)).toBe(false);
+      expect(v).toContain('evil');
+      expect(v).toContain('name');
+    };
+
+    it('hook teammate_name and agent_type', () => {
+      clean(claudeTeamProvider.extractTeammateNameFromEvent({ teammate_name: DIRTY }));
+      clean(claudeTeamProvider.extractTeammateNameFromEvent({ agent_type: DIRTY }));
+    });
+
+    it('a record tag', () => {
+      clean(
+        claudeTeamProvider.extractTeamMetadataFromRecord!({ teamName: 't', agentName: DIRTY })
+          ?.agentName,
+      );
+    });
+
+    it('a transcript tag read from disk', () => {
+      const fs = require('fs') as typeof import('fs');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-name-tag-'));
+      try {
+        const p = path.join(dir, 's.jsonl');
+        fs.writeFileSync(
+          p,
+          JSON.stringify({ type: 'user', teamName: 't', agentName: DIRTY }) + '\n',
+        );
+        clean(claudeTeamProvider.getTeamMetadataForSession(p)?.agentName);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a spawn tool_result', () => {
+      const text = 'agent_id: evil\u001b[31mname@session-0123abcd';
+      clean(claudeTeamProvider.extractTeammateSpawnFromToolResult!('Agent', text)?.teammateName);
+    });
+
+    it('a team config member (compared against the same clean names)', () => {
+      const fs = require('fs') as typeof import('fs');
+      testHome.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-name-home-'));
+      try {
+        const teamDir = path.join(os.homedir(), '.claude', 'teams', 'dirty-team');
+        fs.mkdirSync(teamDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(teamDir, 'config.json'),
+          JSON.stringify({ members: [{ name: DIRTY }] }),
+        );
+        const members = [...(claudeTeamProvider.getTeamMembers('dirty-team') ?? [])];
+        expect(members).toHaveLength(1);
+        clean(members[0]);
+        expect(members[0]).toBe(
+          claudeTeamProvider.extractTeammateNameFromEvent({ teammate_name: DIRTY }),
+        );
+      } finally {
+        fs.rmSync(testHome.dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a normal name is untouched', () => {
+      expect(
+        claudeTeamProvider.extractTeammateNameFromEvent({ teammate_name: 'web-researcher' }),
+      ).toBe('web-researcher');
+    });
+  });
 });

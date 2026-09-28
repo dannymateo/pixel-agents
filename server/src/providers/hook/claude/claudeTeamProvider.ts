@@ -151,6 +151,14 @@ function sidecarText(value: unknown, max: number): string | undefined {
   return head;
 }
 
+/** An agent's name from untrusted text (a hook payload, a transcript tag, a
+ *  team config, a spawn result), cleaned like a sidecar's: one line, no ANSI
+ *  or control characters, bounded. Every source uses this one rule so names
+ *  from different sources still compare equal. */
+function agentNameText(value: unknown): string | undefined {
+  return sidecarText(value, IDENTIFIER_MAX_CHARS);
+}
+
 /** Result of looking a sidecar up: settled (from cache, or refused/missing
  *  without opening it), or in need of a read — the costly part. */
 type SidecarProbe =
@@ -324,10 +332,7 @@ function readTeamMetadata(
     if (typeof record.teamName === 'string') {
       // An unsafe name is read as untagged: definitively not a team transcript.
       if (!isSafeTeamName(record.teamName)) return null;
-      return {
-        teamName: record.teamName,
-        agentName: typeof record.agentName === 'string' ? record.agentName : undefined,
-      };
+      return { teamName: record.teamName, agentName: agentNameText(record.agentName) };
     }
     // A conversational record without team tags means this transcript will
     // never gain them (tags are stamped on every user/assistant record).
@@ -375,17 +380,16 @@ export const claudeTeamProvider: TeamProvider = {
   },
 
   extractTeammateNameFromEvent(event) {
-    const teammateName = event.teammate_name;
-    if (typeof teammateName === 'string') return teammateName;
-    const agentType = event.agent_type;
-    return typeof agentType === 'string' ? agentType : undefined;
+    if (typeof event.teammate_name === 'string') return agentNameText(event.teammate_name);
+    return agentNameText(event.agent_type);
   },
 
   extractTeammateSpawnFromToolResult(toolName, resultContent) {
     if (!TEAMMATE_SPAWN_TOOLS.has(toolName)) return null;
     const match = AGENT_ID_RESULT_PATTERN.exec(toolResultText(resultContent));
     if (!match || !isSafeTeamName(match[2])) return null;
-    return { teammateName: match[1], teamName: match[2] };
+    const teammateName = agentNameText(match[1]);
+    return teammateName ? { teammateName, teamName: match[2] } : null;
   },
 
   extractSpawnStop(toolName, toolInput) {
@@ -506,11 +510,7 @@ export const claudeTeamProvider: TeamProvider = {
   extractTeamMetadataFromRecord(record) {
     const teamName = record.teamName;
     if (!isSafeTeamName(teamName)) return null;
-    const agentName = record.agentName;
-    return {
-      teamName,
-      agentName: typeof agentName === 'string' ? agentName : undefined,
-    };
+    return { teamName, agentName: agentNameText(record.agentName) };
   },
 
   getTeamMembers(teamName) {
@@ -532,7 +532,8 @@ export const claudeTeamProvider: TeamProvider = {
         // isActive:false = the CLI marked this one-shot teammate finished (newer
         // harnesses keep finished members listed). Missing isActive = active
         // (older configs never write the field).
-        if (m && typeof m.name === 'string' && m.isActive !== false) names.add(m.name);
+        const name = m && m.isActive !== false ? agentNameText(m.name) : undefined;
+        if (name) names.add(name);
       }
       return names;
     } catch {

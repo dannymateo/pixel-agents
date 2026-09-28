@@ -226,3 +226,14 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const MAX_TRANSCRIPT_LINE_CHARS = 64 * 1024 * 1024;
 /** Most bytes read from a transcript per poll; the rest waits for the next. */
 export const TRANSCRIPT_READ_CHUNK_BYTES = 65536;
+
+// ── Office consoles (docs/superpowers/specs/2026-09-28-office-terminals-design.md) ──
+/** Live office consoles at once; a launch past this is refused. */
+export const MAX_OFFICE_TERMINALS = 8;
+/** Output kept per console for re-attaching (UTF-16 chars). */
+export const TERMINAL_BUFFER_CHARS = 256 * 1024;
+export const TERMINAL_DEFAULT_COLS = 120;
+export const TERMINAL_DEFAULT_ROWS = 32;
+/** A resize past these is clamped: a client cannot ask for a giant screen. */
+export const TERMINAL_MAX_COLS = 500;
+export const TERMINAL_MAX_ROWS = 200;

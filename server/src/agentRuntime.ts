@@ -436,9 +436,15 @@ export class AgentRuntime {
       isDir = false;
     }
     if (!isDir) throw new Error(`Not an existing folder: ${cwd}`);
+    // Canonicalize BEFORE deriving the project dir: normalizeProjectPath maps
+    // every non-alphanumeric char to '-', so a trailing separator, `..`
+    // segments, or (Windows) an 8.3 short name would hash to a projectDir
+    // different from the one claude derives from its own process.cwd() --
+    // the transcript then never "appears" and a later /clear can't match it.
+    const canonicalCwd = fs.realpathSync.native(cwd);
 
     const sessionId = crypto.randomUUID();
-    const launch = this.provider.buildLaunchCommand?.(sessionId, cwd, {
+    const launch = this.provider.buildLaunchCommand?.(sessionId, canonicalCwd, {
       bypassPermissions: opts.bypassPermissions === true,
     });
     if (!launch) throw new Error('This provider cannot launch agents');
@@ -448,9 +454,9 @@ export class AgentRuntime {
       process.env[CLAUDE_COMMAND_OVERRIDE_ENV],
     );
     const env = { ...(process.env as Record<string, string>), ...(launch.env ?? {}) };
-    const terminalId = this.ptyHost.open({ file, args, cwd, env });
+    const terminalId = this.ptyHost.open({ file, args, cwd: canonicalCwd, env });
 
-    const projectDir = this.provider.getSessionDirs?.(cwd)[0] ?? cwd;
+    const projectDir = this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd;
     const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
     this.knownJsonlFiles.add(jsonlFile);
     const id = this.store.nextAgentId.current++;

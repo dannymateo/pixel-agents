@@ -110,6 +110,16 @@ describe('AgentRuntime.launchOfficeAgent', () => {
     expect(store.get(agentId)).toBeUndefined();
   });
 
+  it('a cwd with a trailing separator and .. segments resolves to the same project dir as its canonical form', () => {
+    fs.mkdirSync(path.join(workDir, 'sub'));
+    const messyCwd = path.join(workDir, 'sub', '..') + path.sep;
+    const { agentId } = runtime.launchOfficeAgent({ cwd: messyCwd });
+    const agent = store.get(agentId)!;
+    const canonical = fs.realpathSync.native(workDir);
+    expect(spawned[0].cwd).toBe(canonical);
+    expect(agent.projectDir).toBe(claudeProvider.getSessionDirs!(canonical)[0]);
+  });
+
   it('terminalId reaches only privileged connections', () => {
     const { agentId, terminalId } = runtime.launchOfficeAgent({ cwd: workDir });
     const agent = store.get(agentId)!;

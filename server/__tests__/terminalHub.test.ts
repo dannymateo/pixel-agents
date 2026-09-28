@@ -93,4 +93,27 @@ describe('TerminalHub', () => {
     flush();
     expect(a).toHaveLength(2);
   });
+
+  it('re-attaching while output is pending does not deliver it twice', () => {
+    const { hub, ptys, id, flush } = setup();
+    const a: Array<Record<string, unknown>> = [];
+    hub.attach('c1', id, (m) => a.push(m));
+    ptys[0].emit('x');
+    hub.attach('c1', id, (m) => a.push(m));
+    flush();
+    expect(a).toEqual([
+      { type: 'terminalSnapshot', terminalId: id, data: '', exited: false },
+      { type: 'terminalSnapshot', terminalId: id, data: 'x', exited: false },
+    ]);
+  });
+
+  it('nothing is delivered after detach even if a flush was already scheduled', () => {
+    const { hub, ptys, id, flush } = setup();
+    const a: Array<Record<string, unknown>> = [];
+    hub.attach('c1', id, (m) => a.push(m));
+    ptys[0].emit('x');
+    hub.detach('c1', id);
+    flush();
+    expect(a).toEqual([{ type: 'terminalSnapshot', terminalId: id, data: '', exited: false }]);
+  });
 });

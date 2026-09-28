@@ -7,6 +7,11 @@ interface Sub {
   send: Send;
   pending: string;
   scheduled: boolean;
+  /** Set once this subscription is detached, dropped, or superseded by a
+   *  re-attach of the same connId — a flush or exit already scheduled for it
+   *  must then deliver nothing (React StrictMode's attach→detach→attach can
+   *  otherwise double-deliver output already folded into the new snapshot). */
+  dead: boolean;
 }
 
 /**
@@ -36,18 +41,25 @@ export class TerminalHub {
       }
     });
     this.offExit = host.onExit((id, exitCode) => {
-      for (const [, sub] of this.subs.get(id) ?? []) {
+      const conns = this.subs.get(id);
+      for (const [, sub] of conns ?? []) {
         this.schedule(() => {
+          if (sub.dead) return;
           this.flush(id, sub);
           sub.send({ type: 'terminalExit', terminalId: id, exitCode });
         }, TERMINAL_OUTPUT_FLUSH_MS);
       }
+      // Nothing further can attach to an exited console's dead subs -- the
+      // scheduled callbacks above hold their own `sub` reference, so removing
+      // the map entry now (rather than waiting for them to run) is safe and
+      // caps memory at one exited console instead of retaining it forever.
+      this.subs.delete(id);
     });
   }
 
   private flush(id: string, sub: Sub): void {
     sub.scheduled = false;
-    if (!sub.pending) return;
+    if (sub.dead || !sub.pending) return;
     const data = sub.pending;
     sub.pending = '';
     sub.send({ type: 'terminalOutput', terminalId: id, data });
@@ -61,7 +73,12 @@ export class TerminalHub {
       conns = new Map();
       this.subs.set(terminalId, conns);
     }
-    conns.set(connId, { send, pending: '', scheduled: false });
+    // A re-attach of the same connId (React StrictMode's double-mount) must
+    // not let a flush or exit already scheduled for the PREVIOUS subscription
+    // deliver again -- the new snapshot below already carries that output.
+    const previous = conns.get(connId);
+    if (previous) previous.dead = true;
+    conns.set(connId, { send, pending: '', scheduled: false, dead: false });
     send({ type: 'terminalSnapshot', terminalId, data: snap.data, exited: snap.exited });
     return true;
   }
@@ -71,11 +88,22 @@ export class TerminalHub {
   }
 
   detach(connId: string, terminalId: string): void {
-    this.subs.get(terminalId)?.delete(connId);
+    const conns = this.subs.get(terminalId);
+    const sub = conns?.get(connId);
+    if (!sub) return;
+    sub.dead = true;
+    conns?.delete(connId);
+    if (conns && conns.size === 0) this.subs.delete(terminalId);
   }
 
   dropConnection(connId: string): void {
-    for (const conns of this.subs.values()) conns.delete(connId);
+    for (const [terminalId, conns] of this.subs) {
+      const sub = conns.get(connId);
+      if (!sub) continue;
+      sub.dead = true;
+      conns.delete(connId);
+      if (conns.size === 0) this.subs.delete(terminalId);
+    }
   }
 
   dispose(): void {

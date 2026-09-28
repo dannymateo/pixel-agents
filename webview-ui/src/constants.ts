@@ -370,6 +370,12 @@ export const FEED_DIFF_REMOVE_BG = 'rgba(224, 90, 90, 0.12)';
 // ── Living office ─────────────────────────────────────────────
 /** The door stays open this long after someone crosses it. */
 export const DOOR_OPEN_HOLD_MS = 900;
+/** Arrivals take the door one at a time, this far apart: a burst of spawns
+ *  would otherwise appear on one tile and walk in as a single blob. */
+export const DOOR_ENTRY_STAGGER_SEC = 0.6;
+/** Longest a scene walk (in, to the lounge, back, out, over to talk) takes:
+ *  a long way is walked faster rather than for ~20 s across a wide office. */
+export const SCENE_WALK_MAX_SEC = 6;
 /** How long the goodbye bubble shows before an agent walks out. */
 export const GOODBYE_BUBBLE_MS = 1500;
 /** Area label the user gives their own lounge in the Areas editor. */

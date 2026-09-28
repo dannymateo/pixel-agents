@@ -9,6 +9,7 @@ import {
   CONVERSATION_SPOT_MAX_DIST,
   CONVERSATION_TALK_HOLD_MAX_MS,
   DISMISS_BUBBLE_FAST_FADE_SEC,
+  DOOR_ENTRY_STAGGER_SEC,
   DOOR_OPEN_HOLD_MS,
   FURNITURE_ANIM_INTERVAL_SEC,
   GOODBYE_BUBBLE_MS,
@@ -21,7 +22,9 @@ import {
   MAX_PET_ID_LENGTH,
   PET_HIT_HALF_WIDTH,
   PET_HIT_HEIGHT,
+  SCENE_WALK_MAX_SEC,
   WAITING_BUBBLE_DURATION_SEC,
+  WALK_SPEED_PX_PER_SEC,
 } from '../../constants.js';
 import {
   getAnimationFrames,
@@ -74,7 +77,8 @@ export interface LivingTargets {
  * live the character is `scripted`: the FSM only walks the path it was given,
  * and OfficeState decides what happens on arrival.
  *
- *   enter:  door tile → own seat, then back to the FSM.
+ *   enter:  door tile → own seat, then back to the FSM. In a burst it first
+ *           waits its turn at the door, unseen (`queued`).
  *   lounge: desk → a free rest seat (or beside the lounge), then rests there.
  *   return: wherever → own seat, then back to the FSM.
  *   leave:  → door tile, goodbye bubble, fade out, deleted, onGone.
@@ -84,8 +88,8 @@ export interface LivingTargets {
  */
 interface LifecycleScene {
   kind: 'enter' | 'lounge' | 'return' | 'leave' | 'talk';
-  phase: 'walk' | 'rest' | 'goodbye' | 'exit' | 'hold';
-  /** Seconds left in the goodbye / exit phase; seconds spent holding (talk). */
+  phase: 'queued' | 'walk' | 'rest' | 'goodbye' | 'exit' | 'hold';
+  /** Seconds left in the queued / goodbye / exit phase; seconds spent holding (talk). */
   timer: number;
   /** The rest seat this character holds (lounge scene only). */
   loungeSeat: string | null;
@@ -194,6 +198,8 @@ export class OfficeState implements SceneHost {
   /** Seconds the door stays open after its tile was last occupied. */
   private doorHoldTimer = 0;
   private doorOpen = false;
+  /** Seconds until the door is free for the next arrival (DOOR_ENTRY_STAGGER_SEC apart). */
+  private doorQueueSec = 0;
   /** Area labels the composition added (team modules, the generated lounge):
    *  drawn even with Show Areas off — they name the teams. */
   livingAreaLabels: ReadonlySet<string> = new Set();
@@ -1262,6 +1268,7 @@ export class OfficeState implements SceneHost {
     this.composedUids = new Set();
     this.doorOpen = false;
     this.doorHoldTimer = 0;
+    this.doorQueueSec = 0;
     for (const [id, scene] of [...this.scenes]) {
       const ch = this.characters.get(id);
       if (!ch) continue;
@@ -1364,6 +1371,26 @@ export class OfficeState implements SceneHost {
     }
     this.scenes.set(id, scene);
     ch.scripted = true;
+    if (this.doorQueueSec > 0) {
+      // Someone just came in: wait for the door, unseen, then walk in.
+      scene.phase = 'queued';
+      scene.timer = this.doorQueueSec;
+      this.doorQueueSec += DOOR_ENTRY_STAGGER_SEC;
+      return;
+    }
+    this.doorQueueSec = DOOR_ENTRY_STAGGER_SEC;
+    this.walkInToSeat(ch, scene);
+  }
+
+  /** The enter scene's walk from the door to the character's seat (or, when
+   *  the seat cannot be reached from there, appearing on it). */
+  private walkInToSeat(ch: Character, scene: LifecycleScene): void {
+    scene.phase = 'walk';
+    const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
+    if (!seat) {
+      this.dropScene(ch);
+      return;
+    }
     const path = this.scenePath(ch, seat.seatCol, seat.seatRow, scene);
     if (path.length > 0) {
       this.startWalk(ch, path);
@@ -1496,6 +1523,13 @@ export class OfficeState implements SceneHost {
     ch.bubbleType = null;
     ch.scripted = true;
     this.scenes.set(id, scene);
+    if (previous?.phase === 'queued') {
+      // Never came in: it is simply gone, without walking in to wave.
+      scene.phase = 'exit';
+      scene.timer = 0;
+      ch.sceneAlpha = 0;
+      return;
+    }
     if (path.length > 0) {
       this.startWalk(ch, path);
     } else {
@@ -1618,6 +1652,9 @@ export class OfficeState implements SceneHost {
   private startWalk(ch: Character, path: Array<{ col: number; row: number }>): void {
     ch.path = path;
     ch.moveProgress = 0;
+    // Scene walks never drag on: a long way is walked faster.
+    const hurried = (path.length * TILE_SIZE) / SCENE_WALK_MAX_SEC;
+    ch.walkSpeed = hurried > WALK_SPEED_PX_PER_SEC ? hurried : undefined;
     ch.state = CharacterState.WALK;
     ch.frame = 0;
     ch.frameTimer = 0;
@@ -1734,6 +1771,10 @@ export class OfficeState implements SceneHost {
   /** Advance one scene by a frame. Returns true when the character is gone. */
   private tickScene(ch: Character, scene: LifecycleScene, dt: number): boolean {
     switch (scene.phase) {
+      case 'queued':
+        scene.timer -= dt;
+        if (scene.timer <= 0) this.walkInToSeat(ch, scene);
+        return false;
       case 'walk':
         if (ch.state !== CharacterState.WALK) this.arrive(ch, scene);
         return false;
@@ -1784,6 +1825,12 @@ export class OfficeState implements SceneHost {
           break;
         case 'enter':
         case 'return': {
+          if (scene.phase === 'queued') {
+            // Still waiting unseen: wait at the (possibly moved) door.
+            const door = this.livingTargets?.door;
+            if (door) this.placeAt(ch, door.col, door.row);
+            break;
+          }
           const seat = ch.seatId ? this.seats.get(ch.seatId) : undefined;
           if (!seat) {
             this.dropScene(ch);
@@ -2356,6 +2403,8 @@ export class OfficeState implements SceneHost {
       this.greeter = null;
     }
 
+    this.doorQueueSec = Math.max(0, this.doorQueueSec - dt);
+
     const toDelete: number[] = [];
     for (const ch of this.characters.values()) {
       const effect = advanceMatrixEffect(ch, dt);
@@ -2375,7 +2424,7 @@ export class OfficeState implements SceneHost {
         toDelete.push(ch.id);
         continue;
       }
-      if (ch.sceneAlpha !== undefined && scene?.phase !== 'exit') {
+      if (ch.sceneAlpha !== undefined && scene?.phase !== 'exit' && scene?.phase !== 'queued') {
         ch.sceneAlpha += dt / MATRIX_EFFECT_DURATION_SEC;
         if (ch.sceneAlpha >= 1) ch.sceneAlpha = undefined;
       }

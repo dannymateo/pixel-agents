@@ -26,9 +26,11 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, test } from 'vitest';
 
 import {
+  DOOR_ENTRY_STAGGER_SEC,
   DOOR_OPEN_HOLD_MS,
   GOODBYE_BUBBLE_MS,
   MATRIX_EFFECT_DURATION_SEC,
+  SCENE_WALK_MAX_SEC,
 } from '../src/constants.js';
 import { OfficeState } from '../src/office/engine/officeState.js';
 import type { LoadedAssetData } from '../src/office/layout/furnitureCatalog.js';
@@ -205,6 +207,64 @@ test('entering an existing character re-enters it through the door onto the give
   assert.equal(os.seats.get(DESK_B)!.assigned, false, 'the old seat is released');
   run(os, 10);
   assert.deepEqual(at(os, 2), seatTile(os, DESK_A));
+});
+
+test('a burst of arrivals enters one at a time: no two visible walkers overlap', () => {
+  const os = livingOffice();
+  os.enterThroughDoor(1, DESK_A);
+  os.enterThroughDoor(2, DESK_B);
+  os.enterThroughDoor(3, LOUNGE[0]); // a rest seat is no desk: it stands seatless
+  const dt = 0.05;
+  for (let t = 0; t < 10; t += dt) {
+    os.update(dt);
+    const visible = [1, 2]
+      .map((id) => os.characters.get(id)!)
+      .filter((ch) => (ch.sceneAlpha ?? 1) > 0);
+    if (visible.length === 2) {
+      const [a, b] = visible;
+      assert.ok(
+        Math.hypot(a.x - b.x, a.y - b.y) >= 8,
+        `two arrivals drawn on top of each other at t=${t.toFixed(2)}`,
+      );
+    }
+  }
+  assert.deepEqual(at(os, 1), seatTile(os, DESK_A), 'the first still reaches its desk');
+  assert.deepEqual(at(os, 2), seatTile(os, DESK_B), 'the second too, after its turn');
+});
+
+test('an arrival queued behind another stays invisible until its turn', () => {
+  const os = livingOffice();
+  os.enterThroughDoor(1, DESK_A);
+  os.enterThroughDoor(2, DESK_B);
+  os.update(DOOR_ENTRY_STAGGER_SEC / 2);
+  assert.equal(os.characters.get(2)!.sceneAlpha, 0, 'waiting its turn, not drawn');
+  run(os, DOOR_ENTRY_STAGGER_SEC);
+  assert.ok((os.characters.get(2)!.sceneAlpha ?? 1) > 0, 'drawn once its turn came');
+});
+
+test('a long walk in takes at most SCENE_WALK_MAX_SEC, then walking speed is normal again', () => {
+  const cols = 60;
+  const tiles: TileType[] = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < cols; c++) tiles.push(r < 2 ? TileType.WALL : TileType.FLOOR_1);
+  }
+  const far = 'chair-far';
+  const os = new OfficeState({
+    version: 1,
+    cols,
+    rows: ROWS,
+    tiles,
+    furniture: [
+      { uid: 'door', type: 'DOOR_CLOSED', col: 2, row: 0 },
+      { uid: 'desk-far', type: 'TEST_DESK', col: 56, row: 7 },
+      { uid: far, type: 'TEST_CHAIR', col: 56, row: 8 },
+    ],
+  });
+  os.setLivingTargets({ door: DOOR, loungeSeats: [] });
+  os.enterThroughDoor(1, far);
+  run(os, SCENE_WALK_MAX_SEC + 0.5);
+  assert.deepEqual(at(os, 1), seatTile(os, far), '60 tiles away, still seated in time');
+  assert.equal(os.characters.get(1)!.walkSpeed, undefined, 'the hurry ends with the walk');
 });
 
 test('the door opens while someone stands in it and closes DOOR_OPEN_HOLD_MS after', () => {

@@ -120,7 +120,8 @@ function stepAlongPath(ch: Character, dt: number): void {
   const nextTile = ch.path[0];
   ch.dir = directionBetween(ch.tileCol, ch.tileRow, nextTile.col, nextTile.row);
 
-  ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt;
+  const speed = (ch.scripted ? ch.walkSpeed : undefined) ?? WALK_SPEED_PX_PER_SEC;
+  ch.moveProgress += (speed / TILE_SIZE) * dt;
 
   const fromCenter = tileCenter(ch.tileCol, ch.tileRow);
   const toCenter = tileCenter(nextTile.col, nextTile.row);
@@ -136,6 +137,7 @@ function stepAlongPath(ch: Character, dt: number): void {
     ch.y = toCenter.y;
     ch.path.shift();
     ch.moveProgress = 0;
+    if (ch.path.length === 0) ch.walkSpeed = undefined;
   }
 }
 

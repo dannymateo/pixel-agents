@@ -250,6 +250,10 @@ export interface Character {
   /** Render opacity while fading in at, or out through, the door (0..1).
    *  undefined = fully opaque. */
   sceneAlpha?: number;
+  /** Walking speed (px/s) of the current scene walk when it must hurry to
+   *  finish within SCENE_WALK_MAX_SEC; undefined = WALK_SPEED_PX_PER_SEC.
+   *  Only honoured while `scripted`, and cleared when the path ends. */
+  walkSpeed?: number;
   /** Seconds before an available agent with no way to its desk searches for
    *  one again (a failed search is not repeated every frame). */
   deskRetryTimer?: number;

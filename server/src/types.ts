@@ -5,6 +5,9 @@ export interface AgentState {
   sessionId: string;
   /** Terminal reference — undefined for extension panel sessions */
   terminalRef?: vscode.Terminal;
+  /** Office console this agent runs in (standalone "+ Agent"); its output is
+   *  point-to-point to privileged connections only (TerminalHub). */
+  terminalId?: string;
   /** Whether this agent was detected from an external source (VS Code extension panel, etc.) */
   isExternal: boolean;
   projectDir: string;

@@ -9,6 +9,7 @@
  * This is the single source of truth for agent lifecycle wiring. No duplication.
  */
 
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -19,6 +20,7 @@ import { clampIdleToLoungeMinutes, clampLoungeToLeaveMinutes } from './configPer
 import {
   DEFAULT_MAX_CONTEXT_TOKENS,
   IDLE_TO_LOUNGE_MS_DEFAULT,
+  JSONL_POLL_INTERVAL_MS,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
 } from './constants.js';
 import { ConversationTracker } from './conversations.js';
@@ -58,6 +60,8 @@ import {
 } from './presence.js';
 import { persistedSessionId, SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
+import { CLAUDE_COMMAND_OVERRIDE_ENV, resolveLaunch } from './terminals/launchCommand.js';
+import type { PtyHost } from './terminals/ptyHost.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
   clearSpawnFinished,
@@ -89,6 +93,12 @@ export class AgentRuntime {
   readonly waitingTimers = new Map<number, ReturnType<typeof setTimeout>>();
   readonly permissionTimers = new Map<number, ReturnType<typeof setTimeout>>();
   readonly jsonlPollTimers = new Map<number, ReturnType<typeof setInterval>>();
+
+  /** Office consoles (standalone). Null when node-pty is unavailable or the
+   *  server is not bound to loopback: launching is then refused. */
+  ptyHost: PtyHost | null = null;
+  private readonly agentByTerminal = new Map<string, number>();
+  private unsubscribePtyExit: (() => void) | null = null;
 
   // Scanning state. PathSet (not Set) so a transcript adopted via hooks is still
   // recognized as known when a scanner rebuilds the path from the workspace folder
@@ -393,6 +403,115 @@ export class AgentRuntime {
     this.lifecycleCallbacks = callbacks;
   }
 
+  // ── Office consoles (standalone "+ Agent") ──
+
+  attachPtyHost(host: PtyHost): void {
+    this.ptyHost = host;
+    this.unsubscribePtyExit = host.onExit((terminalId) => {
+      const agentId = this.agentByTerminal.get(terminalId);
+      this.agentByTerminal.delete(terminalId);
+      if (agentId !== undefined && this.store.has(agentId)) this.removeAgent(agentId);
+    });
+  }
+
+  agentIdForTerminal(terminalId: string): number | undefined {
+    return this.agentByTerminal.get(terminalId);
+  }
+
+  /**
+   * Launch `claude` in an office console (spec §2): a fresh session id, an
+   * internal agent bound to the console, the expected transcript pre-registered
+   * so the project scan never mistakes it for someone else's session.
+   */
+  launchOfficeAgent(opts: { cwd: string; bypassPermissions?: boolean }): {
+    agentId: number;
+    terminalId: string;
+  } {
+    if (!this.ptyHost) throw new Error('Office consoles are not available on this server');
+    const cwd = opts.cwd;
+    let isDir = false;
+    try {
+      isDir = path.isAbsolute(cwd) && fs.statSync(cwd).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) throw new Error(`Not an existing folder: ${cwd}`);
+
+    const sessionId = crypto.randomUUID();
+    const launch = this.provider.buildLaunchCommand?.(sessionId, cwd, {
+      bypassPermissions: opts.bypassPermissions === true,
+    });
+    if (!launch) throw new Error('This provider cannot launch agents');
+    const { file, args } = resolveLaunch(
+      launch,
+      process.platform,
+      process.env[CLAUDE_COMMAND_OVERRIDE_ENV],
+    );
+    const env = { ...(process.env as Record<string, string>), ...(launch.env ?? {}) };
+    const terminalId = this.ptyHost.open({ file, args, cwd, env });
+
+    const projectDir = this.provider.getSessionDirs?.(cwd)[0] ?? cwd;
+    const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
+    this.knownJsonlFiles.add(jsonlFile);
+    const id = this.store.nextAgentId.current++;
+    const agent: AgentState = {
+      id,
+      sessionId,
+      isExternal: false,
+      terminalId,
+      projectDir,
+      jsonlFile,
+      fileOffset: 0,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      lastDataAt: 0,
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      hookDelivered: false,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+    };
+    assignPaletteIfNeeded(agent, this.store);
+    this.agentByTerminal.set(terminalId, id);
+    this.store.set(id, agent);
+    this.registerAgent(sessionId, id);
+    this.watchWhenTranscriptAppears(id);
+    return { agentId: id, terminalId };
+  }
+
+  /** Start watching an office agent's transcript once claude creates it. */
+  private watchWhenTranscriptAppears(id: number): void {
+    const timer = setInterval(() => {
+      const agent = this.store.get(id);
+      if (!agent) {
+        clearInterval(timer);
+        this.jsonlPollTimers.delete(id);
+        return;
+      }
+      if (!fs.existsSync(agent.jsonlFile)) return;
+      clearInterval(timer);
+      this.jsonlPollTimers.delete(id);
+      startFileWatching(
+        id,
+        agent.jsonlFile,
+        this.store,
+        this.fileWatchers,
+        this.pollingTimers,
+        this.waitingTimers,
+        this.permissionTimers,
+      );
+    }, JSONL_POLL_INTERVAL_MS);
+    this.jsonlPollTimers.set(id, timer);
+  }
+
   // ── Hook event routing ──
 
   /** Route an incoming hook event to the appropriate agent. */
@@ -426,6 +545,11 @@ export class AgentRuntime {
   removeAgent(id: number): void {
     const target = this.store.get(id);
     if (!target) return;
+    const terminalId = this.store.get(id)?.terminalId;
+    if (terminalId) {
+      this.agentByTerminal.delete(terminalId);
+      this.ptyHost?.close(terminalId);
+    }
     if (target.parentAgentId === undefined && !this.disposed) {
       this.leaveSubtree(id, false);
       this.removeSingleAgent(id);
@@ -994,6 +1118,8 @@ export class AgentRuntime {
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
     this.disposed = true;
+    this.unsubscribePtyExit?.();
+    this.ptyHost?.closeAll();
     setTranscriptLineListener(null);
     this.feedHub.dispose();
     setConversationTracker(null);

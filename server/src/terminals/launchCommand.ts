@@ -21,6 +21,9 @@ function parseOverride(raw: string | undefined): string[] | null {
  * NOT here: it is the pty's `cwd` option, so a path with spaces is never
  * re-split by a shell. On Windows `claude` is an npm `.cmd` shim, which only
  * cmd.exe can run.
+ *
+ * Contract: `launch.args` must never carry untrusted text — on Windows they
+ * reach `cmd.exe /c`, which gives no injection protection.
  */
 export function resolveLaunch(
   launch: { command: string; args: string[] },

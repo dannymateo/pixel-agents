@@ -39,6 +39,7 @@ export function agentCreatedMessage(agent: AgentState, privileged: boolean): Wir
     depth: agent.depth,
     nodeKind: agent.nodeKind,
     presence: agent.presence,
+    terminalId: privileged ? agent.terminalId : undefined,
   };
 }
 
@@ -48,7 +49,14 @@ export function agentTreeMeta(
   privileged: boolean,
 ): Pick<
   AgentSeatMeta,
-  'parentAgentId' | 'role' | 'label' | 'depth' | 'teammateName' | 'nodeKind' | 'presence'
+  | 'parentAgentId'
+  | 'role'
+  | 'label'
+  | 'depth'
+  | 'teammateName'
+  | 'nodeKind'
+  | 'presence'
+  | 'terminalId'
 > {
   return {
     parentAgentId: wireParentId(agent),
@@ -58,6 +66,7 @@ export function agentTreeMeta(
     teammateName: agent.agentName,
     nodeKind: agent.nodeKind,
     presence: agent.presence,
+    terminalId: privileged ? agent.terminalId : undefined,
   };
 }
 

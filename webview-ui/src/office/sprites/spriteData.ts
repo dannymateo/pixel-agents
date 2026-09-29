@@ -7,6 +7,7 @@ import bubbleEnvelopeData from './bubble-envelope.json';
 import bubbleGoodbyeData from './bubble-goodbye.json';
 import bubblePermissionData from './bubble-permission.json';
 import bubblePetData from './bubble-pet.json';
+import bubbleQuestionData from './bubble-question.json';
 import bubbleWaitingData from './bubble-waiting.json';
 
 // ── Speech Bubble Sprites ───────────────────────────────────────
@@ -22,6 +23,10 @@ function resolveBubbleSprite(data: BubbleSpriteJson): SpriteData {
 
 /** Permission bubble: white square with "..." in amber, and a tail pointer (11x13) */
 export const BUBBLE_PERMISSION_SPRITE: SpriteData = resolveBubbleSprite(bubblePermissionData);
+
+/** Question bubble: the permission bubble with an amber "?" — the agent asked
+ *  the user a question (AskUserQuestion; spec §3 "Personaje") (11x13) */
+export const BUBBLE_QUESTION_SPRITE: SpriteData = resolveBubbleSprite(bubbleQuestionData);
 
 /** Waiting bubble: white square with green checkmark, and a tail pointer (11x13) */
 export const BUBBLE_WAITING_SPRITE: SpriteData = resolveBubbleSprite(bubbleWaitingData);

@@ -5,6 +5,7 @@ export type { CharacterSprites } from './spriteData.js';
 export {
   BUBBLE_HEART_SPRITE,
   BUBBLE_PERMISSION_SPRITE,
+  BUBBLE_QUESTION_SPRITE,
   BUBBLE_WAITING_SPRITE,
   getCharacterSprites,
 } from './spriteData.js';

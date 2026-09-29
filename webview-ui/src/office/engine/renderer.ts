@@ -58,6 +58,7 @@ import {
   BUBBLE_GOODBYE_SPRITE,
   BUBBLE_HEART_SPRITE,
   BUBBLE_PERMISSION_SPRITE,
+  BUBBLE_QUESTION_SPRITE,
   BUBBLE_WAITING_SPRITE,
   getCharacterSprites,
 } from '../sprites/spriteData.js';
@@ -793,9 +794,11 @@ function renderBubbles(
       sprite =
         ch.bubbleType === 'permission'
           ? BUBBLE_PERMISSION_SPRITE
-          : ch.bubbleType === 'goodbye'
-            ? BUBBLE_GOODBYE_SPRITE
-            : BUBBLE_WAITING_SPRITE;
+          : ch.bubbleType === 'question'
+            ? BUBBLE_QUESTION_SPRITE
+            : ch.bubbleType === 'goodbye'
+              ? BUBBLE_GOODBYE_SPRITE
+              : BUBBLE_WAITING_SPRITE;
 
       // Compute opacity: permission = full, waiting/goodbye = fade in last 0.5s
       if (

@@ -36,6 +36,17 @@ export function tabTitle(
   return consoleCapable ? attentionTitle(count) : ATTENTION_TITLE_BASE;
 }
 
+/** An `agentToolStart`/`subagentToolStart` that asks the user a question
+ *  (AskUserQuestion). A sub-agent's start carries no tool name, only the
+ *  status the provider formats for it. */
+export function isQuestionToolStart(msg: unknown): boolean {
+  if (!msg || typeof msg !== 'object') return false;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== 'agentToolStart' && m.type !== 'subagentToolStart') return false;
+  if (typeof m.toolId !== 'string') return false;
+  return m.toolName === ASK_USER_QUESTION_TOOL || m.status === ASK_USER_QUESTION_STATUS;
+}
+
 const isAgentId = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 export class AttentionTracker {
@@ -85,9 +96,7 @@ export class AttentionTracker {
         return true;
       case 'agentToolStart':
       case 'subagentToolStart': {
-        const isQuestion =
-          m.toolName === ASK_USER_QUESTION_TOOL || m.status === ASK_USER_QUESTION_STATUS;
-        if (isQuestion && typeof m.toolId === 'string') {
+        if (isQuestionToolStart(m) && typeof m.toolId === 'string') {
           let open = this.questions.get(id);
           if (!open) this.questions.set(id, (open = new Set()));
           open.add(m.toolId);

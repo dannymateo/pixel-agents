@@ -1198,9 +1198,29 @@ export class OfficeState implements SceneHost {
     }
   }
 
+  /** An open question (AskUserQuestion): the permission-style "?" bubble.
+   *  Never displaces a permission, which outranks it. */
+  showQuestionBubble(id: number): void {
+    const ch = this.characters.get(id);
+    if (ch && !this.isLeaving(id) && ch.bubbleType !== 'permission') {
+      ch.bubbleType = 'question';
+      ch.bubbleTimer = 0;
+    }
+  }
+
+  clearQuestionBubble(id: number): void {
+    const ch = this.characters.get(id);
+    if (ch && ch.bubbleType === 'question') {
+      ch.bubbleType = null;
+      ch.bubbleTimer = 0;
+    }
+  }
+
   showWaitingBubble(id: number, awaitingInput = false): void {
     const ch = this.characters.get(id);
-    if (ch && !this.isLeaving(id)) {
+    // A question still open outlives a turn-end signal: it is cleared by its
+    // own tool finishing or the tools clearing.
+    if (ch && !this.isLeaving(id) && ch.bubbleType !== 'question') {
       ch.bubbleType = 'waiting';
       ch.waitingAwaitingInput = awaitingInput;
       ch.bubbleTimer = WAITING_BUBBLE_DURATION_SEC;
@@ -1211,7 +1231,7 @@ export class OfficeState implements SceneHost {
   dismissBubble(id: number): void {
     const ch = this.characters.get(id);
     if (!ch || !ch.bubbleType) return;
-    if (ch.bubbleType === 'permission') {
+    if (ch.bubbleType === 'permission' || ch.bubbleType === 'question') {
       ch.bubbleType = null;
       ch.bubbleTimer = 0;
     } else if (ch.bubbleType === 'waiting') {

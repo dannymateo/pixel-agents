@@ -14,7 +14,7 @@ import {
 } from '../console/takeoverState.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { AttentionEntry } from '../office/attention.js';
-import { AttentionTracker } from '../office/attention.js';
+import { AttentionTracker, isQuestionToolStart } from '../office/attention.js';
 import type { ConversationDirector } from '../office/engine/conversationScene.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { flushPendingAgents, reconcileExistingAgents } from '../office/engine/existingAgents.js';
@@ -31,6 +31,7 @@ import {
   parseLivingOfficeTimings,
   parsePresence,
 } from '../office/living/livingOfficeController.js';
+import { QuestionBubbles } from '../office/questionBubbles.js';
 import { treeDisplayName } from '../office/scope/treeDisplay.js';
 import { setCarpetSprites } from '../office/sprites/carpetTiles.js';
 import { setPetTemplates } from '../office/sprites/petSpriteData.js';
@@ -267,6 +268,10 @@ export function useExtensionMessages(
   const attentionTrackerRef = useRef<AttentionTracker | null>(null);
   if (!attentionTrackerRef.current) attentionTrackerRef.current = new AttentionTracker();
   const [attention, setAttention] = useState<AttentionEntry[]>([]);
+  // Open questions per character, behind each "?" bubble (spec §3 "Personaje").
+  // Not gated on privilege: bubbles are part of the scene every viewer sees.
+  const questionBubblesRef = useRef<QuestionBubbles | null>(null);
+  if (!questionBubblesRef.current) questionBubblesRef.current = new QuestionBubbles();
   const [takeovers, setTakeovers] = useState<Map<number, TakeoverView>>(new Map());
   // Ids THIS tab/connection has asked to take over (spec §1, fix round 1 #3):
   // several operator tabs can watch the same office, so this is bookkeeping
@@ -311,6 +316,24 @@ export function useExtensionMessages(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler = (msg: any) => {
       const os = getOfficeState();
+      // "?" bubbles (spec §3 "Personaje"): cleared with the same signals as
+      // the "Te esperan" question entry — its tool done, the tools clearing,
+      // the sub-agent being cleared.
+      const questions = questionBubblesRef.current!;
+      const clearQuestions = (charId: number) => {
+        if (questions.clear(charId)) os.clearQuestionBubble(charId);
+      };
+      const clearSubQuestions = (parentId: number) => {
+        for (const [subId, meta] of os.subagentMeta) {
+          if (meta.parentAgentId === parentId) clearQuestions(subId);
+        }
+      };
+      const raiseQuestion = (charId: number, toolId: string) => {
+        if (!questions.start(charId, toolId)) return;
+        os.showQuestionBubble(charId);
+        // Same chime as a permission; playPermissionSound honours the setting.
+        playPermissionSound();
+      };
       // CI / e2e diagnostic: record every received transport message on the
       // window-side log. The fixture reads window.__pixelAgentsTestHooks.
       // messageLog and attaches as JSON so CI failures can see the exact
@@ -529,6 +552,8 @@ export function useExtensionMessages(
           delete next[id];
           return next;
         });
+        clearSubQuestions(id);
+        clearQuestions(id);
         // Remove all sub-agent characters belonging to this agent
         delete backgroundParentToolIdsRef.current[id];
         os.removeAllSubagents(id);
@@ -547,6 +572,9 @@ export function useExtensionMessages(
       } else if (msg.type === 'existingAgents') {
         // A (re)connect snapshot: scenes in flight belong to the old view.
         conversations?.clear();
+        // Open questions too: the server replays the live ones (their tool
+        // starts) right after, which raises their bubbles again.
+        for (const charId of questions.reset()) os.clearQuestionBubble(charId);
         const incoming = (Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []).filter(
           isWireAgentId,
         );
@@ -692,9 +720,11 @@ export function useExtensionMessages(
             return [...prev, { id: subId, parentAgentId: id, parentToolId: toolId, label }];
           });
         }
+        if (isQuestionToolStart(msg)) raiseQuestion(id, toolId);
       } else if (msg.type === 'agentToolDone') {
         const id = msg.id as number;
         const toolId = msg.toolId as string;
+        if (questions.done(id, toolId)) os.clearQuestionBubble(id);
         setAgentTools((prev) => {
           const list = prev[id];
           if (!list) return prev;
@@ -706,6 +736,10 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentToolsClear') {
         const id = msg.id as number;
         const bgSet = backgroundParentToolIdsRef.current[id];
+        // Before any sub-character is removed below (the tracker drops the
+        // sub-agents' questions of this agent on the same message).
+        clearSubQuestions(id);
+        clearQuestions(id);
         setAgentTools((prev) => {
           if (!(id in prev)) return prev;
           const next = { ...prev };
@@ -806,10 +840,13 @@ export function useExtensionMessages(
           };
         });
         os.clearPermissionBubble(id);
+        // A question still open underneath shows again once the permission goes.
+        if (questions.has(id)) os.showQuestionBubble(id);
         // Also clear permission bubbles on all sub-agent characters of this parent
         for (const [subId, meta] of os.subagentMeta) {
           if (meta.parentAgentId === id) {
             os.clearPermissionBubble(subId);
+            if (questions.has(subId)) os.showQuestionBubble(subId);
           }
         }
       } else if (msg.type === 'subagentToolStart') {
@@ -847,10 +884,15 @@ export function useExtensionMessages(
         const subToolName = extractToolName(status);
         os.setAgentTool(subId, subToolName);
         os.setAgentActive(subId, true);
+        if (isQuestionToolStart(msg)) raiseQuestion(subId, toolId);
       } else if (msg.type === 'subagentToolDone') {
         const id = msg.id as number;
         const parentToolId = msg.parentToolId as string;
         const toolId = msg.toolId as string;
+        const doneSubId = os.getSubagentId(id, parentToolId);
+        if (doneSubId !== null && questions.done(doneSubId, toolId)) {
+          os.clearQuestionBubble(doneSubId);
+        }
         setSubagentTools((prev) => {
           const agentSubs = prev[id];
           if (!agentSubs) return prev;
@@ -880,6 +922,8 @@ export function useExtensionMessages(
           }
           return { ...prev, [id]: next };
         });
+        const clearedSubId = os.getSubagentId(id, parentToolId);
+        if (clearedSubId !== null) clearQuestions(clearedSubId);
         // Remove sub-agent character
         os.removeSubagent(id, parentToolId);
         setSubagentCharacters((prev) =>

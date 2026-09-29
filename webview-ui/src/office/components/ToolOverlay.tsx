@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/Button.js';
 import { closeClickStep } from '../../console/closeConfirm.js';
 import type { TakeoverView } from '../../console/takeoverState.js';
 import {
+  ASK_USER_QUESTION_STATUS,
   CHARACTER_SITTING_OFFSET_PX,
   CONTEXT_CRITICAL_THRESHOLD,
   CONTEXT_DANGER_THRESHOLD,
@@ -66,7 +67,7 @@ function getActivityText(
   agentId: number,
   agentTools: Record<number, ToolActivity[]>,
   isActive: boolean,
-  bubbleType: 'permission' | 'waiting' | 'goodbye' | null,
+  bubbleType: 'permission' | 'question' | 'waiting' | 'goodbye' | null,
   waitingAwaitingInput: boolean,
 ): string {
   if (bubbleType === 'permission') return 'Needs approval';
@@ -201,6 +202,8 @@ export function ToolOverlay({
         } else if (isSub) {
           if (subHasPermission) {
             activityText = 'Needs approval';
+          } else if (ch.bubbleType === 'question') {
+            activityText = ASK_USER_QUESTION_STATUS;
           } else {
             // Hover shows the subtask title; SELECTING the sub reveals its live
             // tool activity (watched sub-agents stream it via subagentToolStart).
@@ -225,7 +228,7 @@ export function ToolOverlay({
         const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done);
         const hasActiveTools = tools?.some((t) => !t.done);
         const isActive = ch.isActive;
-        const hasWaiting = ch.bubbleType === 'waiting';
+        const hasWaiting = ch.bubbleType === 'waiting' || ch.bubbleType === 'question';
 
         let dotColor: string | null = null;
         if (hasPermission || hasWaiting) {

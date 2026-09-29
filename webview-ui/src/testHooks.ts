@@ -12,7 +12,7 @@ declare global {
         id: number;
         matrixEffect: 'spawn' | 'despawn' | null;
         agentName?: string;
-        bubbleType: 'permission' | 'waiting' | 'goodbye' | null;
+        bubbleType: 'permission' | 'question' | 'waiting' | 'goodbye' | null;
         waitingAwaitingInput?: boolean;
         isHeadless?: boolean;
         isGreeter?: boolean;

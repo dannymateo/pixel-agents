@@ -203,8 +203,9 @@ export interface Character {
   /** Assigned seat uid, or null if no seat */
   seatId: string | null;
   /** Active speech bubble type, or null if none showing. 'goodbye' is the
-   *  wave a derived agent gives at the door on its way out of the office. */
-  bubbleType: 'permission' | 'waiting' | 'goodbye' | null;
+   *  wave a derived agent gives at the door on its way out of the office.
+   *  'question' is the permission-style "?" of an open AskUserQuestion. */
+  bubbleType: 'permission' | 'question' | 'waiting' | 'goodbye' | null;
   /** Only meaningful while bubbleType === 'waiting': true when the agent went
    *  idle waiting on the user (surfaces the "Waiting for input" label);
    *  false/undefined when the agent simply finished its turn (checkmark only,

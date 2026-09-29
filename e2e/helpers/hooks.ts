@@ -204,6 +204,18 @@ export function preToolUseAgentSpawn(
   };
 }
 
+/** PreToolUse for AskUserQuestion: the agent asks the user a question. */
+export function preToolUseAskUserQuestion(sessionId: string, question: string): HookEventPayload {
+  return {
+    session_id: sessionId,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'AskUserQuestion',
+    tool_input: {
+      questions: [{ question, options: [{ label: 'Sí' }, { label: 'No' }] }],
+    },
+  };
+}
+
 export function subagentStart(sessionId: string, agentType: string): HookEventPayload {
   return {
     session_id: sessionId,

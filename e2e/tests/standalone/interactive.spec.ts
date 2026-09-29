@@ -9,6 +9,7 @@ import { expect, test } from '@playwright/test';
 
 import {
   permissionRequest,
+  preToolUseAskUserQuestion,
   preToolUseBash,
   sendHookEvent,
   sessionEndExit,
@@ -47,9 +48,24 @@ function invocationLogPath(tmpHome: string): string {
  *  controls deterministically. */
 interface InteractiveTestWindow {
   __pixelAgentsTestHooks?: {
-    getCharacters?: () => Array<{ id: number }>;
+    getCharacters?: () => Array<{ id: number; bubbleType: string | null }>;
     selectAgent?: (id: number) => void;
+    playedSounds?: Array<{ kind: string }>;
   };
+}
+
+async function getBubbleTypes(page: Page): Promise<Array<string | null>> {
+  return page.evaluate(() => {
+    const hooks = (window as unknown as InteractiveTestWindow).__pixelAgentsTestHooks;
+    return (hooks?.getCharacters?.() ?? []).map((c) => c.bubbleType);
+  });
+}
+
+async function getPlayedSounds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const hooks = (window as unknown as InteractiveTestWindow).__pixelAgentsTestHooks;
+    return (hooks?.playedSounds ?? []).map((s) => s.kind);
+  });
 }
 
 async function getCharacterIds(page: Page): Promise<number[]> {
@@ -155,6 +171,45 @@ test.describe('Standalone / interactive agents', () => {
       // `waiting` reason Stop left behind.
       await expect(attentionBar).toHaveCount(0, { timeout: 20_000 });
       await expect.poll(() => page.title(), { timeout: 5_000 }).toBe('Pixel Agents');
+    } finally {
+      if (external) await stopExternalProcess(external.process);
+      await session.cleanup();
+    }
+  });
+
+  test('a question marks its character with the "?" bubble and the permission chime @area:standalone', async ({
+    page,
+  }) => {
+    const session = await launchStandalone(page, { mockClaudeConsoles: true });
+    let external: ExternalClaudeSpawn | undefined;
+    try {
+      const sessionId = 'question-bubble-session';
+      external = await spawnExternalClaudeScenario({
+        tmpHome: session.tmpHome,
+        workspaceDir: session.workspaceDir,
+        mockLogFile: invocationLogPath(session.tmpHome),
+        sessionId,
+        scenario: claudeScenario('question bubble — ask, then the turn ends')
+          .at(200)
+          .emitHook(
+            sessionStartStartup(sessionId, '{{cwd}}', '{{transcriptPath}}') as Record<
+              string,
+              unknown
+            >,
+          )
+          .at(1_500)
+          .emitHook(preToolUseAskUserQuestion(sessionId, '¿Despliego?') as Record<string, unknown>)
+          // Stop clears the turn's tools: the question is over.
+          .at(8_000)
+          .emitHook(stop(sessionId) as Record<string, unknown>)
+          .holdOpenFor(5_000)
+          .build(),
+      });
+
+      await expect.poll(() => getBubbleTypes(page), { timeout: 15_000 }).toContain('question');
+      expect(await getPlayedSounds(page)).toContain('permission');
+
+      await expect.poll(() => getBubbleTypes(page), { timeout: 15_000 }).not.toContain('question');
     } finally {
       if (external) await stopExternalProcess(external.process);
       await session.cleanup();

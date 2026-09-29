@@ -16,7 +16,6 @@ import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
 import { ZoomControls } from './components/ZoomControls.js';
-import { canOfferTakeover } from './console/takeoverState.js';
 import {
   CHARACTER_HIT_HEIGHT,
   CHARACTER_SITTING_OFFSET_PX,
@@ -203,6 +202,8 @@ function App() {
     launchOutcome,
     attention,
     takeovers,
+    takeOverAgent,
+    cancelTakeover,
     dismissTakeover,
   } = useExtensionMessages(
     getOfficeState,
@@ -441,16 +442,15 @@ function App() {
     transport.send({ type: 'closeAgent', id });
   }, []);
 
-  // "Traer a la oficina" (spec §1).
-  const handleTakeOver = useCallback((id: number) => {
-    transport.send({ type: 'takeOverAgent', id });
-  }, []);
-  const handleConfirmTakeoverClosed = useCallback((id: number) => {
-    transport.send({ type: 'takeOverAgent', id, confirmClosed: true });
-  }, []);
-  const handleCancelTakeover = useCallback((id: number) => {
-    transport.send({ type: 'cancelTakeover', id });
-  }, []);
+  // "Traer a la oficina" (spec §1). `takeOverAgent`/`cancelTakeover` come from
+  // the hook so it can track which ids THIS tab asked for (fix round 1, #3:
+  // only the requesting tab pops the console open on `done`).
+  const handleTakeOver = useCallback((id: number) => takeOverAgent(id), [takeOverAgent]);
+  const handleConfirmTakeoverClosed = useCallback(
+    (id: number) => takeOverAgent(id, true),
+    [takeOverAgent],
+  );
+  const handleCancelTakeover = useCallback((id: number) => cancelTakeover(id), [cancelTakeover]);
 
   const handleClick = useCallback((agentId: number) => {
     // If clicked agent is a sub-agent, focus the parent's terminal instead
@@ -880,10 +880,17 @@ function App() {
           transport={transport}
           onClose={handleCloseScreen}
           context={screenContext(screenAgentId)}
-          canTakeOver={(() => {
+          agent={(() => {
             const ch = officeState.characters.get(screenAgentId);
-            return !!ch && !ch.isSubagent && canOfferTakeover(ch, consoleCapable);
+            return ch && !ch.isSubagent
+              ? {
+                  parentAgentId: ch.parentAgentId,
+                  leadAgentId: ch.leadAgentId,
+                  terminalId: ch.terminalId,
+                }
+              : undefined;
           })()}
+          consoleCapable={consoleCapable}
           takeoverView={takeovers.get(screenAgentId)}
           onTakeOver={handleTakeOver}
           onConfirmTakeoverClosed={handleConfirmTakeoverClosed}

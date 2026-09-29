@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 
+import { TakeoverControls } from '../../components/TakeoverControls.js';
 import { Button } from '../../components/ui/Button.js';
 import { closeClickStep } from '../../console/closeConfirm.js';
-import { canOfferTakeover, type TakeoverView } from '../../console/takeoverState.js';
+import type { TakeoverView } from '../../console/takeoverState.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
   CONTEXT_CRITICAL_THRESHOLD,
@@ -123,9 +124,6 @@ export function ToolOverlay({
   // The agent whose × asked "close?" (office consoles only). Only meaningful
   // while that agent stays selected: deselecting drops the question.
   const [confirmCloseId, setConfirmCloseId] = useState<number | null>(null);
-  // The agent whose "Ya la cerré" asked to confirm (same two-step pattern as
-  // the × above). Only meaningful while its takeover is still `waitingExit`.
-  const [confirmTakeoverId, setConfirmTakeoverId] = useState<number | null>(null);
   useEffect(() => {
     let rafId = 0;
     const tick = () => {
@@ -150,15 +148,6 @@ export function ToolOverlay({
   // Deselecting (or selecting someone else) drops a pending "close?" question,
   // so re-selecting the agent later starts from the plain × again.
   if (confirmCloseId !== null && selectedId !== confirmCloseId) setConfirmCloseId(null);
-  // Same drop-on-deselect rule, plus: the confirmation only makes sense while
-  // the takeover is still waiting on the exit (done/cancelled/failed already
-  // replaced or cleared the panel it lived in).
-  if (
-    confirmTakeoverId !== null &&
-    (selectedId !== confirmTakeoverId || takeovers.get(confirmTakeoverId)?.state !== 'waitingExit')
-  ) {
-    setConfirmTakeoverId(null);
-  }
   const hoveredId = officeState.hoveredAgentId;
 
   // All character IDs
@@ -254,11 +243,6 @@ export function ToolOverlay({
         // have no session of their own, so contextTokens stays 0.
         const contextRatio = ch.contextTokens / ch.maxContextTokens;
         const showContextGauge = !isSub && ch.contextTokens > 0;
-
-        // "Traer a la oficina" (spec §1): a root without a console yet, only
-        // when this connection can open one.
-        const canTakeOver = !isSub && canOfferTakeover(ch, consoleCapable);
-        const takeoverView = takeovers.get(id);
 
         return (
           <div
@@ -386,91 +370,18 @@ export function ToolOverlay({
                 />
               </div>
             )}
-            {isSelected && canTakeOver && !takeoverView && (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onTakeOver(id);
-                }}
-                className="mt-2 shrink-0 leading-none"
-                data-testid="takeover"
-              >
-                Traer a la oficina
-              </Button>
+            {isSelected && !isSub && (
+              <TakeoverControls
+                agent={ch}
+                consoleCapable={consoleCapable}
+                takeoverView={takeovers.get(id)}
+                onTakeOver={() => onTakeOver(id)}
+                onConfirmTakeoverClosed={() => onConfirmTakeoverClosed(id)}
+                onCancelTakeover={() => onCancelTakeover(id)}
+                onDismissTakeover={() => onDismissTakeover(id)}
+                variant="overlay"
+              />
             )}
-            {isSelected && takeoverView?.state === 'waitingExit' && (
-              <div
-                className="mt-2 flex flex-col items-center gap-2 border-border px-8 py-4 pixel-panel max-w-2xs"
-                data-testid="takeover-waiting"
-              >
-                <span className="text-sm leading-none text-center">Esperando que la cierres…</span>
-                <span className="text-2xs text-text-muted leading-none text-center">
-                  Escribe /exit en su terminal; la retomo aquí.
-                </span>
-                {confirmTakeoverId === id && (
-                  <span className="text-2xs text-danger leading-none text-center">
-                    Si sigue abierta en su terminal, las dos se pisarán.
-                  </span>
-                )}
-                <div className="flex gap-4">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirmTakeoverId === id) {
-                        setConfirmTakeoverId(null);
-                        onConfirmTakeoverClosed(id);
-                      } else {
-                        setConfirmTakeoverId(id);
-                      }
-                    }}
-                    className={`leading-none ${confirmTakeoverId === id ? 'text-danger' : ''}`}
-                    data-testid="takeover-confirm-closed"
-                  >
-                    Ya la cerré
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmTakeoverId(null);
-                      onCancelTakeover(id);
-                    }}
-                    className="leading-none"
-                    data-testid="takeover-cancel"
-                  >
-                    Cancelar
-                  </Button>
-                </div>
-              </div>
-            )}
-            {isSelected &&
-              (takeoverView?.state === 'failed' || takeoverView?.state === 'refused') && (
-                <div
-                  className="mt-2 flex flex-col items-center gap-2 border-border px-8 py-4 pixel-panel max-w-2xs"
-                  data-testid="takeover-failed"
-                >
-                  <span className="text-sm text-danger leading-none text-center">
-                    {takeoverView.reason ?? 'No se pudo traer el agente.'}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDismissTakeover(id);
-                    }}
-                    className="leading-none"
-                    data-testid="takeover-dismiss"
-                  >
-                    Descartar
-                  </Button>
-                </div>
-              )}
           </div>
         );
       })}

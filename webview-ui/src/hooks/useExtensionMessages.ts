@@ -6,7 +6,12 @@ import type {
   RecentSession as LaunchOptionsSession,
 } from '../../../core/src/messages.js';
 import type { LaunchOutcome } from '../console/launchOutcome.js';
-import { applyTakeover, type TakeoverView } from '../console/takeoverState.js';
+import {
+  applyTakeover,
+  shouldOpenConsoleOnDone,
+  takeoverRequestSettledId,
+  type TakeoverView,
+} from '../console/takeoverState.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { AttentionEntry } from '../office/attention.js';
 import { AttentionTracker } from '../office/attention.js';
@@ -157,6 +162,12 @@ interface ExtensionMessageState {
    *  `refused` until dismissed. `done`/`cancelled` clear the entry (`done`
    *  is handled by `onAgentTakenOver` instead of surfacing here). */
   takeovers: Map<number, TakeoverView>;
+  /** Sends `takeOverAgent { id, confirmClosed }` and marks `id` as requested
+   *  by this tab (see `shouldOpenConsoleOnDone`). `confirmClosed` is the "Ya
+   *  la cerré" path. */
+  takeOverAgent: (id: number, confirmClosed?: boolean) => void;
+  /** Sends `cancelTakeover { id }`. */
+  cancelTakeover: (id: number) => void;
   /** Discards a `failed`/`refused` takeover notice without asking the server. */
   dismissTakeover: (id: number) => void;
 }
@@ -257,6 +268,11 @@ export function useExtensionMessages(
   if (!attentionTrackerRef.current) attentionTrackerRef.current = new AttentionTracker();
   const [attention, setAttention] = useState<AttentionEntry[]>([]);
   const [takeovers, setTakeovers] = useState<Map<number, TakeoverView>>(new Map());
+  // Ids THIS tab/connection has asked to take over (spec §1, fix round 1 #3):
+  // several operator tabs can watch the same office, so this is bookkeeping
+  // for "did *I* ask", not shared state — added on send, removed once the
+  // request settles (see `takeoverRequestSettledId`) or on a full resync.
+  const requestedTakeoverIdsRef = useRef<Set<number>>(new Set());
   const applyLivingOfficeTimings = useCallback((msg: Record<string, unknown>) => {
     const t = parseLivingOfficeTimings(msg);
     if (t.idleToLoungeMinutes !== undefined) setIdleToLoungeMinutes(t.idleToLoungeMinutes);
@@ -332,17 +348,29 @@ export function useExtensionMessages(
       // "Traer a la oficina" (spec §1). `done` hands the agent its console
       // straight away (setTerminalId + the caller's onAgentTakenOver) rather
       // than surfacing through `takeovers` — there is nothing left to show.
-      // The reducer is pure and returns the same Map when nothing changes, so
-      // this never causes an extra render for unrelated messages.
+      // Multi-tab ruling (fix round 1, #3): several operator tabs can watch
+      // the same office and all receive this broadcast, but only the ONE that
+      // actually sent `takeOverAgent` for this id should pop its console open
+      // — every other tab still gets `os.setTerminalId` (so its character
+      // reflects the console immediately), it just doesn't steal focus by
+      // opening a modal nobody there asked for.
       if (
         msg.type === 'takeoverStatus' &&
         msg.state === 'done' &&
         isWireAgentId(msg.id) &&
         typeof msg.terminalId === 'string'
       ) {
+        const shouldOpen = shouldOpenConsoleOnDone(requestedTakeoverIdsRef.current, msg);
         os.setTerminalId(msg.id, msg.terminalId);
-        onAgentTakenOver?.(msg.id, msg.terminalId);
+        if (shouldOpen) onAgentTakenOver?.(msg.id, msg.terminalId);
       }
+      const settledId = takeoverRequestSettledId(msg);
+      if (settledId !== null) requestedTakeoverIdsRef.current.delete(settledId);
+      // Full resync (fix round 1, #4): the server-side pending marks this ref
+      // tracks don't survive a restart either — a stale local "I asked for
+      // this" would silently swallow the console-open for a BRAND NEW
+      // takeover request that happens to land on the same agent id.
+      if (msg.type === 'existingAgents') requestedTakeoverIdsRef.current.clear();
       setTakeovers((prev) => applyTakeover(prev, msg));
 
       if (msg.type === 'providerCapabilities') {
@@ -1068,6 +1096,20 @@ export function useExtensionMessages(
     launchOutcome,
     attention,
     takeovers,
+    // Marks `id` as requested by THIS tab before sending, so the `done` that
+    // comes back knows whether to pop the console open here (see the handler
+    // above and `shouldOpenConsoleOnDone`).
+    takeOverAgent: useCallback((id: number, confirmClosed?: boolean) => {
+      requestedTakeoverIdsRef.current.add(id);
+      transport.send(
+        confirmClosed
+          ? { type: 'takeOverAgent', id, confirmClosed: true }
+          : { type: 'takeOverAgent', id },
+      );
+    }, []),
+    cancelTakeover: useCallback((id: number) => {
+      transport.send({ type: 'cancelTakeover', id });
+    }, []),
     dismissTakeover: useCallback((id: number) => {
       setTakeovers((prev) => {
         if (!prev.has(id)) return prev;

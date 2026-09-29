@@ -49,6 +49,8 @@ import {
   statusLabel,
   type ToolRowState,
 } from './feedFormat.js';
+import type { TakeoverAgentLike } from './TakeoverControls.js';
+import { TakeoverControls } from './TakeoverControls.js';
 import { Button } from './ui/Button.js';
 
 const STATE_ICON: Record<ToolRowState, string> = { running: '⟳', done: '✓', error: '✗' };
@@ -64,6 +66,11 @@ const STATE_TITLE: Record<ToolRowState, string> = {
 };
 
 const NO_LINES: FeedDiffLine[] = [];
+/** Fallback for the takeover callbacks when the caller omits them (they're
+ *  optional on `AgentScreenViewProps`); `TakeoverControls` itself never
+ *  renders anything actionable without `agent`/`consoleCapable` supplied
+ *  alongside, so these are never actually invoked in practice. */
+const NOOP = () => {};
 
 const MONO = 'font-mono text-2xs whitespace-pre-wrap break-all m-0';
 
@@ -280,9 +287,12 @@ export interface AgentScreenViewProps {
   contextPct: number | null;
   feed: AgentFeedState;
   onClose: () => void;
-  /** "Traer a la oficina" (spec §1): whether this root, console-less agent can
-   *  be offered one right now (the connection can open a console). */
-  canTakeOver?: boolean;
+  /** "Traer a la oficina" (spec §1). `agent` carries the fields
+   *  `TakeoverControls` needs to gate itself (root check, `terminalId`); the
+   *  directory alone doesn't carry those. Absent `agent`/`consoleCapable`
+   *  renders nothing, same as an ungated viewer connection. */
+  agent?: TakeoverAgentLike;
+  consoleCapable?: boolean;
   /** In-flight takeover state for this agent, if any. */
   takeoverView?: TakeoverView;
   onTakeOver?: () => void;
@@ -297,7 +307,8 @@ export function AgentScreenView({
   contextPct,
   feed,
   onClose,
-  canTakeOver,
+  agent,
+  consoleCapable,
   takeoverView,
   onTakeOver,
   onConfirmTakeoverClosed,
@@ -308,10 +319,6 @@ export function AgentScreenView({
   const dialogRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [following, setFollowing] = useState(true);
-  // Two-step confirm for "Ya la cerré" (same pattern as the overlay's ×): a
-  // fresh AgentScreenView mounts per agent (keyed by agentId in the container),
-  // so this naturally resets when switching agents.
-  const [confirmingTakeoverClosed, setConfirmingTakeoverClosed] = useState(false);
   const rows = useMemo(() => buildFeedRows(feed.entries), [feed.entries]);
 
   const onScroll = useCallback(() => {
@@ -423,87 +430,21 @@ export function AgentScreenView({
               <span>Estado: {statusLabel(header)}</span>
             </div>
           </div>
-          {canTakeOver && !takeoverView && (
-            <Button
-              variant="default"
-              size="sm"
-              onClick={onTakeOver}
-              className="shrink-0 leading-none"
-              data-testid="takeover"
-            >
-              Traer a la oficina
-            </Button>
-          )}
           <Button variant="ghost" size="icon" onClick={onClose} aria-label="Cerrar">
             x
           </Button>
         </div>
-        {takeoverView?.state === 'waitingExit' && (
-          <div
-            className="px-10 py-4 border-b border-border flex flex-wrap items-center justify-between gap-8"
-            data-testid="takeover-waiting"
-          >
-            <div className="min-w-0">
-              <div className="text-sm leading-none">Esperando que la cierres…</div>
-              <div className="text-2xs text-text-muted leading-none mt-2">
-                Escribe /exit en su terminal; la retomo aquí.
-              </div>
-              {confirmingTakeoverClosed && (
-                <div className="text-2xs text-danger leading-none mt-2">
-                  Si sigue abierta en su terminal, las dos se pisarán.
-                </div>
-              )}
-            </div>
-            <div className="flex gap-4 shrink-0">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  if (confirmingTakeoverClosed) {
-                    setConfirmingTakeoverClosed(false);
-                    onConfirmTakeoverClosed?.();
-                  } else {
-                    setConfirmingTakeoverClosed(true);
-                  }
-                }}
-                className={`leading-none ${confirmingTakeoverClosed ? 'text-danger' : ''}`}
-                data-testid="takeover-confirm-closed"
-              >
-                Ya la cerré
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setConfirmingTakeoverClosed(false);
-                  onCancelTakeover?.();
-                }}
-                className="leading-none"
-                data-testid="takeover-cancel"
-              >
-                Cancelar
-              </Button>
-            </div>
-          </div>
-        )}
-        {(takeoverView?.state === 'failed' || takeoverView?.state === 'refused') && (
-          <div
-            className="px-10 py-4 border-b border-border flex flex-wrap items-center justify-between gap-8"
-            data-testid="takeover-failed"
-          >
-            <span className="text-xs text-danger">
-              {takeoverView.reason ?? 'No se pudo traer el agente.'}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onDismissTakeover}
-              className="leading-none shrink-0"
-              data-testid="takeover-dismiss"
-            >
-              Descartar
-            </Button>
-          </div>
+        {agent && consoleCapable !== undefined && (
+          <TakeoverControls
+            agent={agent}
+            consoleCapable={consoleCapable}
+            takeoverView={takeoverView}
+            onTakeOver={onTakeOver ?? NOOP}
+            onConfirmTakeoverClosed={onConfirmTakeoverClosed ?? NOOP}
+            onCancelTakeover={onCancelTakeover ?? NOOP}
+            onDismissTakeover={onDismissTakeover ?? NOOP}
+            variant="header"
+          />
         )}
         {gone && (
           <div
@@ -636,10 +577,11 @@ export interface AgentScreenModalProps {
   /** Last known context usage of the agent (the character's contextTokens /
    *  maxContextTokens); live updates arrive over the transport afterwards. */
   context?: { tokens: number; max: number };
-  /** "Traer a la oficina" (spec §1) — same gate and state as the overlay's,
-   *  computed by the caller (it has the character; the directory alone
-   *  doesn't carry terminalId/leadAgentId). */
-  canTakeOver?: boolean;
+  /** "Traer a la oficina" (spec §1) — same gate and state as the overlay's;
+   *  `agent` is computed by the caller (it has the character; the directory
+   *  alone doesn't carry terminalId/leadAgentId). */
+  agent?: TakeoverAgentLike;
+  consoleCapable?: boolean;
   takeoverView?: TakeoverView;
   onTakeOver?: (id: number) => void;
   onConfirmTakeoverClosed?: (id: number) => void;
@@ -653,7 +595,8 @@ export function AgentScreenModal({
   transport,
   onClose,
   context,
-  canTakeOver,
+  agent,
+  consoleCapable,
   takeoverView,
   onTakeOver,
   onConfirmTakeoverClosed,
@@ -695,7 +638,8 @@ export function AgentScreenModal({
       contextPct={contextPct}
       feed={feed}
       onClose={onClose}
-      canTakeOver={canTakeOver}
+      agent={agent}
+      consoleCapable={consoleCapable}
       takeoverView={takeoverView}
       onTakeOver={onTakeOver ? () => onTakeOver(agentId) : undefined}
       onConfirmTakeoverClosed={

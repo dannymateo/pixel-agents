@@ -6,6 +6,7 @@ import type {
   RecentSession as LaunchOptionsSession,
 } from '../../../core/src/messages.js';
 import type { LaunchOutcome } from '../console/launchOutcome.js';
+import { applyTakeover, type TakeoverView } from '../console/takeoverState.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { AttentionEntry } from '../office/attention.js';
 import { AttentionTracker } from '../office/attention.js';
@@ -151,6 +152,13 @@ interface ExtensionMessageState {
   launchOutcome: LaunchOutcome | null;
   /** Who is waiting on the user right now, and why (spec §3 "Te esperan"). */
   attention: AttentionEntry[];
+  /** In-flight "Traer a la oficina" state per agent (spec §1); `waitingExit`
+   *  while the server waits for the external session to close, `failed`/
+   *  `refused` until dismissed. `done`/`cancelled` clear the entry (`done`
+   *  is handled by `onAgentTakenOver` instead of surfacing here). */
+  takeovers: Map<number, TakeoverView>;
+  /** Discards a `failed`/`refused` takeover notice without asking the server. */
+  dismissTakeover: (id: number) => void;
 }
 
 /** A string off the wire, or undefined. */
@@ -189,6 +197,10 @@ export function useExtensionMessages(
    *  rather than in LaunchDialog so a launch started before the dialog is
    *  cancelled still opens its console when the result arrives. */
   onAgentLaunched?: (agentId: number, terminalId: string) => void,
+  /** Called on `takeoverStatus { state: 'done' }` (spec §1): the agent's console
+   *  is ready. Fires after `os.setTerminalId` already ran, so the character's
+   *  own state already reflects it. */
+  onAgentTakenOver?: (agentId: number, terminalId: string) => void,
 ): ExtensionMessageState {
   // The living office (docs/adr/0003): tree, composition and derived agents'
   // lives. App shares its instance with the editor; standalone use gets its own.
@@ -244,6 +256,7 @@ export function useExtensionMessages(
   const attentionTrackerRef = useRef<AttentionTracker | null>(null);
   if (!attentionTrackerRef.current) attentionTrackerRef.current = new AttentionTracker();
   const [attention, setAttention] = useState<AttentionEntry[]>([]);
+  const [takeovers, setTakeovers] = useState<Map<number, TakeoverView>>(new Map());
   const applyLivingOfficeTimings = useCallback((msg: Record<string, unknown>) => {
     const t = parseLivingOfficeTimings(msg);
     if (t.idleToLoungeMinutes !== undefined) setIdleToLoungeMinutes(t.idleToLoungeMinutes);
@@ -315,6 +328,22 @@ export function useExtensionMessages(
       if (attentionTrackerRef.current!.apply(msg)) {
         setAttention(attentionTrackerRef.current!.list());
       }
+
+      // "Traer a la oficina" (spec §1). `done` hands the agent its console
+      // straight away (setTerminalId + the caller's onAgentTakenOver) rather
+      // than surfacing through `takeovers` — there is nothing left to show.
+      // The reducer is pure and returns the same Map when nothing changes, so
+      // this never causes an extra render for unrelated messages.
+      if (
+        msg.type === 'takeoverStatus' &&
+        msg.state === 'done' &&
+        isWireAgentId(msg.id) &&
+        typeof msg.terminalId === 'string'
+      ) {
+        os.setTerminalId(msg.id, msg.terminalId);
+        onAgentTakenOver?.(msg.id, msg.terminalId);
+      }
+      setTakeovers((prev) => applyTakeover(prev, msg));
 
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({
@@ -1038,5 +1067,14 @@ export function useExtensionMessages(
     launchOptions,
     launchOutcome,
     attention,
+    takeovers,
+    dismissTakeover: useCallback((id: number) => {
+      setTakeovers((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Map(prev);
+        next.delete(id);
+        return next;
+      });
+    }, []),
   };
 }

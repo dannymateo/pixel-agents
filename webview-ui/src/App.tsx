@@ -16,6 +16,7 @@ import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
 import { ZoomControls } from './components/ZoomControls.js';
+import { canOfferTakeover } from './console/takeoverState.js';
 import {
   CHARACTER_HIT_HEIGHT,
   CHARACTER_SITTING_OFFSET_PX,
@@ -128,6 +129,21 @@ function App() {
     [editor.isEditMode, editor.isDirty],
   );
 
+  // The agent screen (spec §4): the agent whose screen is open, if any. Never
+  // open while editing the layout — entering edit mode closes it. Declared
+  // ahead of useExtensionMessages so handleAgentTakenOver (below) can close it
+  // when a takeover hands the same agent a console.
+  const [screenAgentId, setScreenAgentId] = useState<number | null>(null);
+  if (editor.isEditMode && screenAgentId !== null) setScreenAgentId(null);
+  const handleOpenScreen = useCallback(
+    (id: number) => {
+      if (editor.isEditMode || !canOpenAgentScreen(id)) return;
+      setScreenAgentId(id);
+    },
+    [editor.isEditMode],
+  );
+  const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
+
   // The office console (spec §2): a launched-agent's real `claude` terminal,
   // rendered in xterm.js. Only agents with a `terminalId` (standalone browser,
   // launched via the dialog below) ever open one. Declared ahead of
@@ -140,6 +156,13 @@ function App() {
   const [launchOpen, setLaunchOpen] = useState(false);
   const handleAgentLaunched = useCallback((agentId: number, terminalId: string) => {
     setLaunchOpen(false);
+    setConsoleTerminal({ id: terminalId, title: `Agente #${agentId}` });
+  }, []);
+
+  // "Traer a la oficina" done (spec §1): the agent's console is ready. Opens
+  // it straight away, closing the agent's screen first if it was open on it.
+  const handleAgentTakenOver = useCallback((agentId: number, terminalId: string) => {
+    setScreenAgentId((prev) => (prev === agentId ? null : prev));
     setConsoleTerminal({ id: terminalId, title: `Agente #${agentId}` });
   }, []);
 
@@ -179,6 +202,8 @@ function App() {
     launchOptions,
     launchOutcome,
     attention,
+    takeovers,
+    dismissTakeover,
   } = useExtensionMessages(
     getOfficeState,
     editor.setLastSavedLayout,
@@ -186,6 +211,7 @@ function App() {
     livingOffice,
     conversations,
     handleAgentLaunched,
+    handleAgentTakenOver,
   );
 
   // Show migration notice once layout reset is detected
@@ -198,19 +224,6 @@ function App() {
   const [hooksTooltipDismissed, setHooksTooltipDismissed] = useState(false);
   const [isDebugMode, setIsDebugMode] = useState(false);
   const [alwaysShowOverlay, setAlwaysShowOverlay] = useState(false);
-
-  // The agent screen (spec §4): the agent whose screen is open, if any. Never
-  // open while editing the layout — entering edit mode closes it.
-  const [screenAgentId, setScreenAgentId] = useState<number | null>(null);
-  if (editor.isEditMode && screenAgentId !== null) setScreenAgentId(null);
-  const handleOpenScreen = useCallback(
-    (id: number) => {
-      if (editor.isEditMode || !canOpenAgentScreen(id)) return;
-      setScreenAgentId(id);
-    },
-    [editor.isEditMode],
-  );
-  const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
 
   const handleOpenLaunchDialog = useCallback(() => setLaunchOpen(true), []);
   const handleCloseConsole = useCallback(() => setConsoleTerminal(null), []);
@@ -426,6 +439,17 @@ function App() {
 
   const handleCloseAgent = useCallback((id: number) => {
     transport.send({ type: 'closeAgent', id });
+  }, []);
+
+  // "Traer a la oficina" (spec §1).
+  const handleTakeOver = useCallback((id: number) => {
+    transport.send({ type: 'takeOverAgent', id });
+  }, []);
+  const handleConfirmTakeoverClosed = useCallback((id: number) => {
+    transport.send({ type: 'takeOverAgent', id, confirmClosed: true });
+  }, []);
+  const handleCancelTakeover = useCallback((id: number) => {
+    transport.send({ type: 'cancelTakeover', id });
   }, []);
 
   const handleClick = useCallback((agentId: number) => {
@@ -679,6 +703,12 @@ function App() {
             alwaysShowOverlay={alwaysShowOverlay}
             onOpenScreen={editor.isEditMode ? undefined : handleOpenScreen}
             canOpenScreen={canOpenAgentScreen}
+            consoleCapable={consoleCapable}
+            takeovers={takeovers}
+            onTakeOver={handleTakeOver}
+            onConfirmTakeoverClosed={handleConfirmTakeoverClosed}
+            onCancelTakeover={handleCancelTakeover}
+            onDismissTakeover={dismissTakeover}
           />
 
           {!editor.isEditMode && (
@@ -850,6 +880,15 @@ function App() {
           transport={transport}
           onClose={handleCloseScreen}
           context={screenContext(screenAgentId)}
+          canTakeOver={(() => {
+            const ch = officeState.characters.get(screenAgentId);
+            return !!ch && !ch.isSubagent && canOfferTakeover(ch, consoleCapable);
+          })()}
+          takeoverView={takeovers.get(screenAgentId)}
+          onTakeOver={handleTakeOver}
+          onConfirmTakeoverClosed={handleConfirmTakeoverClosed}
+          onCancelTakeover={handleCancelTakeover}
+          onDismissTakeover={dismissTakeover}
         />
       )}
 

@@ -20,6 +20,7 @@ import type {
   FeedEntry,
   ServerMessage,
 } from '../../../core/src/messages.js';
+import type { TakeoverView } from '../console/takeoverState.js';
 import {
   AGENT_SCREEN_HEADER_REFRESH_MS,
   AGENT_SCREEN_Z_INDEX,
@@ -279,14 +280,38 @@ export interface AgentScreenViewProps {
   contextPct: number | null;
   feed: AgentFeedState;
   onClose: () => void;
+  /** "Traer a la oficina" (spec §1): whether this root, console-less agent can
+   *  be offered one right now (the connection can open a console). */
+  canTakeOver?: boolean;
+  /** In-flight takeover state for this agent, if any. */
+  takeoverView?: TakeoverView;
+  onTakeOver?: () => void;
+  onConfirmTakeoverClosed?: () => void;
+  onCancelTakeover?: () => void;
+  onDismissTakeover?: () => void;
 }
 
 /** Presentational half of the screen (no transport, no directory). */
-export function AgentScreenView({ header, contextPct, feed, onClose }: AgentScreenViewProps) {
+export function AgentScreenView({
+  header,
+  contextPct,
+  feed,
+  onClose,
+  canTakeOver,
+  takeoverView,
+  onTakeOver,
+  onConfirmTakeoverClosed,
+  onCancelTakeover,
+  onDismissTakeover,
+}: AgentScreenViewProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const [following, setFollowing] = useState(true);
+  // Two-step confirm for "Ya la cerré" (same pattern as the overlay's ×): a
+  // fresh AgentScreenView mounts per agent (keyed by agentId in the container),
+  // so this naturally resets when switching agents.
+  const [confirmingTakeoverClosed, setConfirmingTakeoverClosed] = useState(false);
   const rows = useMemo(() => buildFeedRows(feed.entries), [feed.entries]);
 
   const onScroll = useCallback(() => {
@@ -398,10 +423,88 @@ export function AgentScreenView({ header, contextPct, feed, onClose }: AgentScre
               <span>Estado: {statusLabel(header)}</span>
             </div>
           </div>
+          {canTakeOver && !takeoverView && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={onTakeOver}
+              className="shrink-0 leading-none"
+              data-testid="takeover"
+            >
+              Traer a la oficina
+            </Button>
+          )}
           <Button variant="ghost" size="icon" onClick={onClose} aria-label="Cerrar">
             x
           </Button>
         </div>
+        {takeoverView?.state === 'waitingExit' && (
+          <div
+            className="px-10 py-4 border-b border-border flex flex-wrap items-center justify-between gap-8"
+            data-testid="takeover-waiting"
+          >
+            <div className="min-w-0">
+              <div className="text-sm leading-none">Esperando que la cierres…</div>
+              <div className="text-2xs text-text-muted leading-none mt-2">
+                Escribe /exit en su terminal; la retomo aquí.
+              </div>
+              {confirmingTakeoverClosed && (
+                <div className="text-2xs text-danger leading-none mt-2">
+                  Si sigue abierta en su terminal, las dos se pisarán.
+                </div>
+              )}
+            </div>
+            <div className="flex gap-4 shrink-0">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (confirmingTakeoverClosed) {
+                    setConfirmingTakeoverClosed(false);
+                    onConfirmTakeoverClosed?.();
+                  } else {
+                    setConfirmingTakeoverClosed(true);
+                  }
+                }}
+                className={`leading-none ${confirmingTakeoverClosed ? 'text-danger' : ''}`}
+                data-testid="takeover-confirm-closed"
+              >
+                Ya la cerré
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setConfirmingTakeoverClosed(false);
+                  onCancelTakeover?.();
+                }}
+                className="leading-none"
+                data-testid="takeover-cancel"
+              >
+                Cancelar
+              </Button>
+            </div>
+          </div>
+        )}
+        {(takeoverView?.state === 'failed' || takeoverView?.state === 'refused') && (
+          <div
+            className="px-10 py-4 border-b border-border flex flex-wrap items-center justify-between gap-8"
+            data-testid="takeover-failed"
+          >
+            <span className="text-xs text-danger">
+              {takeoverView.reason ?? 'No se pudo traer el agente.'}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDismissTakeover}
+              className="leading-none shrink-0"
+              data-testid="takeover-dismiss"
+            >
+              Descartar
+            </Button>
+          </div>
+        )}
         {gone && (
           <div
             className="px-10 py-4 text-xs text-warning border-b border-border"
@@ -533,6 +636,15 @@ export interface AgentScreenModalProps {
   /** Last known context usage of the agent (the character's contextTokens /
    *  maxContextTokens); live updates arrive over the transport afterwards. */
   context?: { tokens: number; max: number };
+  /** "Traer a la oficina" (spec §1) — same gate and state as the overlay's,
+   *  computed by the caller (it has the character; the directory alone
+   *  doesn't carry terminalId/leadAgentId). */
+  canTakeOver?: boolean;
+  takeoverView?: TakeoverView;
+  onTakeOver?: (id: number) => void;
+  onConfirmTakeoverClosed?: (id: number) => void;
+  onCancelTakeover?: (id: number) => void;
+  onDismissTakeover?: (id: number) => void;
 }
 
 export function AgentScreenModal({
@@ -541,6 +653,12 @@ export function AgentScreenModal({
   transport,
   onClose,
   context,
+  canTakeOver,
+  takeoverView,
+  onTakeOver,
+  onConfirmTakeoverClosed,
+  onCancelTakeover,
+  onDismissTakeover,
 }: AgentScreenModalProps) {
   const feed = useAgentFeed(transport, agentId);
   const header = useDirectoryHeader(directory, agentId);
@@ -577,6 +695,14 @@ export function AgentScreenModal({
       contextPct={contextPct}
       feed={feed}
       onClose={onClose}
+      canTakeOver={canTakeOver}
+      takeoverView={takeoverView}
+      onTakeOver={onTakeOver ? () => onTakeOver(agentId) : undefined}
+      onConfirmTakeoverClosed={
+        onConfirmTakeoverClosed ? () => onConfirmTakeoverClosed(agentId) : undefined
+      }
+      onCancelTakeover={onCancelTakeover ? () => onCancelTakeover(agentId) : undefined}
+      onDismissTakeover={onDismissTakeover ? () => onDismissTakeover(agentId) : undefined}
     />
   );
 }

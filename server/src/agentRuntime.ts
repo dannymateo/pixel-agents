@@ -416,15 +416,7 @@ export class AgentRuntime {
           this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
           this.dismissalTracker.dismiss(agent.jsonlFile);
         }
-        // Every agent it spawned leaves with the session, whole subtrees,
-        // leaves first — even when the session agent itself stays (terminal
-        // agents).
-        this.forgetSpawns(agent, agentId);
-        this.leaveSubtree(agentId, false);
-        // Covers real team leads AND leads of background teammates (which
-        // have children but no teamName). No-op when childless.
-        this.removeTeammates(agentId);
-        this.hookEventHandler.clearSpawns(agent.sessionId);
+        this.endSessionTree(agent, agentId);
         if (takingOver) {
           this.resumeAgentInConsole(agentId);
           return;
@@ -612,6 +604,10 @@ export class AgentRuntime {
     }
     this.pendingTakeover.add(id);
     if (opts.confirmClosed === true) {
+      // The operator states the old process is gone, and its in-process
+      // spawns with it: end its tree exactly as a SessionEnd would (tracking
+      // only -- nothing is killed), or its children linger as ghosts.
+      this.endSessionTree(this.store.get(id)!, id);
       this.resumeAgentInConsole(id);
       return;
     }
@@ -620,8 +616,22 @@ export class AgentRuntime {
 
   /** Stop waiting to bring an agent in: it stays external. */
   cancelTakeover(id: number): void {
-    this.pendingTakeover.delete(id);
+    if (!this.pendingTakeover.delete(id)) return;
     this.store.broadcast({ type: 'takeoverStatus', id, state: 'cancelled' });
+  }
+
+  /**
+   * A session ended: every agent it spawned leaves with it, whole subtrees,
+   * leaves first -- even when the session agent itself stays (terminal
+   * agents, or one being brought into the office). Tracking only.
+   */
+  private endSessionTree(agent: AgentState, agentId: number): void {
+    this.forgetSpawns(agent, agentId);
+    this.leaveSubtree(agentId, false);
+    // Covers real team leads AND leads of background teammates (which
+    // have children but no teamName). No-op when childless.
+    this.removeTeammates(agentId);
+    this.hookEventHandler.clearSpawns(agent.sessionId);
   }
 
   /** Why `id` cannot be brought into the office, or undefined when it can. */
@@ -653,6 +663,14 @@ export class AgentRuntime {
       terminalId = this.openAgentConsole(agent.sessionId, sessionFolder(agent.jsonlFile), {
         resume: true,
       });
+      // Bound first: if anything below throws, removeAgent closes this
+      // console instead of orphaning it (same rule as launchOfficeAgent).
+      agent.terminalId = terminalId;
+      this.agentByTerminal.set(terminalId, agentId);
+      agent.isExternal = false;
+      this.knownJsonlFiles.add(agent.jsonlFile);
+      this.registerAgent(agent.sessionId, agentId);
+      this.store.persist();
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.warn(`[Pixel Agents] Could not bring agent ${agentId} into the office: ${reason}`);
@@ -663,12 +681,6 @@ export class AgentRuntime {
       this.removeAgent(agentId);
       return;
     }
-    agent.terminalId = terminalId;
-    agent.isExternal = false;
-    this.agentByTerminal.set(terminalId, agentId);
-    this.knownJsonlFiles.add(agent.jsonlFile);
-    this.registerAgent(agent.sessionId, agentId);
-    this.store.persist();
     this.store.broadcast({ type: 'takeoverStatus', id: agentId, state: 'done', terminalId });
   }
 

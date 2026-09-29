@@ -273,6 +273,95 @@ describe('AgentRuntime: bring an external agent into the office (takeover)', () 
     expect(runtime.ptyHost!.size).toBe(0);
   });
 
+  it('confirmClosed ends the old session tree too: its derived child leaves, the root resumes', () => {
+    const root = addExternalAgent();
+    const CHILD_ID = 8;
+    store.set(CHILD_ID, {
+      ...root,
+      id: CHILD_ID,
+      parentAgentId: AGENT_ID,
+      spawnAgentKey: 'a1b2c3',
+      depth: 1,
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      seenUnknownRecordTypes: new Set(),
+    });
+    runtime.requestTakeover(AGENT_ID, { confirmClosed: true });
+    const child = store.get(CHILD_ID);
+    expect(child === undefined || child.presence === 'leaving').toBe(true);
+    expect(store.get(AGENT_ID)?.terminalId).toBeTruthy();
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('the resumed claude announcing the same session (SessionStart resume) adds no second agent', () => {
+    addExternalAgent();
+    runtime.requestTakeover(AGENT_ID);
+    sessionEnd();
+    const terminalId = store.get(AGENT_ID)!.terminalId;
+    const size = store.size;
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: SID,
+      source: 'resume',
+      transcript_path: store.get(AGENT_ID)!.jsonlFile,
+      cwd: workDir,
+    });
+    expect(store.size).toBe(size);
+    expect(store.get(AGENT_ID)?.terminalId).toBe(terminalId);
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('a /clear in the external terminal keeps the mark: the NEW session is the one resumed', () => {
+    const root = addExternalAgent();
+    runtime.requestTakeover(AGENT_ID);
+    const NEW_SID = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
+    const newFile = path.join(path.dirname(root.jsonlFile), `${NEW_SID}.jsonl`);
+    fs.writeFileSync(newFile, JSON.stringify({ type: 'user', cwd: workDir }) + '\n');
+    sessionEnd('clear');
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: NEW_SID,
+      source: 'clear',
+      transcript_path: newFile,
+      cwd: workDir,
+    });
+    expect(store.get(AGENT_ID)?.sessionId).toBe(NEW_SID);
+    expect(spawned).toEqual([]);
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionEnd',
+      session_id: NEW_SID,
+      reason: 'prompt_input_exit',
+    });
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].args).toEqual(expect.arrayContaining(['--resume', NEW_SID]));
+    expect(store.get(AGENT_ID)?.terminalId).toBeTruthy();
+  });
+
+  it('a failure after the console opened closes it instead of orphaning it', () => {
+    addExternalAgent();
+    runtime.requestTakeover(AGENT_ID);
+    vi.spyOn(store, 'persist').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    sessionEnd();
+    expect(spawned).toHaveLength(1);
+    expect(runtime.ptyHost!.size).toBe(0);
+    expect(statuses().at(-1)).toEqual(
+      expect.objectContaining({ id: AGENT_ID, state: 'failed', reason: 'disk full' }),
+    );
+    expect(store.get(AGENT_ID)).toBeUndefined();
+  });
+
+  it('cancelling with no pending mark broadcasts nothing', () => {
+    addExternalAgent();
+    runtime.cancelTakeover(AGENT_ID);
+    expect(statuses()).toEqual([]);
+  });
+
   it('an agent removed by another path loses its mark', () => {
     addExternalAgent();
     runtime.requestTakeover(AGENT_ID);

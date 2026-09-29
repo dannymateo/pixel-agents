@@ -2381,6 +2381,15 @@ export class OfficeState implements SceneHost {
     ch.isHeadless = headless;
   }
 
+  /** Applies an office console id to an already-created character (no-op if
+   *  the character doesn't exist yet — see existingAgents.ts's PendingAgent /
+   *  flushPendingAgents, which apply this only after addAgent creates it). */
+  setTerminalId(id: number, terminalId: string): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    ch.terminalId = terminalId;
+  }
+
   setAgentContext(id: number, contextTokens: number, maxContextTokens: number): void {
     const ch = this.characters.get(id);
     if (!ch) return;

@@ -20,6 +20,11 @@ export interface ExistingAgentMeta extends TreeNodeFields {
   hueShift?: number;
   seatId?: string;
   depth?: number;
+  /** Office console for this agent (privileged clients only). Carried through
+   *  the pending buffer too (see PendingAgent): `webviewReady` always sends
+   *  `existingAgents` before `layoutLoaded`, so on every fresh page load this
+   *  agent is buffered — not created — the moment this metadata arrives. */
+  terminalId?: string;
 }
 
 /** An agent buffered until the layout (and its seats) has been built. */
@@ -30,6 +35,7 @@ export interface PendingAgent {
   seatId?: string;
   folderName?: string;
   isHeadless?: boolean;
+  terminalId?: string;
 }
 
 /** Minimal structural view of OfficeState this reconciler needs. */
@@ -44,6 +50,9 @@ export interface ExistingAgentsOffice {
     folderName?: string,
   ) => void;
   setHeadless: (id: number, headless: boolean) => void;
+  /** Applies a console id to an already-created character (a no-op if the
+   *  character doesn't exist — every caller here just created it). */
+  setTerminalId: (id: number, terminalId: string) => void;
 }
 
 /**
@@ -72,11 +81,13 @@ export function reconcileExistingAgents(
       seatId: m?.seatId,
       folderName: folderNames[id],
       isHeadless: headlessAgents[id] === true,
+      terminalId: m?.terminalId,
     };
     if (layoutReady) {
       if (!os.characters.has(p.id)) {
         os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
         if (p.isHeadless) os.setHeadless(p.id, true);
+        if (p.terminalId) os.setTerminalId(p.id, p.terminalId);
         addedDirectly = true;
       }
     } else {
@@ -84,4 +95,20 @@ export function reconcileExistingAgents(
     }
   }
   return addedDirectly;
+}
+
+/**
+ * Adds every agent `reconcileExistingAgents` buffered while the layout wasn't
+ * ready yet — the `layoutLoaded` handler's flush. Mirrors the immediate-add
+ * branch above (addAgent, then setHeadless/setTerminalId) so a restored
+ * agent's console survives regardless of which order `existingAgents` and
+ * `layoutLoaded` arrived in. `webviewReady` always sends `existingAgents`
+ * first, so this is the path every reload actually takes.
+ */
+export function flushPendingAgents(os: ExistingAgentsOffice, pending: PendingAgent[]): void {
+  for (const p of pending) {
+    os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+    if (p.isHeadless) os.setHeadless(p.id, true);
+    if (p.terminalId) os.setTerminalId(p.id, p.terminalId);
+  }
 }

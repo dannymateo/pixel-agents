@@ -4,7 +4,7 @@ import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { ConversationDirector } from '../office/engine/conversationScene.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
-import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
+import { flushPendingAgents, reconcileExistingAgents } from '../office/engine/existingAgents.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../office/engine/renderer.js';
 import { setFloorSprites } from '../office/floorTiles.js';
@@ -314,10 +314,7 @@ export function useExtensionMessages(
         // then the living office places the derived agents it held back.
         living.setUserLayout(userLayout);
         onLayoutLoaded?.(userLayout);
-        for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
-          if (p.isHeadless) os.setHeadless(p.id, true);
-        }
+        flushPendingAgents(os, pendingAgents);
         pendingAgents = [];
         living.flushPending();
         layoutReadyRef.current = true;
@@ -375,10 +372,7 @@ export function useExtensionMessages(
           }
         }
         const terminalId = wireString(msg.terminalId);
-        if (terminalId) {
-          const ch = os.characters.get(id);
-          if (ch) ch.terminalId = terminalId;
-        }
+        if (terminalId) os.setTerminalId(id, terminalId);
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
         if (!isWireAgentId(msg.id)) return;
@@ -488,18 +482,15 @@ export function useExtensionMessages(
         }
         // Agents already on the floor may have come back with a changed tree.
         living.refresh();
-        // Consoles (privileged clients only): applied wherever the character
-        // already exists — roots added directly above, and derived agents just
-        // placed. An agent still buffered (layout not ready yet) picks up no
-        // terminalId; office consoles are a fresh-launch feature, not a
-        // reconnect concern this pass covers.
+        // Consoles (privileged clients only). Roots are already covered by
+        // reconcileExistingAgents/flushPendingAgents above (immediate-add or
+        // the pending-buffer path a reload always takes — webviewReady sends
+        // existingAgents before layoutLoaded); this loop re-applies it
+        // idempotently for them and additionally covers derived agents just
+        // placed above (DerivedAgentInit carries no terminalId of its own).
         for (const id of incoming) {
-          const terminalId = wireString(
-            (meta[id] as Record<string, unknown> | undefined)?.terminalId,
-          );
-          if (!terminalId) continue;
-          const ch = os.characters.get(id);
-          if (ch) ch.terminalId = terminalId;
+          const terminalId = wireString(meta[id]?.terminalId);
+          if (terminalId) os.setTerminalId(id, terminalId);
         }
         setAgents((prev) => {
           const ids = new Set(prev);

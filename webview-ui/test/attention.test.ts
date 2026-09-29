@@ -1,0 +1,85 @@
+import { expect, test } from 'vitest';
+
+import { AttentionTracker, attentionTitle } from '../src/office/attention.js';
+
+function tracker() {
+  let t = 1000;
+  const tr = new AttentionTracker(() => t);
+  return { tr, tick: (ms: number) => (t += ms) };
+}
+
+test('a permission request puts the agent on the list', () => {
+  const { tr } = tracker();
+  expect(tr.apply({ type: 'agentToolPermission', id: 1 })).toBe(true);
+  expect(tr.list()).toEqual([{ id: 1, reason: 'permission', since: 1000 }]);
+});
+
+test('the permission clears when resolved or when the agent moves on', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentToolPermission', id: 1 });
+  tr.apply({ type: 'agentToolPermissionClear', id: 1 });
+  expect(tr.size).toBe(0);
+  tr.apply({ type: 'agentToolPermission', id: 2 });
+  tr.apply({ type: 'agentToolStart', id: 2, toolId: 't', status: 'Reading x', toolName: 'Read' });
+  expect(tr.size).toBe(0);
+  tr.apply({ type: 'agentToolPermission', id: 3 });
+  tr.apply({ type: 'agentStatus', id: 3, status: 'active' });
+  expect(tr.size).toBe(0);
+});
+
+test('AskUserQuestion is a question until its tool is done', () => {
+  const { tr } = tracker();
+  tr.apply({
+    type: 'agentToolStart',
+    id: 1,
+    toolId: 'q1',
+    status: 'Waiting for your answer',
+    toolName: 'AskUserQuestion',
+  });
+  expect(tr.list()[0]).toMatchObject({ id: 1, reason: 'question' });
+  tr.apply({ type: 'agentToolDone', id: 1, toolId: 'q1' });
+  expect(tr.size).toBe(0);
+});
+
+test('a sub-agent question (status only, no toolName) counts on the parent id it arrives with', () => {
+  const { tr } = tracker();
+  tr.apply({
+    type: 'subagentToolStart',
+    id: 7,
+    parentToolId: 'p',
+    toolId: 's1',
+    status: 'Waiting for your answer',
+  });
+  expect(tr.list()[0]).toMatchObject({ id: 7, reason: 'question' });
+  tr.apply({ type: 'subagentToolDone', id: 7, parentToolId: 'p', toolId: 's1' });
+  expect(tr.size).toBe(0);
+});
+
+test('waiting for input: set by waiting, cleared by active; never downgrades a permission', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentStatus', id: 1, status: 'waiting' });
+  expect(tr.list()[0]).toMatchObject({ reason: 'waiting' });
+  tr.apply({ type: 'agentStatus', id: 1, status: 'active' });
+  expect(tr.size).toBe(0);
+  tr.apply({ type: 'agentToolPermission', id: 2 });
+  tr.apply({ type: 'agentStatus', id: 2, status: 'waiting' });
+  expect(tr.list()[0]).toMatchObject({ id: 2, reason: 'permission' });
+});
+
+test('closing the agent or clearing its tools removes it; oldest first; unknown junk ignored', () => {
+  const { tr, tick } = tracker();
+  tr.apply({ type: 'agentToolPermission', id: 1 });
+  tick(10);
+  tr.apply({ type: 'agentStatus', id: 2, status: 'waiting' });
+  expect(tr.list().map((e) => e.id)).toEqual([1, 2]);
+  tr.apply({ type: 'agentClosed', id: 1 });
+  tr.apply({ type: 'agentToolsClear', id: 2 });
+  expect(tr.size).toBe(0);
+  expect(tr.apply(null)).toBe(false);
+  expect(tr.apply({ type: 'agentToolPermission', id: 'x' })).toBe(false);
+});
+
+test('attentionTitle', () => {
+  expect(attentionTitle(0)).toBe('Pixel Agents');
+  expect(attentionTitle(2)).toBe('(2) Pixel Agents');
+});

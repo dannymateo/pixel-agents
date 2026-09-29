@@ -482,3 +482,10 @@ export const CONVERSATION_BUBBLE_Z_INDEX = 43;
 /** terminalExit code the server sends for a console it no longer has: closed
  *  on purpose (from another tab too) or unknown after a server restart. */
 export const CONSOLE_EXIT_CODE_UNAVAILABLE = -1;
+
+// ── Te esperan (attention) ──────────────────────────────────────
+/** Status text the server formats for AskUserQuestion (server/src/providers/hook/claude/claude.ts
+ *  formatToolStatus). Sub-agent tool starts carry only this text, no tool name. */
+export const ASK_USER_QUESTION_STATUS = 'Waiting for your answer';
+export const ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
+export const ATTENTION_TITLE_BASE = 'Pixel Agents';

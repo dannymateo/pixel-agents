@@ -5,14 +5,17 @@
  * the server to start `claude` in a pseudo-terminal.
  *
  * `launchResult` is NOT listened to here (spec §2): the dialog only sends
- * `launchAgent` and shows the last known error. `App`/`useExtensionMessages`
- * owns the listener so that cancelling this dialog mid-launch doesn't drop a
- * result that arrives afterwards — it still opens the console.
+ * `launchAgent` and derives its busy/error view from the `launchOutcome` prop
+ * (see `launchDialogView`). `App`/`useExtensionMessages` owns the actual
+ * listener so that cancelling this dialog mid-launch doesn't drop a result
+ * that arrives afterwards — it still opens the console.
  */
 import { useEffect, useState } from 'react';
 
 import type { MachineProject, RecentSession } from '../../../core/src/messages.js';
 import { filterProjects, timeAgo } from '../console/launchFilter.js';
+import type { LaunchOutcome } from '../console/launchOutcome.js';
+import { launchDialogView } from '../console/launchOutcome.js';
 import type { MessageTransport } from '../transport/types.js';
 import { Button } from './ui/Button.js';
 import { Modal } from './ui/Modal.js';
@@ -23,9 +26,12 @@ export interface LaunchDialogProps {
   launchOptions: { projects: MachineProject[]; recentSessions: RecentSession[] } | null;
   transport: MessageTransport;
   onClose: () => void;
-  /** The last `launchAgent` failure, if any — kept in App/useExtensionMessages
-   *  since a launch started here can still resolve after this dialog closes. */
-  launchError: string | null;
+  /** The latest `launchResult`, tagged with a `seq` (App/useExtensionMessages
+   *  owns it — a launch started here can still resolve after this dialog
+   *  closes). This dialog only reacts to an outcome newer than the `seq` it
+   *  captured when IT sent a `launchAgent`, so a stale result from before it
+   *  opened — or from an attempt it never made — is never shown here. */
+  launchOutcome: LaunchOutcome | null;
 }
 
 type Tab = 'projects' | 'sessions';
@@ -40,7 +46,7 @@ export function LaunchDialog({
   launchOptions,
   transport,
   onClose,
-  launchError,
+  launchOutcome,
 }: LaunchDialogProps) {
   const projects = launchOptions?.projects ?? [];
   const recentSessions = launchOptions?.recentSessions ?? [];
@@ -50,7 +56,14 @@ export function LaunchDialog({
   const [cwd, setCwd] = useState(projects[0]?.cwd ?? '');
   const [cwdTouched, setCwdTouched] = useState(false);
   const [bypass, setBypass] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // The `seq` this dialog's own (still unanswered) attempt started at, or
+  // null before it has sent one. `launchDialogView` derives busy/error from
+  // this plus the latest `launchOutcome` — never from comparing message
+  // text, so two consecutive identical failures both resolve busy correctly,
+  // and an outcome from before this dialog sent anything (a stale result
+  // from before it opened, or from a cancelled earlier attempt) is ignored.
+  const [attemptMarker, setAttemptMarker] = useState<number | null>(null);
+  const { busy, error } = launchDialogView(attemptMarker, launchOutcome);
 
   // The list is always fresh: ask the server on open rather than trusting
   // whatever launchOptions the last connect happened to carry.
@@ -66,22 +79,17 @@ export function LaunchDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects]);
 
-  // A launch is no longer in flight once a result (success or failure)
-  // arrives — success closes this dialog from above, failure surfaces here.
-  useEffect(() => {
-    if (launchError) setBusy(false);
-  }, [launchError]);
-
-  const error = busy ? null : launchError;
   const filteredProjects = filterProjects(projects, search);
 
+  const beginAttempt = () => setAttemptMarker(launchOutcome?.seq ?? 0);
+
   const launchFolder = () => {
-    setBusy(true);
+    beginAttempt();
     transport.send({ type: 'launchAgent', folderPath: cwd.trim(), bypassPermissions: bypass });
   };
 
   const resumeSession = (sessionId: string) => {
-    setBusy(true);
+    beginAttempt();
     transport.send({ type: 'launchAgent', resumeSessionId: sessionId, bypassPermissions: bypass });
   };
 

@@ -5,6 +5,7 @@ import type {
   MachineProject as LaunchOptionsProject,
   RecentSession as LaunchOptionsSession,
 } from '../../../core/src/messages.js';
+import type { LaunchOutcome } from '../console/launchOutcome.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { AttentionEntry } from '../office/attention.js';
 import { AttentionTracker } from '../office/attention.js';
@@ -141,11 +142,13 @@ interface ExtensionMessageState {
     projects: LaunchOptionsProject[];
     recentSessions: LaunchOptionsSession[];
   } | null;
-  /** The last `launchAgent` failure's message, or null. Owned here (not the
-   *  dialog) so a launch started before Cancel still reports correctly; the
-   *  dialog shows it while open, then it's cleared on the next open. */
-  launchError: string | null;
-  clearLaunchError: () => void;
+  /** The latest `launchResult`, tagged with a monotonic `seq` (owned here, not
+   *  the dialog, so a launch started before Cancel still reports correctly).
+   *  The dialog derives its own busy/error view from this plus the `seq` it
+   *  captured when it sent its own `launchAgent` (`launchDialogView`) —
+   *  outcomes from before it sent one, or from a differently-worded repeat
+   *  failure, are told apart by `seq`, never by comparing message text. */
+  launchOutcome: LaunchOutcome | null;
   /** Who is waiting on the user right now, and why (spec §3 "Te esperan"). */
   attention: AttentionEntry[];
 }
@@ -235,8 +238,7 @@ export function useExtensionMessages(
     projects: LaunchOptionsProject[];
     recentSessions: LaunchOptionsSession[];
   } | null>(null);
-  const [launchError, setLaunchError] = useState<string | null>(null);
-  const clearLaunchError = useCallback(() => setLaunchError(null), []);
+  const [launchOutcome, setLaunchOutcome] = useState<LaunchOutcome | null>(null);
   // One tracker for the component's lifetime; `attention` mirrors its list()
   // so React re-renders on every change without re-deriving it from scratch.
   const attentionTrackerRef = useRef<AttentionTracker | null>(null);
@@ -354,16 +356,18 @@ export function useExtensionMessages(
       }
 
       if (msg.type === 'launchResult') {
-        if (
-          msg.ok === true &&
-          typeof msg.agentId === 'number' &&
-          typeof msg.terminalId === 'string'
-        ) {
-          setLaunchError(null);
-          onAgentLaunched?.(msg.agentId, msg.terminalId);
-        } else {
-          setLaunchError(typeof msg.error === 'string' ? msg.error : 'No se pudo lanzar');
-        }
+        const success =
+          msg.ok === true && typeof msg.agentId === 'number' && typeof msg.terminalId === 'string';
+        // seq is bumped on EVERY launchResult, success or failure, so two
+        // consecutive failures with the identical error text still carry
+        // distinct identities — a dialog derives "am I still busy" from seq,
+        // never from comparing message strings (see launchDialogView).
+        setLaunchOutcome((prev) => ({
+          seq: (prev?.seq ?? 0) + 1,
+          ok: success,
+          error: success ? undefined : typeof msg.error === 'string' ? msg.error : undefined,
+        }));
+        if (success) onAgentLaunched?.(msg.agentId as number, msg.terminalId as string);
         return;
       }
 
@@ -1032,8 +1036,7 @@ export function useExtensionMessages(
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
-    launchError,
-    clearLaunchError,
+    launchOutcome,
     attention,
   };
 }

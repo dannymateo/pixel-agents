@@ -177,8 +177,7 @@ function App() {
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
-    launchError,
-    clearLaunchError,
+    launchOutcome,
     attention,
   } = useExtensionMessages(
     getOfficeState,
@@ -213,10 +212,7 @@ function App() {
   );
   const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
 
-  const handleOpenLaunchDialog = useCallback(() => {
-    clearLaunchError();
-    setLaunchOpen(true);
-  }, [clearLaunchError]);
+  const handleOpenLaunchDialog = useCallback(() => setLaunchOpen(true), []);
   const handleCloseConsole = useCallback(() => setConsoleTerminal(null), []);
 
   const currentMajorMinor = toMajorMinor(extensionVersion);
@@ -862,7 +858,7 @@ function App() {
           launchOptions={launchOptions}
           transport={transport}
           onClose={() => setLaunchOpen(false)}
-          launchError={launchError}
+          launchOutcome={launchOutcome}
         />
       )}
 

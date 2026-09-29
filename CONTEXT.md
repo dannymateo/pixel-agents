@@ -80,6 +80,14 @@ _Avoid_: shell, tty (implementation words)
 **Office session**:
 A session launched from the office, bound to its office console. Its agent is internal (not headless).
 
+**Recent session**:
+A session found elsewhere on the host machine — not one the office is tracking — offered in the launch dialog's Sessions list to resume, newest first. Its title (the start of its first prompt) and its project's path are shown only to privileged connections; a session already live in the office never appears twice.
+_Avoid_: history, past session
+
+**Bring to the office**:
+Turn a root agent's external session into an office session: the operator closes it in its own terminal (or confirms it already is), and the office resumes the very same session id — `claude --resume` — in a console of its own, keeping the same agent, character, and seat. The office never kills a process it doesn't own; it only ever resumes one that already ended (docs/adr/0005).
+_Avoid_: takeover, adopt (Adopt begins watching a session where it already runs; this moves where it runs)
+
 **Adopt**:
 Begin tracking a session that was started outside the office. An adopted agent is a full citizen.
 _Avoid_: import, attach
@@ -90,6 +98,10 @@ The character-level visual event: a character materializing into or dissolving o
 **Dismiss**:
 Remove an agent from the office by user choice, without judging its session. A dismissed session is not re-adopted.
 _Avoid_: close, delete
+
+**Waiting on you**:
+The cross-agent signal that some agent needs a reply: a permission request, a question, or a turn that ended waiting for input (see Agent Status) — any agent, sub-agents shown through their root. Counted in the bottom bar and the browser tab title; clicking an entry opens the answering agent's console, or its screen with Bring to the office when it is external.
+_Avoid_: attention (the tracker's internal name only), notification
 
 **Orphaned**:
 An agent whose transcript has been deleted, so the session it represents no longer exists. The office removes orphaned agents automatically.

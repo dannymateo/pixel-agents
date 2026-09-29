@@ -117,6 +117,70 @@ test('sub-agent clear only removes questions from that parentToolId, not from ot
   expect(tr.size).toBe(0);
 });
 
+test('waiting counts only for roots: a workflow node waiting on its children is not waiting on the user', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentCreated', id: 1 });
+  tr.apply({ type: 'agentCreated', id: 2, parentAgentId: 1, nodeKind: 'workflow' });
+  expect(tr.apply({ type: 'agentStatus', id: 2, status: 'waiting' })).toBe(false);
+  expect(tr.size).toBe(0);
+  // A workflow node with no parent on the wire is still not a root.
+  tr.apply({ type: 'agentCreated', id: 3, nodeKind: 'workflow' });
+  tr.apply({ type: 'agentStatus', id: 3, status: 'waiting' });
+  expect(tr.size).toBe(0);
+  // The root itself still counts.
+  tr.apply({ type: 'agentStatus', id: 1, status: 'waiting' });
+  expect(tr.list()).toEqual([{ id: 1, reason: 'waiting', since: 1000 }]);
+});
+
+test('waiting counts only for roots: an idle teammate or sub-agent waits on its lead, not on the user', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentCreated', id: 1 });
+  tr.apply({
+    type: 'agentCreated',
+    id: 4,
+    parentAgentId: 1,
+    isTeammate: true,
+    teammateName: 'ana',
+  });
+  tr.apply({ type: 'agentStatus', id: 4, status: 'waiting' });
+  expect(tr.size).toBe(0);
+  // Learned from the reconnect snapshot too.
+  tr.apply({
+    type: 'existingAgents',
+    agents: [1, 4, 5],
+    agentMeta: { 5: { parentAgentId: 1 } },
+    folderNames: {},
+    externalAgents: {},
+  });
+  tr.apply({ type: 'agentStatus', id: 5, status: 'waiting' });
+  expect(tr.size).toBe(0);
+  // A session teammate linked to its lead later (agentTeamInfo): a waiting
+  // entry it already had is dropped, and new ones are ignored.
+  tr.apply({ type: 'agentCreated', id: 6 });
+  tr.apply({ type: 'agentStatus', id: 6, status: 'waiting' });
+  expect(tr.size).toBe(1);
+  expect(tr.apply({ type: 'agentTeamInfo', id: 6, teamName: 't', leadAgentId: 1 })).toBe(true);
+  expect(tr.size).toBe(0);
+  tr.apply({ type: 'agentStatus', id: 6, status: 'waiting' });
+  expect(tr.size).toBe(0);
+});
+
+test('derived agents still count for permissions and questions (answered in their root)', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentCreated', id: 4, parentAgentId: 1 });
+  tr.apply({ type: 'agentToolPermission', id: 4 });
+  expect(tr.list()[0]).toMatchObject({ id: 4, reason: 'permission' });
+  tr.apply({
+    type: 'agentToolStart',
+    id: 7,
+    toolId: 'q',
+    status: 'Waiting for your answer',
+    toolName: 'AskUserQuestion',
+  });
+  tr.apply({ type: 'agentCreated', id: 7, parentAgentId: 1, nodeKind: 'agent' });
+  expect(tr.list().map((e) => e.reason)).toEqual(['permission', 'question']);
+});
+
 test('attentionTitle', () => {
   expect(attentionTitle(0)).toBe('Pixel Agents');
   expect(attentionTitle(2)).toBe('(2) Pixel Agents');

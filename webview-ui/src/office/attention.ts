@@ -36,12 +36,18 @@ export function tabTitle(
   return consoleCapable ? attentionTitle(count) : ATTENTION_TITLE_BASE;
 }
 
+const isAgentId = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
 export class AttentionTracker {
   private readonly entries = new Map<number, AttentionEntry>();
   /** Open question tool ids per agent (AskUserQuestion, own or sub-agent's). */
   private readonly questions = new Map<number, Set<string>>();
   /** Maps toolId → parentToolId for sub-agent questions (so we can clean them up on subagentClear). */
   private readonly questionParents = new Map<number, Map<string, string>>();
+  /** Agents that are not roots (spawned, teammate, or workflow node): their
+   *  `waiting` is not the user's business. Learned from agentCreated,
+   *  existingAgents.agentMeta and agentTeamInfo. */
+  private readonly derived = new Set<number>();
   private readonly now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -59,9 +65,16 @@ export class AttentionTracker {
   apply(msg: unknown): boolean {
     if (!msg || typeof msg !== 'object') return false;
     const m = msg as Record<string, unknown>;
+    if (m.type === 'existingAgents') return this.applySnapshot(m);
     const id = m.id;
     if (typeof id !== 'number' || !Number.isFinite(id)) return false;
     switch (m.type) {
+      case 'agentCreated':
+        return this.learnIdentity(id, m);
+      case 'agentTeamInfo':
+        // A session teammate may be linked to its lead after it was created.
+        if (isAgentId(m.leadAgentId) && m.leadAgentId !== id) return this.markDerived(id);
+        return false;
       case 'agentToolPermission':
       case 'subagentToolPermission':
         return this.raise(id, 'permission');
@@ -95,8 +108,12 @@ export class AttentionTracker {
         this.questionParents.delete(id);
         return this.drop(id, 'question');
       }
-      case 'agentToolsClear':
       case 'agentClosed':
+        this.derived.delete(id);
+        this.questions.delete(id);
+        this.questionParents.delete(id);
+        return this.entries.delete(id);
+      case 'agentToolsClear':
         this.questions.delete(id);
         this.questionParents.delete(id);
         return this.entries.delete(id);
@@ -122,12 +139,53 @@ export class AttentionTracker {
         return this.drop(id, 'question');
       }
       case 'agentStatus':
-        if (m.status === 'waiting') return this.raise(id, 'waiting');
+        // Spec §3: "Espera respuesta" is a ROOT's signal. A workflow node, a
+        // sub-agent or a teammate going idle is waiting on its parent/lead,
+        // not on the user (their permissions and questions still count above).
+        if (m.status === 'waiting') return this.derived.has(id) ? false : this.raise(id, 'waiting');
         if (m.status === 'active') return this.dropUnlessQuestion(id);
         return false;
       default:
         return false;
     }
+  }
+
+  /** Records whether `id` is a root from its agentCreated / agentMeta fields. */
+  private learnIdentity(id: number, fields: Record<string, unknown>): boolean {
+    const parent = fields.parentAgentId;
+    const isDerived =
+      (isAgentId(parent) && parent !== id) ||
+      fields.nodeKind === 'workflow' ||
+      fields.isTeammate === true;
+    if (isDerived) return this.markDerived(id);
+    this.derived.delete(id);
+    return false;
+  }
+
+  private markDerived(id: number): boolean {
+    this.derived.add(id);
+    return this.drop(id, 'waiting');
+  }
+
+  private applySnapshot(m: Record<string, unknown>): boolean {
+    const ids = Array.isArray(m.agents) ? m.agents.filter(isAgentId) : [];
+    const meta = (m.agentMeta && typeof m.agentMeta === 'object' ? m.agentMeta : {}) as Record<
+      string,
+      unknown
+    >;
+    let changed = false;
+    for (const id of ids) {
+      const fields = meta[id];
+      if (
+        this.learnIdentity(
+          id,
+          fields && typeof fields === 'object' ? (fields as Record<string, unknown>) : {},
+        )
+      ) {
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   private raise(id: number, reason: AttentionReason, force = false): boolean {

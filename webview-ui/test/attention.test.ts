@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 
-import { AttentionTracker, attentionTitle } from '../src/office/attention.js';
+import { attentionTitle, AttentionTracker } from '../src/office/attention.js';
 
 function tracker() {
   let t = 1000;
@@ -77,6 +77,44 @@ test('closing the agent or clearing its tools removes it; oldest first; unknown 
   expect(tr.size).toBe(0);
   expect(tr.apply(null)).toBe(false);
   expect(tr.apply({ type: 'agentToolPermission', id: 'x' })).toBe(false);
+});
+
+test('sub-agent question is cleared when the sub-agent itself finishes', () => {
+  const { tr } = tracker();
+  tr.apply({
+    type: 'subagentToolStart',
+    id: 5,
+    parentToolId: 'p1',
+    toolId: 'q1',
+    status: 'Waiting for your answer',
+  });
+  expect(tr.list()[0]).toMatchObject({ id: 5, reason: 'question' });
+  tr.apply({ type: 'subagentClear', id: 5, parentToolId: 'p1' });
+  expect(tr.size).toBe(0);
+});
+
+test('sub-agent clear only removes questions from that parentToolId, not from other parents', () => {
+  const { tr } = tracker();
+  tr.apply({
+    type: 'subagentToolStart',
+    id: 6,
+    parentToolId: 'p1',
+    toolId: 'q1',
+    status: 'Waiting for your answer',
+  });
+  tr.apply({
+    type: 'subagentToolStart',
+    id: 6,
+    parentToolId: 'p2',
+    toolId: 'q2',
+    status: 'Waiting for your answer',
+  });
+  expect(tr.size).toBe(1);
+  tr.apply({ type: 'subagentClear', id: 6, parentToolId: 'p1' });
+  expect(tr.size).toBe(1);
+  expect(tr.list()[0]).toMatchObject({ id: 6, reason: 'question' });
+  tr.apply({ type: 'subagentClear', id: 6, parentToolId: 'p2' });
+  expect(tr.size).toBe(0);
 });
 
 test('attentionTitle', () => {

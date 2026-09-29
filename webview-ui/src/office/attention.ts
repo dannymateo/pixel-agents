@@ -27,6 +27,8 @@ export class AttentionTracker {
   private readonly entries = new Map<number, AttentionEntry>();
   /** Open question tool ids per agent (AskUserQuestion, own or sub-agent's). */
   private readonly questions = new Map<number, Set<string>>();
+  /** Maps toolId → parentToolId for sub-agent questions (so we can clean them up on subagentClear). */
+  private readonly questionParents = new Map<number, Map<string, string>>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -57,6 +59,12 @@ export class AttentionTracker {
           let open = this.questions.get(id);
           if (!open) this.questions.set(id, (open = new Set()));
           open.add(m.toolId);
+          // Track parentToolId for sub-agent questions (for cleanup on subagentClear).
+          if (m.type === 'subagentToolStart' && typeof m.parentToolId === 'string') {
+            let parents = this.questionParents.get(id);
+            if (!parents) this.questionParents.set(id, (parents = new Map()));
+            parents.set(m.toolId, m.parentToolId);
+          }
           return this.raise(id, 'question', true);
         }
         // Any other tool: the agent is working again.
@@ -68,12 +76,35 @@ export class AttentionTracker {
         if (!open || typeof m.toolId !== 'string' || !open.delete(m.toolId)) return false;
         if (open.size > 0) return false;
         this.questions.delete(id);
+        this.questionParents.delete(id);
         return this.drop(id, 'question');
       }
       case 'agentToolsClear':
       case 'agentClosed':
         this.questions.delete(id);
+        this.questionParents.delete(id);
         return this.entries.delete(id);
+      case 'subagentClear': {
+        const parentToolId = m.parentToolId;
+        if (typeof parentToolId !== 'string') return false;
+        const open = this.questions.get(id);
+        const parents = this.questionParents.get(id);
+        if (!open || !parents) return false;
+        // Remove all toolIds that came from this parentToolId.
+        let removed = false;
+        for (const [toolId, parent] of parents) {
+          if (parent === parentToolId && open.delete(toolId)) {
+            parents.delete(toolId);
+            removed = true;
+          }
+        }
+        if (!removed) return false;
+        if (open.size > 0) return false;
+        // No questions left; drop the question reason.
+        this.questions.delete(id);
+        this.questionParents.delete(id);
+        return this.drop(id, 'question');
+      }
       case 'agentStatus':
         if (m.status === 'waiting') return this.raise(id, 'waiting');
         if (m.status === 'active') return this.dropUnlessQuestion(id);

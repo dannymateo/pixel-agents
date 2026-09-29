@@ -212,6 +212,20 @@ export function handleClientMessage(
       break;
     }
 
+    case 'takeOverAgent': {
+      // Privileged (not in VIEWER_MESSAGES). The runtime refuses what it
+      // cannot bring in and broadcasts every outcome as takeoverStatus.
+      if (runtime && Number.isInteger(msg.id)) {
+        runtime.requestTakeover(msg.id as number, { confirmClosed: msg.confirmClosed === true });
+      }
+      break;
+    }
+
+    case 'cancelTakeover': {
+      if (runtime && Number.isInteger(msg.id)) runtime.cancelTakeover(msg.id as number);
+      break;
+    }
+
     case 'requestLaunchOptions': {
       // Privileged already enforced by the central gate (not in
       // VIEWER_MESSAGES); office consoles additionally need a live PtyHost.

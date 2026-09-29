@@ -893,6 +893,8 @@ describe('clientMessageHandler: an untokened viewer cannot change anything', () 
   let ctx: ClientMessageContext;
   const closeAgent = vi.fn();
   const dismiss = vi.fn();
+  const requestTakeover = vi.fn();
+  const cancelTakeover = vi.fn();
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-viewer-'));
@@ -903,8 +905,12 @@ describe('clientMessageHandler: an untokened viewer cannot change anything', () 
     sent = [];
     closeAgent.mockClear();
     dismiss.mockClear();
+    requestTakeover.mockClear();
+    cancelTakeover.mockClear();
     const runtime = {
       closeAgent,
+      requestTakeover,
+      cancelTakeover,
       dismissalTracker: { dismiss },
       watchAllSessions: { current: false },
     } as unknown as AgentRuntime;
@@ -967,6 +973,30 @@ describe('clientMessageHandler: an untokened viewer cannot change anything', () 
     ctx.privileged = true;
     dispatch({ type: 'closeAgent', id: 1 });
     expect(closeAgent).toHaveBeenCalledWith(1);
+  });
+
+  it('cannot bring an agent into the office nor cancel it', () => {
+    dispatch({ type: 'takeOverAgent', id: 1 });
+    dispatch({ type: 'takeOverAgent', id: 1, confirmClosed: true });
+    dispatch({ type: 'cancelTakeover', id: 1 });
+    expect(requestTakeover).not.toHaveBeenCalled();
+    expect(cancelTakeover).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it('the operator can bring an agent in (integer ids only) and cancel it', () => {
+    ctx.privileged = true;
+    dispatch({ type: 'takeOverAgent', id: 1 });
+    dispatch({ type: 'takeOverAgent', id: 1, confirmClosed: true });
+    dispatch({ type: 'takeOverAgent', id: '1' });
+    dispatch({ type: 'takeOverAgent', id: 1.5 });
+    dispatch({ type: 'cancelTakeover', id: 1 });
+    dispatch({ type: 'cancelTakeover', id: 'x' });
+    expect(requestTakeover.mock.calls).toEqual([
+      [1, { confirmClosed: false }],
+      [1, { confirmClosed: true }],
+    ]);
+    expect(cancelTakeover.mock.calls).toEqual([[1]]);
   });
 });
 

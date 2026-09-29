@@ -90,6 +90,26 @@ export interface RuntimeLifecycleCallbacks {
   onTeammateRemoved?: (teammateId: number, agent: AgentState, source: string) => void;
 }
 
+/**
+ * The folder a session ran in, from its transcript's last recorded `cwd`,
+ * canonicalized (see launchOfficeAgent on why). Throws when it is missing,
+ * relative, or no longer an existing directory.
+ */
+function sessionFolder(jsonlFile: string): string {
+  const sessionCwd = readSessionCwd(jsonlFile);
+  let isDir = false;
+  try {
+    isDir =
+      sessionCwd !== undefined &&
+      path.isAbsolute(sessionCwd) &&
+      fs.statSync(sessionCwd).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) throw new Error(`Session folder no longer exists: ${sessionCwd ?? '(unknown)'}`);
+  return fs.realpathSync.native(sessionCwd!);
+}
+
 export class AgentRuntime {
   // Per-agent timer Maps (shared by all fileWatcher/hookEventHandler operations)
   readonly fileWatchers = new Map<number, fs.FSWatcher>();
@@ -105,6 +125,9 @@ export class AgentRuntime {
    *  attachPtyHost alongside the host it fronts. */
   terminalHub: TerminalHub | null = null;
   private readonly agentByTerminal = new Map<string, number>();
+  /** External agents the operator asked to bring into the office: resumed in
+   *  a console once their session ends (spec §1). Keyed by agent id. */
+  private readonly pendingTakeover = new Set<number>();
   private unsubscribePtyExit: (() => void) | null = null;
 
   // Scanning state. PathSet (not Set) so a transcript adopted via hooks is still
@@ -386,8 +409,13 @@ export class AgentRuntime {
       onSessionEnd: (agentId) => {
         const agent = this.store.get(agentId);
         if (!agent) return;
-        this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
-        this.dismissalTracker.dismiss(agent.jsonlFile);
+        // Brought into the office: the session ended in its own terminal, so
+        // it is ours to resume -- the agent stays (no dismiss, no removal).
+        const takingOver = this.pendingTakeover.has(agentId);
+        if (!takingOver) {
+          this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
+          this.dismissalTracker.dismiss(agent.jsonlFile);
+        }
         // Every agent it spawned leaves with the session, whole subtrees,
         // leaves first — even when the session agent itself stays (terminal
         // agents).
@@ -397,6 +425,10 @@ export class AgentRuntime {
         // have children but no teamName). No-op when childless.
         this.removeTeammates(agentId);
         this.hookEventHandler.clearSpawns(agent.sessionId);
+        if (takingOver) {
+          this.resumeAgentInConsole(agentId);
+          return;
+        }
         if (agent.isExternal) {
           this.unregisterAgent(agent.sessionId);
           this.removeAgent(agentId);
@@ -462,18 +494,7 @@ export class AgentRuntime {
           throw new Error('Session is already open in the office');
         }
       }
-      const sessionCwd = readSessionCwd(jsonl);
-      let isDir = false;
-      try {
-        isDir =
-          sessionCwd !== undefined &&
-          path.isAbsolute(sessionCwd) &&
-          fs.statSync(sessionCwd).isDirectory();
-      } catch {
-        isDir = false;
-      }
-      if (!isDir) throw new Error(`Session folder no longer exists: ${sessionCwd ?? '(unknown)'}`);
-      canonicalCwd = fs.realpathSync.native(sessionCwd!);
+      canonicalCwd = sessionFolder(jsonl);
       sessionId = opts.resumeSessionId;
       resume = true;
       resumeJsonlFile = jsonl;
@@ -495,23 +516,10 @@ export class AgentRuntime {
       sessionId = crypto.randomUUID();
     }
 
-    const launch = this.provider.buildLaunchCommand?.(sessionId, canonicalCwd, {
+    const terminalId = this.openAgentConsole(sessionId, canonicalCwd, {
       bypassPermissions: opts.bypassPermissions === true,
       resume,
     });
-    if (!launch) throw new Error('This provider cannot launch agents');
-    const { file, args } = resolveLaunch(
-      launch,
-      process.platform,
-      process.env[CLAUDE_COMMAND_OVERRIDE_ENV],
-    );
-    const env = { ...(process.env as Record<string, string>), ...(launch.env ?? {}) };
-    // A server started inside a Claude Code session would hand its nested-session
-    // markers to the new claude, which then refuses to start.
-    // Case-insensitive: Windows env names are, and a spread keeps whatever case it had.
-    const stripped = new Set<string>(OFFICE_CONSOLE_STRIPPED_ENV);
-    for (const key of Object.keys(env)) if (stripped.has(key.toUpperCase())) delete env[key];
-    const terminalId = this.ptyHost.open({ file, args, cwd: canonicalCwd, env });
     // Anything failing past this point must not orphan the console just opened.
     let id: number | undefined;
     try {
@@ -559,6 +567,109 @@ export class AgentRuntime {
       throw err;
     }
     return { agentId: id, terminalId };
+  }
+
+  /**
+   * Open an office console running the provider's launch command for
+   * `sessionId` in `cwd` (already canonical). Returns the console's id.
+   */
+  private openAgentConsole(
+    sessionId: string,
+    cwd: string,
+    opts: { bypassPermissions?: boolean; resume?: boolean },
+  ): string {
+    if (!this.ptyHost) throw new Error('Office consoles are not available on this server');
+    const launch = this.provider.buildLaunchCommand?.(sessionId, cwd, opts);
+    if (!launch) throw new Error('This provider cannot launch agents');
+    const { file, args } = resolveLaunch(
+      launch,
+      process.platform,
+      process.env[CLAUDE_COMMAND_OVERRIDE_ENV],
+    );
+    const env = { ...(process.env as Record<string, string>), ...(launch.env ?? {}) };
+    // A server started inside a Claude Code session would hand its nested-session
+    // markers to the new claude, which then refuses to start.
+    // Case-insensitive: Windows env names are, and a spread keeps whatever case it had.
+    const stripped = new Set<string>(OFFICE_CONSOLE_STRIPPED_ENV);
+    for (const key of Object.keys(env)) if (stripped.has(key.toUpperCase())) delete env[key];
+    return this.ptyHost.open({ file, args, cwd, env });
+  }
+
+  // ── Bringing an external agent into the office (spec §1) ──
+
+  /**
+   * Ask to bring an external root agent into an office console. The office
+   * never kills a process it does not own: it waits for the session's
+   * `SessionEnd` (the operator types `/exit` there), or resumes at once when
+   * the operator states it is already closed (`confirmClosed`). Every outcome
+   * is broadcast as `takeoverStatus`.
+   */
+  requestTakeover(id: number, opts: { confirmClosed?: boolean } = {}): void {
+    const refusal = this.takeoverRefusal(id);
+    if (refusal) {
+      this.store.broadcast({ type: 'takeoverStatus', id, state: 'refused', reason: refusal });
+      return;
+    }
+    this.pendingTakeover.add(id);
+    if (opts.confirmClosed === true) {
+      this.resumeAgentInConsole(id);
+      return;
+    }
+    this.store.broadcast({ type: 'takeoverStatus', id, state: 'waitingExit' });
+  }
+
+  /** Stop waiting to bring an agent in: it stays external. */
+  cancelTakeover(id: number): void {
+    this.pendingTakeover.delete(id);
+    this.store.broadcast({ type: 'takeoverStatus', id, state: 'cancelled' });
+  }
+
+  /** Why `id` cannot be brought into the office, or undefined when it can. */
+  private takeoverRefusal(id: number): string | undefined {
+    const agent = this.store.get(id);
+    if (!agent) return 'Unknown agent';
+    if (agent.terminalId) return 'Already in an office console';
+    if (agent.parentAgentId !== undefined || agent.leadAgentId !== undefined) {
+      return 'Only a session agent can be brought into the office';
+    }
+    if (!this.ptyHost) return 'Office consoles are not available on this server';
+    if (!readSessionCwd(agent.jsonlFile)) return 'Its transcript records no folder';
+    return undefined;
+  }
+
+  /**
+   * Resume a pending agent's session (`--resume <sessionId>`) in an office
+   * console, keeping the SAME agent (id, character, seat): it becomes internal
+   * and bound to the console, and its session stays registered so its hooks
+   * keep routing to it. A failure reports `failed` and the agent leaves like
+   * after any other `SessionEnd`.
+   */
+  private resumeAgentInConsole(agentId: number): void {
+    this.pendingTakeover.delete(agentId);
+    const agent = this.store.get(agentId);
+    if (!agent) return;
+    let terminalId: string;
+    try {
+      terminalId = this.openAgentConsole(agent.sessionId, sessionFolder(agent.jsonlFile), {
+        resume: true,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[Pixel Agents] Could not bring agent ${agentId} into the office: ${reason}`);
+      this.store.broadcast({ type: 'takeoverStatus', id: agentId, state: 'failed', reason });
+      this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
+      this.dismissalTracker.dismiss(agent.jsonlFile);
+      this.unregisterAgent(agent.sessionId);
+      this.removeAgent(agentId);
+      return;
+    }
+    agent.terminalId = terminalId;
+    agent.isExternal = false;
+    this.agentByTerminal.set(terminalId, agentId);
+    this.knownJsonlFiles.add(agent.jsonlFile);
+    this.registerAgent(agent.sessionId, agentId);
+    this.store.persist();
+    this.store.broadcast({ type: 'takeoverStatus', id: agentId, state: 'done', terminalId });
   }
 
   /** Start watching an office agent's transcript once claude creates it. */
@@ -617,6 +728,7 @@ export class AgentRuntime {
    *   shutdown); an exit the user should see goes through closeAgent.
    */
   removeAgent(id: number): void {
+    this.pendingTakeover.delete(id);
     const target = this.store.get(id);
     if (!target) return;
     const terminalId = this.store.get(id)?.terminalId;

@@ -133,6 +133,8 @@ components:
         - $ref: '#/components/schemas/TerminalExit'
         - $ref: '#/components/schemas/LaunchResult'
         - $ref: '#/components/schemas/LaunchOptions'
+        # Bringing an external agent into the office (reason/terminalId stripped for viewers)
+        - $ref: '#/components/schemas/TakeoverStatus'
       discriminator: type
 
     ClientMessage:
@@ -169,6 +171,8 @@ components:
         - $ref: '#/components/schemas/TerminalResize'
         - $ref: '#/components/schemas/TerminalClose'
         - $ref: '#/components/schemas/RequestLaunchOptions'
+        - $ref: '#/components/schemas/TakeOverAgent'
+        - $ref: '#/components/schemas/CancelTakeover'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -1034,6 +1038,28 @@ components:
           items:
             $ref: '#/components/schemas/RecentSession'
 
+    TakeoverStatus:
+      description: >-
+        Progress of bringing an external agent into an office console
+        (broadcast). `waitingExit`: the office waits for the session to end in
+        its own terminal; `done`: resumed in the same agent, now bound to
+        `terminalId`; `cancelled`, `refused` or `failed` (with `reason`).
+        `reason` and `terminalId` are stripped for unprivileged connections.
+      type: object
+      additionalProperties: false
+      required: [type, id, state]
+      properties:
+        type:
+          const: takeoverStatus
+        id:
+          type: integer
+        state:
+          $ref: '#/components/schemas/TakeoverState'
+        reason:
+          type: string
+        terminalId:
+          type: string
+
     # ── Client message variants ────────────────────────────────────
 
     WebviewReady:
@@ -1440,7 +1466,39 @@ components:
         type:
           const: requestLaunchOptions
 
+    TakeOverAgent:
+      description: >-
+        Bring an external root agent into an office console (privileged). The
+        office resumes its session (`claude --resume`) once it ends in its own
+        terminal, or at once with `confirmClosed`. Answered by takeoverStatus.
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          const: takeOverAgent
+        id:
+          type: integer
+        confirmClosed:
+          type: boolean
+          description: The operator states the session is already closed in its terminal.
+
+    CancelTakeover:
+      description: Stop waiting to bring an agent into the office (privileged).
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          const: cancelTakeover
+        id:
+          type: integer
+
     # ── Supporting schemas ─────────────────────────────────────────
+
+    TakeoverState:
+      type: string
+      enum: [waitingExit, done, cancelled, refused, failed]
 
     MachineProject:
       description: >-

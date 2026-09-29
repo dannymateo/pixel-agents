@@ -49,7 +49,8 @@ export type ServerMessage =
   | TerminalOutput
   | TerminalExit
   | LaunchResult
-  | LaunchOptions;
+  | LaunchOptions
+  | TakeoverStatus;
 
 export type ClientMessage =
   | WebviewReady
@@ -83,7 +84,9 @@ export type ClientMessage =
   | TerminalInput
   | TerminalResize
   | TerminalClose
-  | RequestLaunchOptions;
+  | RequestLaunchOptions
+  | TakeOverAgent
+  | CancelTakeover;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -483,6 +486,16 @@ export interface RecentSession {
   title?: string;
 }
 
+export interface TakeoverStatus {
+  type: 'takeoverStatus';
+  id: number;
+  state: TakeoverState;
+  reason?: string;
+  terminalId?: string;
+}
+
+export type TakeoverState = 'waitingExit' | 'done' | 'cancelled' | 'refused' | 'failed';
+
 export interface WebviewReady {
   type: 'webviewReady';
 }
@@ -649,4 +662,15 @@ export interface TerminalClose {
 
 export interface RequestLaunchOptions {
   type: 'requestLaunchOptions';
+}
+
+export interface TakeOverAgent {
+  type: 'takeOverAgent';
+  id: number;
+  confirmClosed?: boolean;
+}
+
+export interface CancelTakeover {
+  type: 'cancelTakeover';
+  id: number;
 }

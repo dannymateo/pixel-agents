@@ -610,6 +610,25 @@ describe('/ws transcript-derived text gate', () => {
       kind: 'message',
     });
   });
+  it('a viewer hears only who and what state of a takeover, never its reason or console', async () => {
+    const config = await server.start({ embedded: false, store });
+    const base = `ws://127.0.0.1:${config.port.toString()}/ws`;
+    const tokened = await connectTo(`${base}?token=${encodeURIComponent(config.token)}`);
+    const untokened = await connectTo(base);
+    sockets.push(tokened.socket, untokened.socket);
+    const fromTokened = waitForMessage(tokened.socket, 'takeoverStatus');
+    const fromUntokened = waitForMessage(untokened.socket, 'takeoverStatus');
+    const status = {
+      type: 'takeoverStatus',
+      id: 7,
+      state: 'failed',
+      reason: 'Session folder no longer exists: /home/secret/path',
+      terminalId: 't-1',
+    };
+    store.broadcast(status);
+    expect(await fromTokened).toEqual(status);
+    expect(await fromUntokened).toEqual({ type: 'takeoverStatus', id: 7, state: 'failed' });
+  });
 });
 
 // The agent screen feed (spec §4) exposes code and command output. It is

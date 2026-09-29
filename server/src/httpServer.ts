@@ -5,7 +5,11 @@ import * as crypto from 'crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 
-import { agentCreatedMessage, conversationForViewer } from './agentMessages.js';
+import {
+  agentCreatedMessage,
+  conversationForViewer,
+  takeoverStatusForViewer,
+} from './agentMessages.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type {
@@ -200,6 +204,11 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
       // connections get it; the rest still see the scene, with `…`.
       if (message.type === 'agentConversation' && !privileged) {
         safeSend(socket, conversationForViewer(message));
+        return;
+      }
+      // A takeover's reason can name paths; its console is the operator's.
+      if (message.type === 'takeoverStatus' && !privileged) {
+        safeSend(socket, takeoverStatusForViewer(message));
         return;
       }
       safeSend(socket, message);

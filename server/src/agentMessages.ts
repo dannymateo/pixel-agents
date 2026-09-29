@@ -76,8 +76,23 @@ export function agentTreeMeta(
 const VIEWER_CONVERSATION_FIELDS = ['type', 'conversationId', 'fromId', 'toId', 'kind'] as const;
 
 export function conversationForViewer(message: Record<string, unknown>): Record<string, unknown> {
+  return pickFields(message, VIEWER_CONVERSATION_FIELDS);
+}
+
+/** What a viewer may see of a `takeoverStatus`: which agent and what state.
+ *  `reason` can name paths and `terminalId` is the operator's console. */
+const TAKEOVER_VIEWER_FIELDS = ['type', 'id', 'state'] as const;
+
+export function takeoverStatusForViewer(message: Record<string, unknown>): Record<string, unknown> {
+  return pickFields(message, TAKEOVER_VIEWER_FIELDS);
+}
+
+function pickFields(
+  message: Record<string, unknown>,
+  fields: readonly string[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const key of VIEWER_CONVERSATION_FIELDS) {
+  for (const key of fields) {
     if (message[key] !== undefined) out[key] = message[key];
   }
   return out;

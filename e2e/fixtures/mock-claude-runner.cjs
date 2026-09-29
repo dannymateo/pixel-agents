@@ -289,9 +289,7 @@ function isPixelAgentsHookCommand(homeDir, command) {
     path.join(homeDir, '.pixel-agents', 'hooks', 'claude-hook.js'),
   );
 
-  return (
-    normalizedCommand.includes(currentHookPath)
-  );
+  return normalizedCommand.includes(currentHookPath);
 }
 
 function resolveTemplateString(template, context) {
@@ -353,10 +351,7 @@ function buildContext(homeDir, scenario, sessionId, cwd) {
 
   for (const sessionDefinition of scenario.sessions || []) {
     const resolvedSessionId = resolveTemplateString(sessionDefinition.sessionIdTemplate, context);
-    const resolvedCwd = resolveTemplateString(
-      sessionDefinition.cwdTemplate || '{{cwd}}',
-      context,
-    );
+    const resolvedCwd = resolveTemplateString(sessionDefinition.cwdTemplate || '{{cwd}}', context);
     const resolvedTranscriptPath = sessionDefinition.transcriptPathTemplate
       ? resolveTemplateString(sessionDefinition.transcriptPathTemplate, context)
       : undefined;
@@ -441,7 +436,11 @@ async function emitHook(homeDir, context, payload) {
   for (const entry of entries) {
     const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
     for (const hook of hooks) {
-      if (hook?.type !== 'command' || typeof hook.command !== 'string' || hook.command.length === 0) {
+      if (
+        hook?.type !== 'command' ||
+        typeof hook.command !== 'string' ||
+        hook.command.length === 0
+      ) {
         continue;
       }
       if (!isPixelAgentsHookCommand(homeDir, hook.command)) {
@@ -592,6 +591,25 @@ async function main() {
   };
 
   logInvocation(homeDir, sessionId, cwd, process.argv.slice(2));
+
+  // Office consoles (pty): echo what the user types, so e2e can see the
+  // keystrokes reached "claude". Line-based: one reply per Enter.
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode?.(false);
+    let line = '';
+    process.stdin.on('data', (chunk) => {
+      const text = chunk.toString();
+      logAction(homeDir, `stdin ${JSON.stringify(text)}`);
+      line += text;
+      const parts = line.split(/\r|\n/);
+      line = parts.pop() || '';
+      for (const p of parts) {
+        if (p) process.stdout.write(`\r\nmock-claude recibió: ${p}\r\n`);
+      }
+    });
+    process.stdout.write('mock-claude listo\r\n');
+  }
+
   if (IS_EXTERNAL) {
     externalTag = tinySessionTag(sessionId);
     process.stdout.write(
@@ -607,12 +625,11 @@ async function main() {
   await playScenario(homeDir, scenario, context);
 }
 
-main()
-  .catch((error) => {
-    const homeDir = os.homedir();
-    logAction(
-      homeDir,
-      `error ${error instanceof Error ? error.stack || error.message : String(error)}`,
-    );
-    process.exitCode = 1;
-  });
+main().catch((error) => {
+  const homeDir = os.homedir();
+  logAction(
+    homeDir,
+    `error ${error instanceof Error ? error.stack || error.message : String(error)}`,
+  );
+  process.exitCode = 1;
+});

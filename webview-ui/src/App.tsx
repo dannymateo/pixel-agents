@@ -16,7 +16,12 @@ import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
 import { ZoomControls } from './components/ZoomControls.js';
-import { CONVERSATION_MAX_MS, CONVERSATION_TYPE_CPS } from './constants.js';
+import {
+  CHARACTER_HIT_HEIGHT,
+  CHARACTER_SITTING_OFFSET_PX,
+  CONVERSATION_MAX_MS,
+  CONVERSATION_TYPE_CPS,
+} from './constants.js';
 import { useEditorActions } from './hooks/useEditorActions.js';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
@@ -35,7 +40,7 @@ import { isMonitorType, monitorSeat } from './office/layout/monitorOwner.js';
 import { LivingOfficeController } from './office/living/livingOfficeController.js';
 import { overlayProjection } from './office/projection.js';
 import { getPetCount } from './office/sprites/petSpriteData.js';
-import { EditTool, type OfficeLayout, TILE_SIZE } from './office/types.js';
+import { CharacterState, EditTool, type OfficeLayout, TILE_SIZE } from './office/types.js';
 import { isBrowserRuntime, isE2E } from './runtime.js';
 import { installTestHooks } from './testHooks.js';
 import { transport } from './transport/index.js';
@@ -333,6 +338,34 @@ function App() {
       return {
         x: rect.left + project.toScreenX((best.col + 0.5) * TILE_SIZE),
         y: rect.top + project.toScreenY((best.row + 0.5) * TILE_SIZE),
+      };
+    };
+    hooks.characterClientPoint = (agentId) => {
+      const os = getOfficeState();
+      const ch = os.characters.get(agentId);
+      const seat = ch?.seatId ? os.seats.get(ch.seatId) : undefined;
+      const container = containerRef.current;
+      if (!ch || !seat || !container) return null;
+      // Only once it sits: a walking character's sprite position is a moving
+      // target between computing this point and the click landing.
+      const seated =
+        ch.path.length === 0 && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+      if (!seated) return null;
+      const rect = container.getBoundingClientRect();
+      const project = overlayProjection(
+        os.getLayout(),
+        rect,
+        editorZoom,
+        editorPanRef.current,
+        window.devicePixelRatio || 1,
+      );
+      // Mirrors OfficeState.getCharacterAt's hit box: centered on ch.x, spanning
+      // CHARACTER_HIT_HEIGHT up from the (sitting-adjusted) bottom anchor.
+      const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
+      const anchorY = ch.y + sittingOffset;
+      return {
+        x: rect.left + project.toScreenX(ch.x),
+        y: rect.top + project.toScreenY(anchorY - CHARACTER_HIT_HEIGHT / 2),
       };
     };
   }, [

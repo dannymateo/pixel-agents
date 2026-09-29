@@ -71,6 +71,11 @@ declare global {
        *  click; null while the agent is not sitting at its desk, or has no
        *  monitor. */
       monitorClientPoint?: (agentId: number) => { x: number; y: number } | null;
+      /** Viewport point centered on an agent's own sprite hit-box, for a real
+       *  mouse click on the character (the production click path re-opens its
+       *  office console); null while the agent is not seated (still walking
+       *  in, so its sprite position is not stable enough to click). */
+      characterClientPoint?: (agentId: number) => { x: number; y: number } | null;
       editorEraseAction?: (col: number, row: number) => void;
       getPets?: () => Array<{
         id: string;

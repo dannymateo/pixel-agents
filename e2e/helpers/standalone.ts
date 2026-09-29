@@ -52,6 +52,10 @@ export interface LaunchStandaloneOptions {
    *  they are the only ones that want the dialog. Never overwrites a
    *  config.json that already exists (a shared HOME was seeded by its owner). */
   seedHooksConsent?: boolean;
+  /** Point office consoles ("+ Agent") at the mock-claude runner instead of the
+   *  real `claude` binary, via `PIXEL_AGENTS_CLAUDE_COMMAND`. Required by any
+   *  spec that launches an agent from the browser's LaunchDialog. */
+  mockClaudeConsoles?: boolean;
 }
 
 function delay(ms: number): Promise<void> {
@@ -107,6 +111,7 @@ function spawnStandaloneHost(args: {
   homeDir: string;
   hostPort: number;
   workspaceDir: string;
+  mockClaudeConsoles?: boolean;
 }): ChildProcessWithoutNullStreams {
   if (!fs.existsSync(STANDALONE_CLI)) {
     throw new Error(
@@ -122,6 +127,11 @@ function spawnStandaloneHost(args: {
         ...process.env,
         HOME: args.homeDir,
         USERPROFILE: args.homeDir,
+        ...(args.mockClaudeConsoles
+          ? {
+              PIXEL_AGENTS_CLAUDE_COMMAND: JSON.stringify([process.execPath, MOCK_CLAUDE_RUNNER]),
+            }
+          : {}),
       },
       stdio: 'pipe',
     },
@@ -254,7 +264,12 @@ export async function launchStandalone(
   let hostStdout = '';
   let hostStderr = '';
   function spawnAndAttach(): ChildProcessWithoutNullStreams {
-    const proc = spawnStandaloneHost({ homeDir: tmpHome, hostPort, workspaceDir });
+    const proc = spawnStandaloneHost({
+      homeDir: tmpHome,
+      hostPort,
+      workspaceDir,
+      mockClaudeConsoles: options.mockClaudeConsoles,
+    });
     proc.stdout.on('data', (chunk) => {
       hostStdout += chunk.toString();
     });

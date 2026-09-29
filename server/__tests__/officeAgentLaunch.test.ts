@@ -236,6 +236,25 @@ describe('AgentRuntime.launchOfficeAgent', () => {
       expect(spawned.length).toBe(0);
     });
 
+    it('refuses a relative transcript cwd even when a same-named folder exists relative to the process cwd', () => {
+      // Regression for the resume branch skipping the `path.isAbsolute` guard
+      // the fresh-launch branch already has: without it, a relative cwd
+      // resolves against the SERVER's process.cwd(), not the session's real
+      // folder, and could pass the directory check by pure coincidence.
+      const trap = path.join(process.cwd(), 'pxl-relative-cwd-trap');
+      fs.mkdirSync(trap, { recursive: true });
+      try {
+        seedTranscript('pxl-relative-cwd-trap');
+        expect(() => runtime.launchOfficeAgent({ resumeSessionId: SID })).toThrow(
+          /no longer exists/,
+        );
+        expect(store.size).toBe(0);
+        expect(spawned.length).toBe(0);
+      } finally {
+        fs.rmSync(trap, { recursive: true, force: true });
+      }
+    });
+
     it('refuses an unsafe session id without reading outside the roots', () => {
       expect(() => runtime.launchOfficeAgent({ resumeSessionId: '../x' })).toThrow(
         /Unknown session/,

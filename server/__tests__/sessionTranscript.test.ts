@@ -42,6 +42,76 @@ it('the title is the first user text prompt, one line, bounded', () => {
   expect(t.length).toBeLessThanOrEqual(120);
 });
 
+it('skips isMeta records when picking the title', () => {
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', isMeta: true, message: { content: 'caveat: be careful' } }) +
+      line({ type: 'user', message: { content: 'arregla el login' } }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
+it('skips isCompactSummary records when picking the title', () => {
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', isCompactSummary: true, message: { content: 'resumen previo' } }) +
+      line({ type: 'user', message: { content: 'arregla el login' } }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
+it('skips local-command text when picking the title', () => {
+  fs.writeFileSync(
+    file,
+    line({
+      type: 'user',
+      message: { content: '<local-command-stdout>ok</local-command-stdout>' },
+    }) + line({ type: 'user', message: { content: 'arregla el login' } }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
+it('skips system-reminder text when picking the title', () => {
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', message: { content: '<system-reminder>caveat text</system-reminder>' } }) +
+      line({ type: 'user', message: { content: 'arregla el login' } }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
+it('a slash command with args uses the command-args text', () => {
+  fs.writeFileSync(
+    file,
+    line({
+      type: 'user',
+      message: {
+        content:
+          '<command-name>/equipo</command-name>\n' +
+          '<command-message>equipo</command-message>\n' +
+          '<command-args>arregla el login</command-args>',
+      },
+    }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
+it('a slash command with empty args is skipped, keeps looking for the next prompt', () => {
+  fs.writeFileSync(
+    file,
+    line({
+      type: 'user',
+      message: {
+        content:
+          '<command-name>/clear</command-name>\n' +
+          '<command-message>clear</command-message>\n' +
+          '<command-args></command-args>',
+      },
+    }) + line({ type: 'user', message: { content: 'arregla el login' } }),
+  );
+  expect(readSessionTitle(file)).toBe('arregla el login');
+});
+
 it('missing file or no cwd → undefined', () => {
   expect(readSessionCwd(path.join(root, 'nope.jsonl'))).toBeUndefined();
   fs.writeFileSync(file, line({ type: 'user', message: { content: 'hola' } }));

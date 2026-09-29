@@ -137,11 +137,21 @@ function firstUserText(content: unknown): string | undefined {
   return undefined;
 }
 
+/** Extracts the `<command-args>` block's text from a slash-command record's
+ *  raw content (e.g. `/equipo arregla el login` -> "arregla el login"). */
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+
 /**
  * First user text prompt in the transcript, read from at most the first
  * `SESSION_HEAD_READ_BYTES` of the file: sanitized, collapsed to one line,
  * and bounded to `SESSION_TITLE_MAX_CHARS`. Undefined when the file is
  * missing, unreadable, or carries no user text prompt within that window.
+ *
+ * Skips records that are not a real user prompt: `isMeta`/`isCompactSummary`
+ * injected records, and caveat/local-command text (`<local-command-...`,
+ * `<system-reminder...`). A slash-command record (`<command-...`) yields its
+ * `<command-args>` text when non-empty (e.g. `/equipo arregla el login` ->
+ * "arregla el login"); otherwise it is skipped and the search continues.
  */
 export function readSessionTitle(jsonlFile: string): string | undefined {
   const head = readHead(jsonlFile, SESSION_HEAD_READ_BYTES);
@@ -157,10 +167,21 @@ export function readSessionTitle(jsonlFile: string): string | undefined {
       continue; // possibly a partial trailing line within the window
     }
     if (record.type !== 'user') continue;
+    if (record.isMeta === true || record.isCompactSummary === true) continue;
     const message = record.message as Record<string, unknown> | undefined;
     const text = firstUserText(message?.content);
     if (text === undefined) continue;
-    const oneLine = sanitizeFeedText(text).replace(/\s+/g, ' ').trim();
+    const leading = text.trimStart();
+    if (leading.startsWith('<local-command-') || leading.startsWith('<system-reminder')) {
+      continue;
+    }
+    let candidate = text;
+    if (leading.startsWith('<command-')) {
+      const args = COMMAND_ARGS_RE.exec(text)?.[1]?.trim();
+      if (!args) continue; // no usable args -- keep looking for the next real prompt
+      candidate = args;
+    }
+    const oneLine = sanitizeFeedText(candidate).replace(/\s+/g, ' ').trim();
     if (!oneLine) continue;
     return oneLine.slice(0, SESSION_TITLE_MAX_CHARS);
   }

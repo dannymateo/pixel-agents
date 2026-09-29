@@ -465,7 +465,10 @@ export class AgentRuntime {
       const sessionCwd = readSessionCwd(jsonl);
       let isDir = false;
       try {
-        isDir = sessionCwd !== undefined && fs.statSync(sessionCwd).isDirectory();
+        isDir =
+          sessionCwd !== undefined &&
+          path.isAbsolute(sessionCwd) &&
+          fs.statSync(sessionCwd).isDirectory();
       } catch {
         isDir = false;
       }

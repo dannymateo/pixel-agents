@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Button } from '../../components/ui/Button.js';
+import { closeClickStep } from '../../console/closeConfirm.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
   CONTEXT_CRITICAL_THRESHOLD,
@@ -102,6 +103,9 @@ export function ToolOverlay({
   canOpenScreen,
 }: ToolOverlayProps) {
   const [, setTick] = useState(0);
+  // The agent whose × asked "close?" (office consoles only). Only meaningful
+  // while that agent stays selected: deselecting drops the question.
+  const [confirmCloseId, setConfirmCloseId] = useState<number | null>(null);
   useEffect(() => {
     let rafId = 0;
     const tick = () => {
@@ -123,6 +127,9 @@ export function ToolOverlay({
   );
 
   const selectedId = officeState.selectedAgentId;
+  // Deselecting (or selecting someone else) drops a pending "close?" question,
+  // so re-selecting the agent later starts from the plain × again.
+  if (confirmCloseId !== null && selectedId !== confirmCloseId) setConfirmCloseId(null);
   const hoveredId = officeState.hoveredAgentId;
 
   // All character IDs
@@ -283,18 +290,44 @@ export function ToolOverlay({
                   Ver pantalla
                 </Button>
               )}
+              {isSelected && !isSub && confirmCloseId === id && (
+                <span className="ml-2 text-sm leading-none text-danger" data-testid="close-confirm">
+                  ¿Cerrar? Esto termina la sesión
+                </span>
+              )}
+              {isSelected && !isSub && confirmCloseId === id && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmCloseId(null);
+                  }}
+                  title="No cerrar"
+                  className="ml-2 shrink-0 leading-none"
+                  data-testid="close-cancel"
+                >
+                  No
+                </Button>
+              )}
               {isSelected && !isSub && (
                 <Button
                   variant="ghost"
-                  size="icon"
+                  size={confirmCloseId === id ? 'sm' : 'icon'}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (closeClickStep(!!ch.terminalId, confirmCloseId === id) === 'ask') {
+                      setConfirmCloseId(id);
+                      return;
+                    }
+                    setConfirmCloseId(null);
                     onCloseAgent(id);
                   }}
-                  title="Close agent"
-                  className="ml-2 shrink-0 leading-none"
+                  title={confirmCloseId === id ? 'Cerrar y terminar la sesión' : 'Close agent'}
+                  className={`ml-2 shrink-0 leading-none ${confirmCloseId === id ? 'text-danger' : ''}`}
+                  data-testid="agent-close"
                 >
-                  ×
+                  {confirmCloseId === id ? 'Cerrar' : '×'}
                 </Button>
               )}
             </div>

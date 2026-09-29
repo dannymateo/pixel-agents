@@ -9,6 +9,7 @@ import { launchStandalone } from '../../helpers/standalone';
 interface ConsoleTestWindow {
   __pixelAgentsTestHooks?: {
     characterClientPoint?: (agentId: number) => { x: number; y: number } | null;
+    selectAgent?: (agentId: number) => void;
   };
 }
 
@@ -77,6 +78,20 @@ test.describe('Standalone / office console', () => {
       await expect(console).toContainText('mock-claude recibió: hola oficina', {
         timeout: 10_000,
       });
+      await page.getByRole('button', { name: 'Cerrar consola' }).click();
+
+      // Closing the agent from the office kills a live claude: the × asks
+      // first, and only the confirmation closes it (spec §2).
+      await page.evaluate((id) => {
+        const hooks = (window as unknown as ConsoleTestWindow).__pixelAgentsTestHooks;
+        hooks?.selectAgent?.(id);
+      }, agentId);
+      const overlay = page.locator(`[data-testid="agent-overlay"][data-agent-id="${agentId}"]`);
+      await overlay.locator('button[title="Close agent"]').click();
+      await expect(overlay.getByTestId('close-confirm')).toBeVisible();
+      await expect(overlay).toHaveCount(1);
+      await overlay.getByTestId('agent-close').click();
+      await expect(overlay).toHaveCount(0, { timeout: 10_000 });
     } finally {
       await session.cleanup();
     }

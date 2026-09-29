@@ -41,9 +41,9 @@ destroys work the office does not own.
 - A brought-in agent's sub-agents still have no session or console of their
   own (docs/adr/0002); they are addressed through their root's console exactly
   as before the takeover.
-- Because the id, character, and seat never change, a resumed agent survives a
-  server restart the same way an office-launched one does — the console just
-  reconnects to the same persisted agent.
+- The same `--resume` path backs **Resume** in the launch dialog's recent
+  sessions, which is also how consoles come back after a server restart: a
+  console's pseudo-terminal dies with the server, but its session does not.
 - The office still cannot write into a session left running somewhere else
   without moving it here first. Answering its permissions in place, without a
   takeover, is the permission bridge — still the next phase.

@@ -1075,10 +1075,10 @@ describe('clientMessageHandler: office consoles', () => {
   });
 
   it('a viewer is told consoles are unavailable and gets no launch options', () => {
-    handleClientMessage({ type: 'webviewReady' }, (m) => sent.push(m), {
-      ...ctx(false),
-      runtime: undefined,
-    });
+    // The runtime HAS a pty host here: only the privilege check keeps it hidden.
+    expect(runtime.ptyHost).toBeTruthy();
+    dispatch({ type: 'webviewReady' }, ctx(false, 'v1'));
+    expect(sent.some((m) => m.type === 'providerCapabilities')).toBe(true);
     expect(sent.find((m) => m.type === 'providerCapabilities')?.terminals).toBeFalsy();
     expect(sent.some((m) => m.type === 'launchOptions')).toBe(false);
   });

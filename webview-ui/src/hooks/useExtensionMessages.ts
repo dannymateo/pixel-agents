@@ -141,6 +141,11 @@ interface ExtensionMessageState {
     projects: LaunchOptionsProject[];
     recentSessions: LaunchOptionsSession[];
   } | null;
+  /** The last `launchAgent` failure's message, or null. Owned here (not the
+   *  dialog) so a launch started before Cancel still reports correctly; the
+   *  dialog shows it while open, then it's cleared on the next open. */
+  launchError: string | null;
+  clearLaunchError: () => void;
   /** Who is waiting on the user right now, and why (spec §3 "Te esperan"). */
   attention: AttentionEntry[];
 }
@@ -177,6 +182,10 @@ export function useExtensionMessages(
   isEditDirty?: () => boolean,
   livingOffice?: LivingOfficeController,
   conversations?: ConversationDirector,
+  /** Called on a successful `launchResult` (spec §2). The listener lives here
+   *  rather than in LaunchDialog so a launch started before the dialog is
+   *  cancelled still opens its console when the result arrives. */
+  onAgentLaunched?: (agentId: number, terminalId: string) => void,
 ): ExtensionMessageState {
   // The living office (docs/adr/0003): tree, composition and derived agents'
   // lives. App shares its instance with the editor; standalone use gets its own.
@@ -226,6 +235,8 @@ export function useExtensionMessages(
     projects: LaunchOptionsProject[];
     recentSessions: LaunchOptionsSession[];
   } | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const clearLaunchError = useCallback(() => setLaunchError(null), []);
   // One tracker for the component's lifetime; `attention` mirrors its list()
   // so React re-renders on every change without re-deriving it from scratch.
   const attentionTrackerRef = useRef<AttentionTracker | null>(null);
@@ -338,6 +349,20 @@ export function useExtensionMessages(
             projects: (msg.projects as unknown[]).filter(isProject),
             recentSessions: (msg.recentSessions as unknown[]).filter(isSession),
           });
+        }
+        return;
+      }
+
+      if (msg.type === 'launchResult') {
+        if (
+          msg.ok === true &&
+          typeof msg.agentId === 'number' &&
+          typeof msg.terminalId === 'string'
+        ) {
+          setLaunchError(null);
+          onAgentLaunched?.(msg.agentId, msg.terminalId);
+        } else {
+          setLaunchError(typeof msg.error === 'string' ? msg.error : 'No se pudo lanzar');
         }
         return;
       }
@@ -1007,6 +1032,8 @@ export function useExtensionMessages(
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
+    launchError,
+    clearLaunchError,
     attention,
   };
 }

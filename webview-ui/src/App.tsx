@@ -128,6 +128,21 @@ function App() {
     [editor.isEditMode, editor.isDirty],
   );
 
+  // The office console (spec §2): a launched-agent's real `claude` terminal,
+  // rendered in xterm.js. Only agents with a `terminalId` (standalone browser,
+  // launched via the dialog below) ever open one. Declared ahead of
+  // useExtensionMessages so its launchResult listener (below) can open the
+  // console straight away, even if the dialog that started the launch was
+  // already cancelled.
+  const [consoleTerminal, setConsoleTerminal] = useState<{ id: string; title: string } | null>(
+    null,
+  );
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const handleAgentLaunched = useCallback((agentId: number, terminalId: string) => {
+    setLaunchOpen(false);
+    setConsoleTerminal({ id: terminalId, title: `Agente #${agentId}` });
+  }, []);
+
   const {
     agents,
     selectedAgent,
@@ -162,6 +177,8 @@ function App() {
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
+    launchError,
+    clearLaunchError,
     attention,
   } = useExtensionMessages(
     getOfficeState,
@@ -169,6 +186,7 @@ function App() {
     isEditDirty,
     livingOffice,
     conversations,
+    handleAgentLaunched,
   );
 
   // Show migration notice once layout reset is detected
@@ -195,18 +213,10 @@ function App() {
   );
   const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
 
-  // The office console (spec §2): a launched-agent's real `claude` terminal,
-  // rendered in xterm.js. Only agents with a `terminalId` (standalone browser,
-  // launched via the dialog below) ever open one.
-  const [consoleTerminal, setConsoleTerminal] = useState<{ id: string; title: string } | null>(
-    null,
-  );
-  const [launchOpen, setLaunchOpen] = useState(false);
-  const handleOpenLaunchDialog = useCallback(() => setLaunchOpen(true), []);
-  const handleLaunched = useCallback((agentId: number, terminalId: string) => {
-    setLaunchOpen(false);
-    setConsoleTerminal({ id: terminalId, title: `Agente #${agentId}` });
-  }, []);
+  const handleOpenLaunchDialog = useCallback(() => {
+    clearLaunchError();
+    setLaunchOpen(true);
+  }, [clearLaunchError]);
   const handleCloseConsole = useCallback(() => setConsoleTerminal(null), []);
 
   const currentMajorMinor = toMajorMinor(extensionVersion);
@@ -847,12 +857,12 @@ function App() {
         />
       )}
 
-      {launchOpen && launchOptions && (
+      {launchOpen && (
         <LaunchDialog
-          projects={launchOptions.projects}
+          launchOptions={launchOptions}
           transport={transport}
           onClose={() => setLaunchOpen(false)}
-          onLaunched={handleLaunched}
+          launchError={launchError}
         />
       )}
 

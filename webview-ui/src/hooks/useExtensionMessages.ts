@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { HooksConsentRequest } from '../../../core/src/messages.js';
+import type {
+  HooksConsentRequest,
+  MachineProject as LaunchOptionsProject,
+  RecentSession as LaunchOptionsSession,
+} from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { AttentionEntry } from '../office/attention.js';
 import { AttentionTracker } from '../office/attention.js';
@@ -131,8 +135,12 @@ interface ExtensionMessageState {
   /** Whether the connected provider can launch real office consoles
    *  (providerCapabilities.terminals). Gates "+ Agent" in the standalone browser. */
   consoleCapable: boolean;
-  /** Defaults for the launch dialog (launchOptions), or null before the server reports them. */
-  launchOptions: { defaultCwd: string; recentDirs: string[] } | null;
+  /** Projects and recent sessions for the launch dialog (launchOptions), or
+   *  null before the server reports them. */
+  launchOptions: {
+    projects: LaunchOptionsProject[];
+    recentSessions: LaunchOptionsSession[];
+  } | null;
   /** Who is waiting on the user right now, and why (spec §3 "Te esperan"). */
   attention: AttentionEntry[];
 }
@@ -215,8 +223,8 @@ export function useExtensionMessages(
   const [loungeToLeaveMinutes, setLoungeToLeaveMinutes] = useState<number | null>(null);
   const [consoleCapable, setConsoleCapable] = useState(false);
   const [launchOptions, setLaunchOptions] = useState<{
-    defaultCwd: string;
-    recentDirs: string[];
+    projects: LaunchOptionsProject[];
+    recentSessions: LaunchOptionsSession[];
   } | null>(null);
   // One tracker for the component's lifetime; `attention` mirrors its list()
   // so React re-renders on every change without re-deriving it from scratch.
@@ -305,12 +313,29 @@ export function useExtensionMessages(
       }
 
       if (msg.type === 'launchOptions') {
-        if (typeof msg.defaultCwd === 'string' && Array.isArray(msg.recentDirs)) {
+        if (Array.isArray(msg.projects) && Array.isArray(msg.recentSessions)) {
+          const isProject = (p: unknown): p is LaunchOptionsProject => {
+            const o = p as Record<string, unknown> | null;
+            return (
+              !!o &&
+              typeof o.cwd === 'string' &&
+              typeof o.name === 'string' &&
+              typeof o.lastUsed === 'number'
+            );
+          };
+          const isSession = (s: unknown): s is LaunchOptionsSession => {
+            const o = s as Record<string, unknown> | null;
+            return (
+              !!o &&
+              typeof o.sessionId === 'string' &&
+              typeof o.cwd === 'string' &&
+              typeof o.name === 'string' &&
+              typeof o.lastUsed === 'number'
+            );
+          };
           setLaunchOptions({
-            defaultCwd: msg.defaultCwd as string,
-            recentDirs: (msg.recentDirs as unknown[]).filter(
-              (d): d is string => typeof d === 'string',
-            ),
+            projects: (msg.projects as unknown[]).filter(isProject),
+            recentSessions: (msg.recentSessions as unknown[]).filter(isSession),
           });
         }
         return;

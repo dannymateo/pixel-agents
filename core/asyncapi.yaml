@@ -168,6 +168,7 @@ components:
         - $ref: '#/components/schemas/TerminalInput'
         - $ref: '#/components/schemas/TerminalResize'
         - $ref: '#/components/schemas/TerminalClose'
+        - $ref: '#/components/schemas/RequestLaunchOptions'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -1014,19 +1015,24 @@ components:
           type: string
 
     LaunchOptions:
-      description: Defaults for the launch dialog (privileged connections only).
+      description: >-
+        Projects and sessions for the launch dialog (privileged connections
+        only): machine-wide project folders (most recently used first) and
+        individual sessions available to resume.
       type: object
       additionalProperties: false
-      required: [type, defaultCwd, recentDirs]
+      required: [type, projects, recentSessions]
       properties:
         type:
           const: launchOptions
-        defaultCwd:
-          type: string
-        recentDirs:
+        projects:
           type: array
           items:
-            type: string
+            $ref: '#/components/schemas/MachineProject'
+        recentSessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentSession'
 
     # ── Client message variants ────────────────────────────────────
 
@@ -1042,7 +1048,10 @@ components:
     LaunchAgent:
       description: >-
         Launch a new Claude agent (VS Code: in a terminal; standalone: in an
-        office console, folderPath = its working directory).
+        office console, folderPath = its working directory), or resume an
+        existing machine session (standalone only; resumeSessionId wins over
+        folderPath, whose cwd the server resolves from that session's own
+        transcript).
       type: object
       additionalProperties: false
       required: [type]
@@ -1054,6 +1063,11 @@ components:
           description: Workspace folder path (for multi-root workspaces).
         bypassPermissions:
           type: boolean
+        resumeSessionId:
+          type: string
+          description: >-
+            Resume this machine session instead of starting a new one
+            (standalone office consoles only). Ignores folderPath.
 
     FocusAgent:
       description: Focus an agent's terminal.
@@ -1415,7 +1429,55 @@ components:
         minutes:
           type: integer
 
+    RequestLaunchOptions:
+      description: >-
+        Refresh the launch dialog's machine projects and recent sessions
+        (privileged; answered with launchOptions).
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          const: requestLaunchOptions
+
     # ── Supporting schemas ─────────────────────────────────────────
+
+    MachineProject:
+      description: >-
+        A folder where Claude has been used on this machine, for the launch
+        dialog's project picker. Not a message on its own.
+      type: object
+      additionalProperties: false
+      required: [cwd, name, lastUsed]
+      properties:
+        cwd:
+          type: string
+        name:
+          type: string
+        lastUsed:
+          type: integer
+          description: Epoch ms of the most recently modified transcript for this cwd.
+
+    RecentSession:
+      description: >-
+        An individual session transcript on this machine, available to resume
+        from the launch dialog. Not a message on its own.
+      type: object
+      additionalProperties: false
+      required: [sessionId, cwd, name, lastUsed]
+      properties:
+        sessionId:
+          type: string
+        cwd:
+          type: string
+        name:
+          type: string
+        lastUsed:
+          type: integer
+          description: Epoch ms of the transcript's mtime.
+        title:
+          type: string
+          description: Start of the session's first user prompt, sanitized and bounded.
 
     FeedEntry:
       description: One line of an agent's activity feed (assistant text, a tool call, or a tool result).

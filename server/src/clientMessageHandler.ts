@@ -1,4 +1,6 @@
-import type { AgentSeatMeta } from '../../core/src/messages.js';
+import * as path from 'path';
+
+import type { AgentSeatMeta, MachineProject } from '../../core/src/messages.js';
 import type { HookProvider } from '../../core/src/provider.js';
 import { resendAgentActivity } from './agentActivityResend.js';
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
@@ -32,6 +34,11 @@ import type { ConsentEffects } from './providers/hook/consentExecutor.js';
 import { applyConsentChoice } from './providers/hook/consentExecutor.js';
 import { hooksConsentRequest } from './providers/hook/consentGate.js';
 import { claudeProvider, hookProviderById, hookProviders } from './providers/index.js';
+import {
+  cwdDedupeKey,
+  listMachineProjects,
+  listRecentSessions,
+} from './terminals/machineSessions.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
 
@@ -167,19 +174,32 @@ export function handleClientMessage(
         send({ type: 'launchResult', ok: false, error: 'Office consoles are not available' });
         break;
       }
-      const cwd =
-        typeof msg.folderPath === 'string' && msg.folderPath ? msg.folderPath : process.cwd();
+      const resumeSessionId =
+        typeof msg.resumeSessionId === 'string' && msg.resumeSessionId
+          ? msg.resumeSessionId
+          : undefined;
+      const cwd = typeof msg.folderPath === 'string' && msg.folderPath ? msg.folderPath : undefined;
+      // resumeSessionId wins and ignores folderPath entirely (its cwd comes
+      // from the session's own transcript, never the client). Without it,
+      // folderPath is mandatory: falling back to process.cwd() here silently
+      // launched in the standalone service's own folder (C:\ on Windows).
+      if (!resumeSessionId && !cwd) {
+        send({ type: 'launchResult', ok: false, error: 'Choose a folder' });
+        break;
+      }
       try {
         const { agentId, terminalId } = runtime.launchOfficeAgent({
-          cwd,
+          cwd: resumeSessionId ? undefined : cwd,
+          resumeSessionId,
           bypassPermissions: msg.bypassPermissions === true,
         });
         // launchOfficeAgent canonicalizes cwd internally (fs.realpathSync.native)
         // but doesn't hand the result back on AgentState (its projectDir is the
         // hashed transcript directory, not the folder itself) -- the requested
         // cwd is the only folder path available here, and it's what the recents
-        // list should offer back to the launch dialog.
-        addRecentLaunchDir(cwd);
+        // list should offer back to the launch dialog. A resumed session isn't
+        // a fresh launch dir choice -- it's already in the machine sessions list.
+        if (!resumeSessionId && cwd) addRecentLaunchDir(cwd);
         send({ type: 'launchResult', ok: true, agentId, terminalId });
       } catch (err) {
         send({
@@ -188,6 +208,13 @@ export function handleClientMessage(
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      break;
+    }
+
+    case 'requestLaunchOptions': {
+      // Privileged already enforced by the central gate (not in
+      // VIEWER_MESSAGES); office consoles additionally need a live PtyHost.
+      if (runtime?.ptyHost) send(buildLaunchOptions(ctx));
       break;
     }
 
@@ -561,6 +588,41 @@ function standaloneConsentEffects(
   };
 }
 
+/**
+ * `launchOptions` (spec §2): the launch dialog's project picker and its
+ * "resume a recent session" list. `projects` is the union of this server's
+ * own recent launch folders (first, `lastUsed: 0` — they carry no mtime of
+ * their own) and every machine-wide project folder (`listMachineProjects`),
+ * deduped by cwd so a folder already launched from doesn't show twice.
+ * `recentSessions` excludes sessions with a live agent in the store already
+ * (nothing to resume there — it's already in the office).
+ */
+function buildLaunchOptions(ctx: ClientMessageContext): {
+  type: 'launchOptions';
+  projects: MachineProject[];
+  recentSessions: ReturnType<typeof listRecentSessions>;
+} {
+  const roots = claudeProvider.getAllSessionRoots?.() ?? [];
+
+  const byCwd = new Map<string, MachineProject>();
+  for (const cwd of readRecentLaunchDirs()) {
+    byCwd.set(cwdDedupeKey(cwd), { cwd, name: path.basename(cwd), lastUsed: 0 });
+  }
+  for (const project of listMachineProjects(roots)) {
+    const key = cwdDedupeKey(project.cwd);
+    if (!byCwd.has(key)) byCwd.set(key, project);
+  }
+
+  const liveSessionIds = new Set<string>();
+  for (const agent of ctx.store.values()) liveSessionIds.add(agent.sessionId);
+
+  return {
+    type: 'launchOptions',
+    projects: [...byCwd.values()],
+    recentSessions: listRecentSessions(roots, { exclude: liveSessionIds }),
+  };
+}
+
 /** The effective living-office timings (`livingOfficeSettings`): the
  *  runtime's when there is one, else the persisted settings, clamped. */
 function livingOfficeSettings(ctx: ClientMessageContext): Record<string, unknown> {
@@ -593,7 +655,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     terminals,
   });
   if (terminals) {
-    send({ type: 'launchOptions', defaultCwd: process.cwd(), recentDirs: readRecentLaunchDirs() });
+    send(buildLaunchOptions(ctx));
   }
 
   // 2. Assets (from server cache, loaded at startup via pngjs)

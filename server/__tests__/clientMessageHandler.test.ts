@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -18,6 +19,7 @@ import {
   LOUNGE_TO_LEAVE_MINUTES_MAX,
   LOUNGE_TO_LEAVE_MINUTES_MIN,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
+  RECENT_SESSION_LIVE_WINDOW_MS,
 } from '../src/constants.js';
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
@@ -963,6 +965,10 @@ describe('clientMessageHandler: an untokened viewer cannot change anything', () 
   });
 });
 
+/** Long enough ago to sit outside RECENT_SESSION_LIVE_WINDOW_MS (listRecentSessions
+ *  otherwise treats a just-written transcript as probably still open elsewhere). */
+const OLD_ENOUGH_MS = RECENT_SESSION_LIVE_WINDOW_MS + 5 * 60_000;
+
 describe('clientMessageHandler: office consoles', () => {
   let tempHome: string;
   let store: AgentStateStore;
@@ -970,6 +976,29 @@ describe('clientMessageHandler: office consoles', () => {
   let sent: Array<Record<string, unknown>>;
   let written: string[];
   let workDir: string;
+  let spawnCalls: Array<{ file: string; args: string[]; cwd: string }>;
+
+  /** A synthetic top-level session transcript under this test's HOME, in the
+   *  shape claudeProvider.getAllSessionRoots() (~/.claude/projects) reads: one
+   *  `cwd`-carrying JSONL record, aged past RECENT_SESSION_LIVE_WINDOW_MS by
+   *  default so listRecentSessions doesn't exclude it as still-open. */
+  function writeSyntheticSession(
+    sessionId: string,
+    opts: { cwd: string; text?: string; mtimeMsAgo?: number },
+  ): string {
+    const projectDir = path.join(tempHome, '.claude', 'projects', 'synthetic-project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const file = path.join(projectDir, `${sessionId}.jsonl`);
+    const record = {
+      type: 'user',
+      cwd: opts.cwd,
+      message: { content: opts.text ?? 'hola oficina' },
+    };
+    fs.writeFileSync(file, `${JSON.stringify(record)}\n`);
+    const mtime = new Date(Date.now() - (opts.mtimeMsAgo ?? OLD_ENOUGH_MS));
+    fs.utimesSync(file, mtime, mtime);
+    return file;
+  }
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-console-'));
@@ -979,15 +1008,19 @@ describe('clientMessageHandler: office consoles', () => {
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
     runtime = new AgentRuntime(store, claudeProvider);
     written = [];
+    spawnCalls = [];
     runtime.attachPtyHost(
-      new PtyHost(() => ({
-        pid: 1,
-        onData: () => ({ dispose() {} }),
-        onExit: () => ({ dispose() {} }),
-        write: (d: string) => written.push(d),
-        resize: () => {},
-        kill: () => {},
-      })),
+      new PtyHost((file, args, opts) => {
+        spawnCalls.push({ file, args, cwd: opts.cwd });
+        return {
+          pid: 1,
+          onData: () => ({ dispose() {} }),
+          onExit: () => ({ dispose() {} }),
+          write: (d: string) => written.push(d),
+          resize: () => {},
+          kill: () => {},
+        };
+      }),
     );
     sent = [];
   });
@@ -1066,12 +1099,22 @@ describe('clientMessageHandler: office consoles', () => {
     expect(store.get(r.agentId as number)).toBeUndefined();
   });
 
-  it('webviewReady tells a privileged client it may launch, with the defaults', () => {
+  it('webviewReady tells a privileged client it may launch, with projects and recent sessions', () => {
+    const sessionId = crypto.randomUUID();
+    writeSyntheticSession(sessionId, { cwd: workDir, text: 'arregla el login' });
+
     dispatch({ type: 'webviewReady' });
+
     expect(sent.find((m) => m.type === 'providerCapabilities')).toMatchObject({ terminals: true });
-    expect(sent.find((m) => m.type === 'launchOptions')).toMatchObject({
-      defaultCwd: process.cwd(),
-    });
+    const launchOptions = sent.find((m) => m.type === 'launchOptions');
+    expect(launchOptions?.projects).toEqual(
+      expect.arrayContaining([expect.objectContaining({ cwd: workDir })]),
+    );
+    expect(launchOptions?.recentSessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId, cwd: workDir, title: 'arregla el login' }),
+      ]),
+    );
   });
 
   it('a viewer is told consoles are unavailable and gets no launch options', () => {
@@ -1081,5 +1124,65 @@ describe('clientMessageHandler: office consoles', () => {
     expect(sent.some((m) => m.type === 'providerCapabilities')).toBe(true);
     expect(sent.find((m) => m.type === 'providerCapabilities')?.terminals).toBeFalsy();
     expect(sent.some((m) => m.type === 'launchOptions')).toBe(false);
+  });
+
+  it('requestLaunchOptions answers a privileged client with launchOptions', () => {
+    const sessionId = crypto.randomUUID();
+    writeSyntheticSession(sessionId, { cwd: workDir });
+
+    dispatch({ type: 'requestLaunchOptions' });
+
+    const launchOptions = sent.find((m) => m.type === 'launchOptions');
+    expect(launchOptions).toBeTruthy();
+    expect(launchOptions?.recentSessions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ sessionId })]),
+    );
+  });
+
+  it('requestLaunchOptions from a viewer answers nothing (central gate)', () => {
+    dispatch({ type: 'requestLaunchOptions' }, ctx(false, 'v1'));
+    expect(sent).toEqual([]);
+  });
+
+  it('launchAgent with resumeSessionId resumes the session with --resume, ignoring folderPath', () => {
+    const sessionId = crypto.randomUUID();
+    writeSyntheticSession(sessionId, { cwd: workDir });
+
+    dispatch({ type: 'launchAgent', resumeSessionId: sessionId, folderPath: '/should/be/ignored' });
+
+    const result = sent.find((m) => m.type === 'launchResult')!;
+    expect(result.ok).toBe(true);
+    expect(store.get(result.agentId as number)?.sessionId).toBe(sessionId);
+    const spawn = spawnCalls.find((c) => c.args.includes(sessionId));
+    expect(spawn?.args).toEqual(expect.arrayContaining(['--resume', sessionId]));
+    expect(spawn?.cwd).toBe(fs.realpathSync.native(workDir));
+  });
+
+  it('launchAgent without folderPath or resumeSessionId answers "Choose a folder"', () => {
+    dispatch({ type: 'launchAgent' });
+    expect(sent.find((m) => m.type === 'launchResult')).toMatchObject({
+      ok: false,
+      error: 'Choose a folder',
+    });
+    expect(store.size).toBe(0);
+  });
+
+  it('recentSessions excludes a session with a live agent already in the store', () => {
+    const liveSessionId = crypto.randomUUID();
+    writeSyntheticSession(liveSessionId, { cwd: workDir });
+
+    // A live agent for that session, as if it had already been launched/adopted.
+    dispatch({ type: 'launchAgent', folderPath: workDir });
+    const launched = sent.find((m) => m.type === 'launchResult')!;
+    store.get(launched.agentId as number)!.sessionId = liveSessionId;
+    sent = [];
+
+    dispatch({ type: 'requestLaunchOptions' });
+    const launchOptions = sent.find((m) => m.type === 'launchOptions');
+    expect(
+      (launchOptions?.recentSessions as Array<{ sessionId: string }>).some(
+        (s) => s.sessionId === liveSessionId,
+      ),
+    ).toBe(false);
   });
 });

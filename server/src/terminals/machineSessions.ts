@@ -140,8 +140,10 @@ function listTopLevelTranscripts(roots: string[]): Array<{ file: string; mtimeMs
 }
 
 /** Case-insensitive on win32 (a case-only difference is the same folder
- *  there), exact everywhere else. */
-function cwdDedupeKey(cwd: string): string {
+ *  there), exact everywhere else. Exported so callers merging their own
+ *  cwd list against `listMachineProjects` (the launch dialog's `projects`,
+ *  clientMessageHandler.ts) dedupe the same way. */
+export function cwdDedupeKey(cwd: string): string {
   return process.platform === 'win32' ? cwd.toLowerCase() : cwd;
 }
 

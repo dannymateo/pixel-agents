@@ -6,26 +6,21 @@
  */
 import { useEffect, useState } from 'react';
 
+import type { MachineProject } from '../../../core/src/messages.js';
 import type { MessageTransport } from '../transport/types.js';
 import { Button } from './ui/Button.js';
 import { Modal } from './ui/Modal.js';
 
 export interface LaunchDialogProps {
-  defaultCwd: string;
-  recentDirs: string[];
+  /** Machine-wide project folders, most recently used first (launchOptions). */
+  projects: MachineProject[];
   transport: MessageTransport;
   onClose: () => void;
   onLaunched: (agentId: number, terminalId: string) => void;
 }
 
-export function LaunchDialog({
-  defaultCwd,
-  recentDirs,
-  transport,
-  onClose,
-  onLaunched,
-}: LaunchDialogProps) {
-  const [cwd, setCwd] = useState(recentDirs[0] ?? defaultCwd);
+export function LaunchDialog({ projects, transport, onClose, onLaunched }: LaunchDialogProps) {
+  const [cwd, setCwd] = useState(projects[0]?.cwd ?? '');
   const [bypass, setBypass] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -63,8 +58,8 @@ export function LaunchDialog({
             className="text-xs py-2 px-4 bg-bg border-2 border-border rounded-none text-text"
           />
           <datalist id="launch-recent-dirs">
-            {recentDirs.map((d) => (
-              <option key={d} value={d} />
+            {projects.map((p) => (
+              <option key={p.cwd} value={p.cwd} />
             ))}
           </datalist>
         </label>

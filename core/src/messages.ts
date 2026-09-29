@@ -82,7 +82,8 @@ export type ClientMessage =
   | TerminalDetach
   | TerminalInput
   | TerminalResize
-  | TerminalClose;
+  | TerminalClose
+  | RequestLaunchOptions;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -464,8 +465,22 @@ export interface LaunchResult {
 
 export interface LaunchOptions {
   type: 'launchOptions';
-  defaultCwd: string;
-  recentDirs: string[];
+  projects: MachineProject[];
+  recentSessions: RecentSession[];
+}
+
+export interface MachineProject {
+  cwd: string;
+  name: string;
+  lastUsed: number;
+}
+
+export interface RecentSession {
+  sessionId: string;
+  cwd: string;
+  name: string;
+  lastUsed: number;
+  title?: string;
 }
 
 export interface WebviewReady {
@@ -476,6 +491,7 @@ export interface LaunchAgent {
   type: 'launchAgent';
   folderPath?: string;
   bypassPermissions?: boolean;
+  resumeSessionId?: string;
 }
 
 export interface FocusAgent {
@@ -629,4 +645,8 @@ export interface TerminalResize {
 export interface TerminalClose {
   type: 'terminalClose';
   terminalId: string;
+}
+
+export interface RequestLaunchOptions {
+  type: 'requestLaunchOptions';
 }

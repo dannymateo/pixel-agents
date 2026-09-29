@@ -849,8 +849,7 @@ function App() {
 
       {launchOpen && launchOptions && (
         <LaunchDialog
-          defaultCwd={launchOptions.defaultCwd}
-          recentDirs={launchOptions.recentDirs}
+          projects={launchOptions.projects}
           transport={transport}
           onClose={() => setLaunchOpen(false)}
           onLaunched={handleLaunched}

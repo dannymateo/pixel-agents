@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-
 import { expect, test } from '@playwright/test';
 
 import { launchStandalone } from '../../helpers/standalone';
@@ -21,17 +19,14 @@ test.describe('Standalone / office console', () => {
     try {
       await page.getByRole('button', { name: '+ Agent' }).click();
 
-      // defaultCwd is the server's process.cwd() (spawned with cwd =
-      // workspaceDir); on Windows the temp path may come back through its
-      // native realpath (8.3 / symlink resolution) instead of the literal
-      // string handed to fs.mkdtempSync.
+      // A fresh e2e HOME has no ~/.claude/projects, so the launch dialog's
+      // project list is empty and the server no longer offers a default
+      // folder (spec §2 — it used to be the server's own process.cwd(),
+      // which on Windows service installs is C:\). Fill the workspace dir
+      // the test itself spawned the server in.
       const cwdInput = page.getByTestId('launch-cwd');
-      const expectedCwds = new Set([
-        session.workspaceDir,
-        fs.realpathSync.native(session.workspaceDir),
-      ]);
-      await expect(cwdInput).not.toHaveValue('');
-      expect(expectedCwds).toContain(await cwdInput.inputValue());
+      await expect(cwdInput).toHaveValue('');
+      await cwdInput.fill(session.workspaceDir);
 
       await page.getByRole('button', { name: 'Lanzar' }).click();
 

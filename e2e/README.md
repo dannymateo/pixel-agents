@@ -107,7 +107,7 @@ Rules for a correct test:
 - **Drive behavior through a scenario, not by hand.** Define timed actions with the `claudeScenario(...)` builder and let the mock perform them. Don't hand-write transcript files or hand-fire hooks inside a terminal-driven test body.
 - **Transcripts are append-only.** Existing JSONL lines are never mutated in place; new records appear later in the stream. Scenarios model this with timed `.appendJsonl(...)` steps.
 - **Assert only on Playwright-visible outcomes** — agent overlays, character state, sound hooks — never on the mock's internals. The mock never decides pass/fail.
-- **Standalone is the one exception.** `standalone/hooks.spec.ts` has no VS Code terminal to host a mocked `claude`, so it POSTs to the server's hook endpoint directly via `sendHookEvent`. That is correct _only_ for the standalone-server path; every terminal-driven test must use the scenario builder.
+- **Standalone is the one exception.** Standalone specs (`standalone/hooks.spec.ts`, `standalone/interactive.spec.ts`) have no VS Code terminal to host a mocked `claude`, so they POST to the server's hook endpoint directly via `sendHookEvent`. That is correct _only_ for the standalone-server path; every terminal-driven test must use the scenario builder.
 
 ## What to read before adding a test
 
@@ -267,9 +267,9 @@ This section is auto-generated. Do not edit between the markers; CI fails on dri
 - `e2e/standalone/hooks.spec.ts:134` — the tokened page shows the Intro and Install writes the hooks (Standalone / hooks consent)
 - `e2e/standalone/hooks.spec.ts:161` — an untokened spectator page never sees the consent dialog (Standalone / hooks consent)
 - `e2e/standalone/hooks.spec.ts:190` — the hooks checkbox reflects install state and its click is the consent grant (Standalone / hooks consent)
-- `e2e/standalone/interactive.spec.ts:96` — "Te esperan" counts a waiting external agent and clears when its session ends (Standalone / interactive agents)
-- `e2e/standalone/interactive.spec.ts:165` — resumes a recent session from the launch dialog (Standalone / interactive agents)
-- `e2e/standalone/interactive.spec.ts:204` — "Traer a la oficina" resumes the same agent after its external SessionEnd (Standalone / interactive agents)
+- `e2e/standalone/interactive.spec.ts:95` — "Te esperan" counts a waiting external agent and clears when its session ends (Standalone / interactive agents)
+- `e2e/standalone/interactive.spec.ts:164` — resumes a recent session from the launch dialog (Standalone / interactive agents)
+- `e2e/standalone/interactive.spec.ts:203` — "Traer a la oficina" resumes the same agent after its external SessionEnd (Standalone / interactive agents)
 - `e2e/standalone/multi-server-hooks.spec.ts:31` — extension and standalone both stay hook-driven without cross-contamination (Standalone / multi-server hooks)
 - `e2e/standalone/ui.spec.ts:27` — closeAgent despawns the character (Standalone / UI)
 - `e2e/standalone/ui.spec.ts:61` — Debug View renders JSONL diagnostics in standalone (Standalone / UI)

@@ -5,14 +5,10 @@ import os from 'os';
 import path from 'path';
 
 import { namespaceE2EPath } from '../run-config';
-import { applyMockHomeEnv } from './mock-claude';
+import { applyMockHomeEnv, seedMockClaudeBin } from './mock-claude';
 
 const REPO_ROOT = path.join(__dirname, '../..');
 const VSCODE_PATH_FILE = path.join(REPO_ROOT, '.vscode-test/vscode-executable.txt');
-const MOCK_CLAUDE_PATH = path.join(REPO_ROOT, 'e2e/fixtures/mock-claude');
-const MOCK_CLAUDE_CMD_PATH = path.join(REPO_ROOT, 'e2e/fixtures/mock-claude.cmd');
-const MOCK_CLAUDE_RUNNER_PATH = path.join(REPO_ROOT, 'e2e/fixtures/mock-claude-runner.cjs');
-const TAIL_FOLLOW_PATH = path.join(REPO_ROOT, 'e2e/fixtures/tail-follow.cjs');
 const ARTIFACTS_DIR = namespaceE2EPath(path.join(REPO_ROOT, 'test-results/e2e'));
 const IS_WINDOWS = process.platform === 'win32';
 const PATH_SEP = IS_WINDOWS ? ';' : ':';
@@ -206,22 +202,10 @@ export async function launchVSCode(
     }
   }
 
-  // Copy mock-claude into an isolated bin dir. The wrapper resolves its sibling
-  // scripts (mock-claude-runner.cjs, tail-follow.cjs) relative to its own dir
-  // (SCRIPT_DIR / %~dp0), so BOTH must live alongside it here — tail-follow.cjs
-  // is what backgrounds the narration tail into each mock terminal tab.
+  // Copy mock-claude into an isolated bin dir (shared with launchStandalone —
+  // see seedMockClaudeBin for why this is one function, not two copies).
   const mockClaudeBinaryPath = path.join(mockBinDir, IS_WINDOWS ? 'claude.cmd' : 'claude');
-  if (IS_WINDOWS) {
-    // Windows: copy the .cmd batch file as 'claude.cmd'
-    fs.copyFileSync(MOCK_CLAUDE_CMD_PATH, mockClaudeBinaryPath);
-    fs.copyFileSync(MOCK_CLAUDE_RUNNER_PATH, path.join(mockBinDir, 'mock-claude-runner.cjs'));
-    fs.copyFileSync(TAIL_FOLLOW_PATH, path.join(mockBinDir, 'tail-follow.cjs'));
-  } else {
-    fs.copyFileSync(MOCK_CLAUDE_PATH, mockClaudeBinaryPath);
-    fs.chmodSync(mockClaudeBinaryPath, 0o755);
-    fs.copyFileSync(MOCK_CLAUDE_RUNNER_PATH, path.join(mockBinDir, 'mock-claude-runner.cjs'));
-    fs.copyFileSync(TAIL_FOLLOW_PATH, path.join(mockBinDir, 'tail-follow.cjs'));
-  }
+  seedMockClaudeBin(mockBinDir);
 
   // VS Code user settings for the isolated profile. Together with
   // arrangeReviewLayout() (e2e/helpers/webview.ts) they produce the run-video

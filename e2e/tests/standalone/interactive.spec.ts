@@ -1,8 +1,10 @@
+import type { ChildProcess } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import type { Page } from '@playwright/test';
 import { expect, test } from '@playwright/test';
 
 import {
@@ -50,7 +52,7 @@ interface InteractiveTestWindow {
   };
 }
 
-async function getCharacterIds(page: import('@playwright/test').Page): Promise<number[]> {
+async function getCharacterIds(page: Page): Promise<number[]> {
   return page.evaluate(() => {
     const hooks = (window as unknown as InteractiveTestWindow).__pixelAgentsTestHooks;
     return (hooks?.getCharacters?.() ?? []).map((c) => c.id);
@@ -70,10 +72,7 @@ async function getCharacterIds(page: import('@playwright/test').Page): Promise<n
  * /t` kills the whole tree; everywhere else a plain signal reaches the real
  * process directly.
  */
-async function stopExternalProcess(
-  child: import('node:child_process').ChildProcess,
-  timeoutMs = 5_000,
-): Promise<void> {
+async function stopExternalProcess(child: ChildProcess, timeoutMs = 5_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32' && typeof child.pid === 'number') {
     try {

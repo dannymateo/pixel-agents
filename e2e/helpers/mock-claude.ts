@@ -6,6 +6,12 @@ import { getExternalNarrationLogPath } from './external-monitor';
 import { waitForHookServer } from './hooks';
 import { narrate } from './test-narration';
 
+const REPO_ROOT = path.join(__dirname, '..', '..');
+const MOCK_CLAUDE_PATH = path.join(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude');
+const MOCK_CLAUDE_CMD_PATH = path.join(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude.cmd');
+const MOCK_CLAUDE_RUNNER_PATH = path.join(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude-runner.cjs');
+const TAIL_FOLLOW_PATH = path.join(REPO_ROOT, 'e2e', 'fixtures', 'tail-follow.cjs');
+
 const DEFAULT_HOLD_OPEN_MS = 30_000;
 const HOOK_SETUP_TIMEOUT_MS = 20_000;
 const INVOCATION_TIMEOUT_MS = 20_000;
@@ -325,6 +331,33 @@ export async function arrangeNextClaudeInvocation(
 function getMockClaudeBinaryPath(tmpHome: string): string {
   const binDir = path.resolve(tmpHome, '..', 'bin');
   return path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude');
+}
+
+/**
+ * Populate an isolated `bin` directory with the mock `claude` binary and its
+ * sibling scripts, so a child process with this dir prepended to PATH (or
+ * `spawnExternalClaudeScenario`'s own `getMockClaudeBinaryPath`, which
+ * resolves `<tmpHome>/../bin`) finds it. The wrapper (`mock-claude` /
+ * `mock-claude.cmd`) resolves `mock-claude-runner.cjs` and `tail-follow.cjs`
+ * relative to its OWN directory (SCRIPT_DIR / `%~dp0`), so both must live
+ * alongside it here.
+ *
+ * Shared by `launchVSCode` (e2e/helpers/launch.ts) and `launchStandalone`
+ * (e2e/helpers/standalone.ts) — one implementation so the two fixtures can
+ * never drift on which file gets copied where, or the Unix chmod.
+ */
+export function seedMockClaudeBin(binDir: string): void {
+  fs.mkdirSync(binDir, { recursive: true });
+  const isWindows = process.platform === 'win32';
+  const mockClaudeBinaryPath = path.join(binDir, isWindows ? 'claude.cmd' : 'claude');
+  if (isWindows) {
+    fs.copyFileSync(MOCK_CLAUDE_CMD_PATH, mockClaudeBinaryPath);
+  } else {
+    fs.copyFileSync(MOCK_CLAUDE_PATH, mockClaudeBinaryPath);
+    fs.chmodSync(mockClaudeBinaryPath, 0o755);
+  }
+  fs.copyFileSync(MOCK_CLAUDE_RUNNER_PATH, path.join(binDir, 'mock-claude-runner.cjs'));
+  fs.copyFileSync(TAIL_FOLLOW_PATH, path.join(binDir, 'tail-follow.cjs'));
 }
 
 /**

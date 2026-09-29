@@ -130,6 +130,10 @@ function spawnStandaloneHost(args: {
         ...(args.mockClaudeConsoles
           ? {
               PIXEL_AGENTS_CLAUDE_COMMAND: JSON.stringify([process.execPath, MOCK_CLAUDE_RUNNER]),
+              // The pty child inherits the server's env, so setting this here
+              // reaches the mock runner without touching any VS Code-hosted
+              // scenario (those never set mockClaudeConsoles).
+              PIXEL_AGENTS_MOCK_CONSOLE: '1',
             }
           : {}),
       },

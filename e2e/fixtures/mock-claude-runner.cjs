@@ -593,8 +593,13 @@ async function main() {
   logInvocation(homeDir, sessionId, cwd, process.argv.slice(2));
 
   // Office consoles (pty): echo what the user types, so e2e can see the
-  // keystrokes reached "claude". Line-based: one reply per Enter.
-  if (process.stdin.isTTY) {
+  // keystrokes reached "claude". Line-based: one reply per Enter. Gated on an
+  // explicit env flag (set only by launchStandalone's mockClaudeConsoles),
+  // not just isTTY — every VS Code-hosted scenario also runs this mock inside
+  // a real TTY (integrated terminal / ConPTY), and reading stdin there would
+  // print an extra line and keep it in flowing mode, which stops the process
+  // from exiting naturally after holdOpenMs.
+  if (process.env.PIXEL_AGENTS_MOCK_CONSOLE === '1' && process.stdin.isTTY) {
     process.stdin.setRawMode?.(false);
     let line = '';
     process.stdin.on('data', (chunk) => {

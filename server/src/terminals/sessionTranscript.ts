@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { normalizeProjectPath } from '../../../core/src/normalizeProjectPath.js';
 import {
   SESSION_HEAD_READ_BYTES,
   SESSION_TAIL_READ_BYTES,
@@ -96,23 +97,35 @@ function readHead(file: string, maxBytes: number): string | undefined {
 }
 
 /**
- * Last `cwd` string recorded in the transcript, read from at most the last
- * `SESSION_TAIL_READ_BYTES` of the file. Undefined when the file is missing,
- * unreadable, or carries no `cwd` field within that window.
+ * The folder the session belongs to, from the `cwd` fields in at most the last
+ * `SESSION_TAIL_READ_BYTES` of the transcript. Undefined when the file is
+ * missing, unreadable, or carries no `cwd` field within that window.
+ *
+ * Claude stamps each record with its CURRENT cwd, which follows a `cd` inside
+ * the Bash tool, while `claude --resume <id>` looks the session up under the
+ * project dir of the cwd it is started in. So the most recent cwd whose
+ * project-dir name (Claude's hashing, `normalizeProjectPath`) is the folder
+ * holding this transcript wins; with none matching, the last cwd.
  */
 export function readSessionCwd(jsonlFile: string): string | undefined {
   const tail = readTail(jsonlFile, SESSION_TAIL_READ_BYTES);
   if (!tail) return undefined;
+  const projectDirName = path.basename(path.dirname(jsonlFile));
   const lines = tail.split('\n').filter((l) => l.trim().length > 0);
+  let last: string | undefined;
   for (let i = lines.length - 1; i >= 0; i--) {
+    let record: Record<string, unknown>;
     try {
-      const record = JSON.parse(lines[i]) as Record<string, unknown>;
-      if (typeof record.cwd === 'string' && record.cwd.length > 0) return record.cwd;
+      record = JSON.parse(lines[i]) as Record<string, unknown>;
     } catch {
-      /* malformed / partial line — skip */
+      continue; // malformed / partial line — skip
     }
+    const cwd = record.cwd;
+    if (typeof cwd !== 'string' || cwd.length === 0) continue;
+    if (normalizeProjectPath(cwd) === projectDirName) return cwd;
+    last ??= cwd;
   }
-  return undefined;
+  return last;
 }
 
 /** One text block's `text` field, if it carries one (ignores `tool_result`

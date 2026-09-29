@@ -31,6 +31,35 @@ it('reads the last cwd of the transcript', () => {
   expect(readSessionCwd(file)).toBe('C:\\new');
 });
 
+it('prefers the cwd whose project dir holds the transcript over a later cd into a sub-folder', () => {
+  // `claude --resume <id>` looks the session up under the project dir of its
+  // own cwd; a Bash `cd server` stamps later records with the sub-folder.
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', cwd: 'C:\\proj', message: { content: 'hola' } }) +
+      line({ type: 'assistant', cwd: 'C:\\proj\\server' }),
+  );
+  expect(readSessionCwd(file)).toBe('C:\\proj');
+});
+
+it('among several matching cwds, the most recent one wins', () => {
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', cwd: 'C:/proj' }) +
+      line({ type: 'user', cwd: 'C:\\proj' }) +
+      line({ type: 'assistant', cwd: 'C:\\proj\\server' }),
+  );
+  expect(readSessionCwd(file)).toBe('C:\\proj');
+});
+
+it('falls back to the last cwd when none matches the project dir', () => {
+  fs.writeFileSync(
+    file,
+    line({ type: 'user', cwd: 'D:\\a' }) + line({ type: 'assistant', cwd: 'D:\\b' }),
+  );
+  expect(readSessionCwd(file)).toBe('D:\\b');
+});
+
 it('the title is the first user text prompt, one line, bounded', () => {
   fs.writeFileSync(
     file,

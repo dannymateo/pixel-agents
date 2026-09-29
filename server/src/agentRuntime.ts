@@ -94,7 +94,8 @@ export interface RuntimeLifecycleCallbacks {
 const UNSAFE_SESSION_ID_REASON = 'Unsupported session id';
 
 /**
- * The folder a session ran in, from its transcript's last recorded `cwd`,
+ * The folder a session ran in, from its transcript's recorded `cwd` (see
+ * `readSessionCwd`: the latest one matching its project dir),
  * canonicalized (see launchOfficeAgent on why). Throws when it is missing,
  * relative, or no longer an existing directory.
  */

@@ -414,4 +414,24 @@ describe('claudeProvider', () => {
       expect(claudeProvider.formatToolStatus('Read', undefined)).toBe('Reading ');
     });
   });
+
+  describe('buildLaunchCommand', () => {
+    it('starts a fresh session with --session-id by default', () => {
+      const launch = claudeProvider.buildLaunchCommand!('abc', '/w');
+      expect(launch.args).toEqual(['--session-id', 'abc']);
+    });
+
+    it('resumes an existing session with --resume', () => {
+      const launch = claudeProvider.buildLaunchCommand!('abc', '/w', { resume: true });
+      expect(launch.args).toEqual(['--resume', 'abc']);
+    });
+
+    it('appends --dangerously-skip-permissions when resuming with bypassPermissions', () => {
+      const launch = claudeProvider.buildLaunchCommand!('abc', '/w', {
+        resume: true,
+        bypassPermissions: true,
+      });
+      expect(launch.args).toEqual(['--resume', 'abc', '--dangerously-skip-permissions']);
+    });
+  });
 });

@@ -64,6 +64,7 @@ import { persistedSessionId, SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { CLAUDE_COMMAND_OVERRIDE_ENV, resolveLaunch } from './terminals/launchCommand.js';
 import type { PtyHost } from './terminals/ptyHost.js';
+import { findSessionTranscript, readSessionCwd } from './terminals/sessionTranscript.js';
 import { TerminalHub } from './terminals/terminalHub.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import {
@@ -429,30 +430,71 @@ export class AgentRuntime {
    * Launch `claude` in an office console (spec §2): a fresh session id, an
    * internal agent bound to the console, the expected transcript pre-registered
    * so the project scan never mistakes it for someone else's session.
+   *
+   * With `resumeSessionId`, this instead continues an existing session
+   * (`claude --resume <id>`): the console's cwd and transcript come from that
+   * session's own history (any `opts.cwd` is ignored), and the agent starts
+   * watching at the transcript's current end, like an adopted agent.
    */
-  launchOfficeAgent(opts: { cwd: string; bypassPermissions?: boolean }): {
+  launchOfficeAgent(opts: {
+    cwd?: string;
+    bypassPermissions?: boolean;
+    resumeSessionId?: string;
+  }): {
     agentId: number;
     terminalId: string;
   } {
     if (!this.ptyHost) throw new Error('Office consoles are not available on this server');
-    const cwd = opts.cwd;
-    let isDir = false;
-    try {
-      isDir = path.isAbsolute(cwd) && fs.statSync(cwd).isDirectory();
-    } catch {
-      isDir = false;
-    }
-    if (!isDir) throw new Error(`Not an existing folder: ${cwd}`);
-    // Canonicalize BEFORE deriving the project dir: normalizeProjectPath maps
-    // every non-alphanumeric char to '-', so a trailing separator, `..`
-    // segments, or (Windows) an 8.3 short name would hash to a projectDir
-    // different from the one claude derives from its own process.cwd() --
-    // the transcript then never "appears" and a later /clear can't match it.
-    const canonicalCwd = fs.realpathSync.native(cwd);
 
-    const sessionId = crypto.randomUUID();
+    let sessionId: string;
+    let canonicalCwd: string;
+    let resume = false;
+    let resumeJsonlFile: string | undefined;
+
+    if (opts.resumeSessionId !== undefined) {
+      const jsonl = findSessionTranscript(
+        opts.resumeSessionId,
+        this.provider.getAllSessionRoots?.() ?? [],
+      );
+      if (!jsonl) throw new Error('Unknown session');
+      for (const agent of this.store.values()) {
+        if (agent.sessionId === opts.resumeSessionId) {
+          throw new Error('Session is already open in the office');
+        }
+      }
+      const sessionCwd = readSessionCwd(jsonl);
+      let isDir = false;
+      try {
+        isDir = sessionCwd !== undefined && fs.statSync(sessionCwd).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) throw new Error(`Session folder no longer exists: ${sessionCwd ?? '(unknown)'}`);
+      canonicalCwd = fs.realpathSync.native(sessionCwd!);
+      sessionId = opts.resumeSessionId;
+      resume = true;
+      resumeJsonlFile = jsonl;
+    } else {
+      const cwd = opts.cwd;
+      let isDir = false;
+      try {
+        isDir = typeof cwd === 'string' && path.isAbsolute(cwd) && fs.statSync(cwd).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) throw new Error(`Not an existing folder: ${cwd}`);
+      // Canonicalize BEFORE deriving the project dir: normalizeProjectPath maps
+      // every non-alphanumeric char to '-', so a trailing separator, `..`
+      // segments, or (Windows) an 8.3 short name would hash to a projectDir
+      // different from the one claude derives from its own process.cwd() --
+      // the transcript then never "appears" and a later /clear can't match it.
+      canonicalCwd = fs.realpathSync.native(cwd as string);
+      sessionId = crypto.randomUUID();
+    }
+
     const launch = this.provider.buildLaunchCommand?.(sessionId, canonicalCwd, {
       bypassPermissions: opts.bypassPermissions === true,
+      resume,
     });
     if (!launch) throw new Error('This provider cannot launch agents');
     const { file, args } = resolveLaunch(
@@ -470,8 +512,11 @@ export class AgentRuntime {
     // Anything failing past this point must not orphan the console just opened.
     let id: number | undefined;
     try {
-      const projectDir = this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd;
-      const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
+      const projectDir = resume
+        ? path.dirname(resumeJsonlFile!)
+        : (this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd);
+      const jsonlFile = resume ? resumeJsonlFile! : path.join(projectDir, `${sessionId}.jsonl`);
+      const fileOffset = resume ? fs.statSync(jsonlFile).size : 0;
       this.knownJsonlFiles.add(jsonlFile);
       id = this.store.nextAgentId.current++;
       const agent: AgentState = {
@@ -481,7 +526,7 @@ export class AgentRuntime {
         terminalId,
         projectDir,
         jsonlFile,
-        fileOffset: 0,
+        fileOffset,
         lineBuffer: '',
         activeToolIds: new Set(),
         activeToolStatuses: new Map(),

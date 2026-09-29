@@ -199,4 +199,58 @@ describe('AgentRuntime.launchOfficeAgent', () => {
     expect(agentTreeMeta(agent, true).terminalId).toBe(terminalId);
     expect(agentTreeMeta(agent, false).terminalId).toBeUndefined();
   });
+
+  describe('resumeSessionId', () => {
+    const SID = '5b3c1f0e-2a4d-4e8f-9c1b-7d6e5f4a3b2c';
+
+    function seedTranscript(cwd: string): string {
+      const projectDir = path.join(testHome.dir, '.claude', 'projects', 'C--proj');
+      fs.mkdirSync(projectDir, { recursive: true });
+      const file = path.join(projectDir, `${SID}.jsonl`);
+      fs.writeFileSync(file, JSON.stringify({ type: 'user', cwd }) + '\n');
+      return file;
+    }
+
+    it('resumes an existing session with its own cwd, transcript and file offset', () => {
+      const jsonl = seedTranscript(workDir);
+      const { agentId } = runtime.launchOfficeAgent({ resumeSessionId: SID });
+      const agent = store.get(agentId)!;
+      expect(spawned[0].args).toContain('--resume');
+      expect(spawned[0].args).toContain(SID);
+      expect(spawned[0].cwd).toBe(fs.realpathSync.native(workDir));
+      expect(agent.sessionId).toBe(SID);
+      expect(agent.jsonlFile).toBe(jsonl);
+      expect(agent.fileOffset).toBe(fs.statSync(jsonl).size);
+    });
+
+    it('refuses an unknown session id', () => {
+      expect(() => runtime.launchOfficeAgent({ resumeSessionId: SID })).toThrow(/Unknown session/);
+      expect(store.size).toBe(0);
+      expect(spawned.length).toBe(0);
+    });
+
+    it('refuses when the transcript cwd no longer exists', () => {
+      seedTranscript(path.join(tmp, 'gone'));
+      expect(() => runtime.launchOfficeAgent({ resumeSessionId: SID })).toThrow(/no longer exists/);
+      expect(store.size).toBe(0);
+      expect(spawned.length).toBe(0);
+    });
+
+    it('refuses an unsafe session id without reading outside the roots', () => {
+      expect(() => runtime.launchOfficeAgent({ resumeSessionId: '../x' })).toThrow(
+        /Unknown session/,
+      );
+      expect(spawned.length).toBe(0);
+    });
+
+    it('refuses a session already open in the office', () => {
+      const jsonl = seedTranscript(workDir);
+      runtime.launchOfficeAgent({ resumeSessionId: SID });
+      spawned.length = 0;
+      expect(() => runtime.launchOfficeAgent({ resumeSessionId: SID })).toThrow(/already open/);
+      expect(spawned.length).toBe(0);
+      // still exactly one agent for that session
+      expect([...store.values()].filter((a) => a.jsonlFile === jsonl).length).toBe(1);
+    });
+  });
 });

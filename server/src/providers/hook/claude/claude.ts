@@ -105,9 +105,9 @@ function getSessionDirs(workspacePath: string): string[] {
 function buildLaunchCommand(
   sessionId: string,
   cwd: string,
-  opts?: { bypassPermissions?: boolean },
+  opts?: { bypassPermissions?: boolean; resume?: boolean },
 ): { command: string; args: string[]; env?: Record<string, string> } {
-  const args = ['--session-id', sessionId];
+  const args = opts?.resume ? ['--resume', sessionId] : ['--session-id', sessionId];
   if (opts?.bypassPermissions) args.push('--dangerously-skip-permissions');
   return { command: 'claude', args, env: { PWD: cwd } };
 }

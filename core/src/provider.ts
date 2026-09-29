@@ -142,7 +142,12 @@ export interface HookProvider {
   buildLaunchCommand?(
     sessionId: string,
     cwd: string,
-    opts?: { bypassPermissions?: boolean },
+    opts?: {
+      bypassPermissions?: boolean;
+      /** Continue that session (`claude --resume <id>`) instead of starting
+       *  one with that id. */
+      resume?: boolean;
+    },
   ): {
     command: string;
     args: string[];

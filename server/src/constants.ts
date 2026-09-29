@@ -261,3 +261,13 @@ export const TERMINAL_EXIT_CODE_UNAVAILABLE = -1;
 export const SHUTDOWN_PTY_EXIT_TIMEOUT_MS = 2_000;
 /** Recent launch folders remembered for the launch dialog, newest first. */
 export const RECENT_LAUNCH_DIRS_MAX = 5;
+
+/** Bytes read from the END of a session transcript to find its most recent
+ *  `cwd` (server/src/terminals/sessionTranscript.ts `readSessionCwd`), for
+ *  resuming it in an office console. */
+export const SESSION_TAIL_READ_BYTES = 64 * 1024;
+/** Bytes read from the START of a session transcript to find its first user
+ *  prompt (`readSessionTitle`), used as a launch-list title. */
+export const SESSION_HEAD_READ_BYTES = 64 * 1024;
+/** Longest session title shown in the resume list. */
+export const SESSION_TITLE_MAX_CHARS = 120;

@@ -16,6 +16,10 @@ import {
 const REPO_ROOT = path.join(__dirname, '../..');
 const STANDALONE_CLI = path.resolve(REPO_ROOT, 'dist', 'cli.js');
 const MOCK_CLAUDE_RUNNER = path.resolve(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude-runner.cjs');
+const IS_WINDOWS = process.platform === 'win32';
+const MOCK_CLAUDE_PATH = path.resolve(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude');
+const MOCK_CLAUDE_CMD_PATH = path.resolve(REPO_ROOT, 'e2e', 'fixtures', 'mock-claude.cmd');
+const TAIL_FOLLOW_PATH = path.resolve(REPO_ROOT, 'e2e', 'fixtures', 'tail-follow.cjs');
 
 export interface RecordedServerMessage {
   type: string;
@@ -60,6 +64,18 @@ export interface LaunchStandaloneOptions {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Remove a directory tree, tolerating the transient EPERM/EBUSY Windows
+ * raises when a just-killed child process (the server itself, or an
+ * externally-spawned mock `claude` sharing this dir as its cwd) has not yet
+ * released its handle on it. `fs.rmSync`'s own `maxRetries`/`retryDelay`
+ * cover exactly this window; `force: true` additionally tolerates the
+ * directory already being gone.
+ */
+function removeDirWithRetry(dir: string): void {
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 async function getFreePort(): Promise<number> {
@@ -240,19 +256,42 @@ async function openStandalonePage(page: Page, printedUrl: string): Promise<void>
   await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible({ timeout: 30_000 });
 }
 
+/**
+ * Give `spawnExternalClaudeScenario` (e2e/helpers/mock-claude.ts) a `claude`
+ * binary to find: it resolves one at `<tmpHome>/../bin`, the same sibling
+ * layout `launchVSCode` (e2e/helpers/launch.ts) creates for the VS Code
+ * fixture. A standalone session that owns a fresh HOME has no such fixture
+ * behind it, so it must set this up itself — needed by any standalone test
+ * that adopts an externally-spawned mock session; a launched office console
+ * never touches it (it overrides `PIXEL_AGENTS_CLAUDE_COMMAND` directly).
+ */
+function seedMockClaudeBin(tmpBase: string): void {
+  const mockBinDir = path.join(tmpBase, 'bin');
+  fs.mkdirSync(mockBinDir, { recursive: true });
+  const mockClaudeBinaryPath = path.join(mockBinDir, IS_WINDOWS ? 'claude.cmd' : 'claude');
+  fs.copyFileSync(IS_WINDOWS ? MOCK_CLAUDE_CMD_PATH : MOCK_CLAUDE_PATH, mockClaudeBinaryPath);
+  if (!IS_WINDOWS) fs.chmodSync(mockClaudeBinaryPath, 0o755);
+  fs.copyFileSync(MOCK_CLAUDE_RUNNER, path.join(mockBinDir, 'mock-claude-runner.cjs'));
+  fs.copyFileSync(TAIL_FOLLOW_PATH, path.join(mockBinDir, 'tail-follow.cjs'));
+}
+
 export async function launchStandalone(
   page: Page,
   options: LaunchStandaloneOptions = {},
 ): Promise<StandaloneSession> {
   const ownsHome = options.homeDir === undefined;
   const ownsWorkspace = options.workspaceDir === undefined;
-  const tmpHome =
-    options.homeDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-standalone-e2e-home-'));
+  // An owned HOME gets a `<tmpBase>/home` + `<tmpBase>/bin` layout (see
+  // seedMockClaudeBin); a supplied one (multi-server tests sharing a HOME
+  // with a VS Code fixture) already has its own bin dir and is used as-is.
+  const tmpBase = ownsHome ? fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-standalone-e2e-')) : null;
+  const tmpHome = options.homeDir ?? path.join(tmpBase!, 'home');
   const workspaceDir =
     options.workspaceDir ??
     fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-standalone-e2e-workspace-'));
   fs.mkdirSync(tmpHome, { recursive: true });
   fs.mkdirSync(workspaceDir, { recursive: true });
+  if (tmpBase) seedMockClaudeBin(tmpBase);
   // Consent baseline, mirroring the VS Code launch helper: without it the CLI
   // asks over the tokened /ws handshake and the in-app dialog covers the
   // office in every spec. Only when the file does not exist yet — a shared
@@ -317,14 +356,14 @@ export async function launchStandalone(
       },
       cleanup: async () => {
         await stopProcess(hostProcess);
-        if (ownsHome) fs.rmSync(tmpHome, { recursive: true, force: true });
-        if (ownsWorkspace) fs.rmSync(workspaceDir, { recursive: true, force: true });
+        if (ownsHome) removeDirWithRetry(tmpBase!);
+        if (ownsWorkspace) removeDirWithRetry(workspaceDir);
       },
     };
   } catch (error) {
     await stopProcess(hostProcess);
-    if (ownsHome) fs.rmSync(tmpHome, { recursive: true, force: true });
-    if (ownsWorkspace) fs.rmSync(workspaceDir, { recursive: true, force: true });
+    if (ownsHome) removeDirWithRetry(tmpBase!);
+    if (ownsWorkspace) removeDirWithRetry(workspaceDir);
     throw error;
   }
 }

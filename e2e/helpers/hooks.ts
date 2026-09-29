@@ -288,3 +288,15 @@ export function sessionEndResume(sessionId: string): HookEventPayload {
     reason: 'resume',
   };
 }
+
+/** The operator typed /exit (or closed the terminal) in its own window: final,
+ *  no follow-up SessionStart expected. "Traer a la oficina" (spec §1) waits
+ *  for exactly this reason on a pending agent to resume it in an office
+ *  console instead of retiring it. */
+export function sessionEndPromptInputExit(sessionId: string): HookEventPayload {
+  return {
+    session_id: sessionId,
+    hook_event_name: 'SessionEnd',
+    reason: 'prompt_input_exit',
+  };
+}

@@ -36,6 +36,12 @@ export interface LaunchDialogProps {
 
 type Tab = 'projects' | 'sessions';
 
+/** The recent-sessions list only drops sessions written in the last 30 s: one
+ *  left idle in another terminal is still listed, and resuming it makes two
+ *  writers on one transcript (spec "Hechos verificados"). */
+const RESUME_TWO_WRITERS_WARNING =
+  'Si esa sesión sigue abierta en otra terminal, las dos se pisarán.';
+
 /** `timeAgo` needs `Date.now()`, an impure call the React Compiler forbids
  *  inline in a component body — isolated here like DebugView's formatTimeAgo. */
 function sessionTimeAgo(s: RecentSession): string {
@@ -200,6 +206,9 @@ export function LaunchDialog({
                 </div>
               ))}
             </div>
+            {recentSessions.length > 0 && (
+              <span className="text-xs text-warning">{RESUME_TWO_WRITERS_WARNING}</span>
+            )}
             <label className="flex items-center gap-4">
               <input
                 type="checkbox"

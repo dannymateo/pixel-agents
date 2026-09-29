@@ -187,6 +187,11 @@ test.describe('Standalone / interactive agents', () => {
 
       const row = page.getByTestId('launch-session').filter({ hasText: 'Arregla el login' });
       await expect(row).toBeVisible({ timeout: 15_000 });
+      // The list can't tell an idle session still open in another terminal
+      // from a closed one: the tab warns about two writers instead.
+      await expect(
+        page.getByText('Si esa sesión sigue abierta en otra terminal, las dos se pisarán.'),
+      ).toBeVisible();
       await row.getByRole('button', { name: 'Retomar' }).click();
 
       const officeConsole = page.getByTestId('office-console');

@@ -339,8 +339,10 @@ export function useExtensionMessages(
       // Who is waiting on the user (spec §3). Sub-agent messages carry the
       // PARENT id, so entries are already keyed by the agent that owns the
       // console. On reconnect, `existingAgents` carries no attention state of
-      // its own — the server resends permission/waiting via
-      // resendAgentActivity, and the tracker processes those the same way.
+      // its own: the tracker drops agents missing from it, and the server
+      // resends permission/waiting via resendAgentActivity, processed the
+      // same way. The tracker also learns who is a root from agentCreated /
+      // existingAgents / agentTeamInfo (only roots count as `waiting`).
       if (attentionTrackerRef.current!.apply(msg)) {
         setAttention(attentionTrackerRef.current!.list());
       }

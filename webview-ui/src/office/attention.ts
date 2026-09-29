@@ -177,7 +177,18 @@ export class AttentionTracker {
       string,
       unknown
     >;
+    // A (re)connect snapshot: whoever is not in it left while we were away.
+    // Agents still here keep their entries; the server replays their live
+    // permission/waiting right after (resendAgentActivity).
     let changed = false;
+    const present = new Set(ids);
+    for (const id of [...this.entries.keys(), ...this.questions.keys(), ...this.derived]) {
+      if (present.has(id)) continue;
+      if (this.entries.delete(id)) changed = true;
+      this.questions.delete(id);
+      this.questionParents.delete(id);
+      this.derived.delete(id);
+    }
     for (const id of ids) {
       const fields = meta[id];
       if (

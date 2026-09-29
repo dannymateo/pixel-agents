@@ -212,6 +212,31 @@ test('a question still replaces a plain waiting', () => {
   expect(tr.list()[0]).toMatchObject({ id: 1, reason: 'question' });
 });
 
+test('an existingAgents resync drops agents that left while disconnected', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentToolPermission', id: 1 });
+  tr.apply({ type: 'agentStatus', id: 2, status: 'waiting' });
+  tr.apply({
+    type: 'agentToolStart',
+    id: 3,
+    toolId: 'q',
+    status: 'Waiting for your answer',
+    toolName: 'AskUserQuestion',
+  });
+  const snapshot = (agents: number[]) => ({
+    type: 'existingAgents',
+    agents,
+    agentMeta: {},
+    folderNames: {},
+    externalAgents: {},
+  });
+  expect(tr.apply(snapshot([2]))).toBe(true);
+  expect(tr.list().map((e) => e.id)).toEqual([2]);
+  // Agent 3's open question is forgotten too: its later done is a no-op.
+  expect(tr.apply({ type: 'agentToolDone', id: 3, toolId: 'q' })).toBe(false);
+  expect(tr.apply(snapshot([2]))).toBe(false);
+});
+
 test('attentionTitle', () => {
   expect(attentionTitle(0)).toBe('Pixel Agents');
   expect(attentionTitle(2)).toBe('(2) Pixel Agents');

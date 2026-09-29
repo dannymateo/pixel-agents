@@ -479,3 +479,6 @@ export const CONVERSATION_BUBBLE_FONT_PX = 18;
 export const CONVERSATION_BUBBLE_LINE_HEIGHT_PX = 20;
 /** Above ToolOverlay (41/42), below the intro bubble (45). */
 export const CONVERSATION_BUBBLE_Z_INDEX = 43;
+/** terminalExit code the server sends for a console it no longer has: closed
+ *  on purpose (from another tab too) or unknown after a server restart. */
+export const CONSOLE_EXIT_CODE_UNAVAILABLE = -1;

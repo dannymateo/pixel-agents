@@ -11,6 +11,7 @@ import { Terminal } from '@xterm/xterm';
 import { useEffect, useRef } from 'react';
 
 import { consoleMessageFor } from '../console/consoleRouting.js';
+import { ConsoleSession } from '../console/consoleSession.js';
 import {
   CONSOLE_FONT_FAMILY,
   CONSOLE_FONT_SIZE,
@@ -46,22 +47,16 @@ export function ConsoleModal({ terminalId, title, transport, onClose }: ConsoleM
     fit.fit();
     term.focus();
 
+    const session = new ConsoleSession(
+      { reset: () => term.reset(), write: (data, done) => term.write(data, done) },
+      (data) => transport.send({ type: 'terminalInput', terminalId, data }),
+      transport.state,
+    );
     const offMessage = transport.onMessage((msg) => {
       const ev = consoleMessageFor(msg, terminalId);
-      if (!ev) return;
-      if (ev.kind === 'snapshot') {
-        term.reset();
-        term.write(ev.data);
-        if (ev.exited) term.write('\r\n[sesión terminada]\r\n');
-      } else if (ev.kind === 'output') {
-        term.write(ev.data);
-      } else {
-        term.write(`\r\n[sesión terminada · código ${ev.exitCode}]\r\n`);
-      }
+      if (ev) session.apply(ev);
     });
-    const inputSub = term.onData((data) =>
-      transport.send({ type: 'terminalInput', terminalId, data }),
-    );
+    const inputSub = term.onData((data) => session.input(data));
     const sendSize = () => {
       fit.fit();
       transport.send({ type: 'terminalResize', terminalId, cols: term.cols, rows: term.rows });
@@ -69,8 +64,16 @@ export function ConsoleModal({ terminalId, title, transport, onClose }: ConsoleM
     const ro = new ResizeObserver(sendSize);
     ro.observe(el);
 
-    transport.send({ type: 'terminalAttach', terminalId });
-    sendSize();
+    const attach = () => {
+      transport.send({ type: 'terminalAttach', terminalId });
+      sendSize();
+    };
+    // The server forgets the attachment with the socket: after a reconnect,
+    // attach again (the snapshot resets the screen, so a repeat is harmless).
+    const offState = transport.onStateChange((next) => {
+      if (session.reattachOn(next)) attach();
+    });
+    attach();
 
     // Keys typed in the console never reach the office's own shortcuts.
     const stop = (e: KeyboardEvent) => e.stopPropagation();
@@ -79,6 +82,7 @@ export function ConsoleModal({ terminalId, title, transport, onClose }: ConsoleM
     return () => {
       el.removeEventListener('keydown', stop);
       ro.disconnect();
+      offState();
       inputSub.dispose();
       offMessage();
       transport.send({ type: 'terminalDetach', terminalId });

@@ -261,7 +261,7 @@ This section is auto-generated. Do not edit between the markers; CI fails on dri
 ### `@area:standalone` (14 tests)
 
 - `e2e/standalone/agentScreen.spec.ts:83` — agent screen shows a sub-agent diff and command output, only to the tokened page (Standalone / agent screen)
-- `e2e/standalone/console.spec.ts:16` — launch an agent from the browser and type into its console (Standalone / office console)
+- `e2e/standalone/console.spec.ts:17` — launch an agent from the browser and type into its console (Standalone / office console)
 - `e2e/standalone/conversations.spec.ts:79` — agents walk over and talk: assignment and report, text only to the tokened page (Standalone / conversations)
 - `e2e/standalone/hooks.spec.ts:17` — propagates hook-driven lifecycle into the browser UI (Standalone / hooks)
 - `e2e/standalone/hooks.spec.ts:134` — the tokened page shows the Intro and Install writes the hooks (Standalone / hooks consent)

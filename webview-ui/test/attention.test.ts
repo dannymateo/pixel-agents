@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 
-import { attentionTitle, AttentionTracker } from '../src/office/attention.js';
+import { attentionTitle, AttentionTracker, tabTitle } from '../src/office/attention.js';
 
 function tracker() {
   let t = 1000;
@@ -120,4 +120,19 @@ test('sub-agent clear only removes questions from that parentToolId, not from ot
 test('attentionTitle', () => {
   expect(attentionTitle(0)).toBe('Pixel Agents');
   expect(attentionTitle(2)).toBe('(2) Pixel Agents');
+});
+
+test('tabTitle: VS Code owns its own panel title, so the tab is never touched', () => {
+  expect(tabTitle(3, { isBrowser: false, consoleCapable: false })).toBeNull();
+  expect(tabTitle(3, { isBrowser: false, consoleCapable: true })).toBeNull();
+});
+
+test('tabTitle: an untokened browser viewer sees neither the bar nor the counter', () => {
+  expect(tabTitle(3, { isBrowser: true, consoleCapable: false })).toBe('Pixel Agents');
+  expect(tabTitle(0, { isBrowser: true, consoleCapable: false })).toBe('Pixel Agents');
+});
+
+test('tabTitle: a browser operator sees the counter', () => {
+  expect(tabTitle(3, { isBrowser: true, consoleCapable: true })).toBe('(3) Pixel Agents');
+  expect(tabTitle(0, { isBrowser: true, consoleCapable: true })).toBe('Pixel Agents');
 });

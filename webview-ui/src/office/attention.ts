@@ -23,6 +23,19 @@ export function attentionTitle(count: number, base: string = ATTENTION_TITLE_BAS
   return count > 0 ? `(${count}) ${base}` : base;
 }
 
+/** What the browser tab title should read for the "Te esperan" counter (spec
+ *  §3), or `null` when it must not be touched at all — VS Code owns its own
+ *  panel title. An untokened browser viewer has no `consoleCapable` (no
+ *  `providerCapabilities`), so it can't answer anyone: it sees neither the
+ *  bar nor the counter, just the base title. */
+export function tabTitle(
+  count: number,
+  { isBrowser, consoleCapable }: { isBrowser: boolean; consoleCapable: boolean },
+): string | null {
+  if (!isBrowser) return null;
+  return consoleCapable ? attentionTitle(count) : ATTENTION_TITLE_BASE;
+}
+
 export class AttentionTracker {
   private readonly entries = new Map<number, AttentionEntry>();
   /** Open question tool ids per agent (AskUserQuestion, own or sub-agent's). */

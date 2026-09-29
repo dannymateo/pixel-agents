@@ -27,7 +27,7 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
 import { useIntroTour } from './hooks/useIntroTour.js';
 import { resolveAttendTarget } from './office/attendTarget.js';
-import { attentionTitle } from './office/attention.js';
+import { tabTitle } from './office/attention.js';
 import { ConversationBubble } from './office/components/ConversationBubble.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
@@ -226,11 +226,12 @@ function App() {
   }, [alwaysShowLabels]);
 
   // Browser tab title counter (spec §3 "Te esperan"). VS Code owns its own
-  // webview panel title; only the standalone browser tab gets this.
+  // webview panel title; an untokened browser viewer (consoleCapable false)
+  // can't answer anyone, so it sees neither the bar nor the counter.
   useEffect(() => {
-    if (!isBrowserRuntime) return;
-    document.title = attentionTitle(attention.length);
-  }, [attention.length]);
+    const title = tabTitle(attention.length, { isBrowser: isBrowserRuntime, consoleCapable });
+    if (title !== null) document.title = title;
+  }, [attention.length, consoleCapable]);
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), []);
   const handleToggleAlwaysShowOverlay = useCallback(() => {

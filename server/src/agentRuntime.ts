@@ -60,7 +60,7 @@ import {
   LOUNGE_TO_LEAVE_SETTING_KEY,
   PresenceTracker,
 } from './presence.js';
-import { persistedSessionId, SessionRouter } from './sessionRouter.js';
+import { isSafeSessionId, persistedSessionId, SessionRouter } from './sessionRouter.js';
 import { subtreeRemovalOrder } from './spawnTree.js';
 import { CLAUDE_COMMAND_OVERRIDE_ENV, resolveLaunch } from './terminals/launchCommand.js';
 import type { PtyHost } from './terminals/ptyHost.js';
@@ -89,6 +89,9 @@ export interface RuntimeLifecycleCallbacks {
   /** Called when a teammate is removed. */
   onTeammateRemoved?: (teammateId: number, agent: AgentState, source: string) => void;
 }
+
+/** Takeover refusal/failure reason for an id unfit for the resume argv. */
+const UNSAFE_SESSION_ID_REASON = 'Unsupported session id';
 
 /**
  * The folder a session ran in, from its transcript's last recorded `cwd`,
@@ -643,6 +646,10 @@ export class AgentRuntime {
       return 'Only a session agent can be brought into the office';
     }
     if (!this.ptyHost) return 'Office consoles are not available on this server';
+    // The id goes into the resume argv, which reaches `cmd.exe /c` on Windows
+    // (launchCommand.ts). A scanner-adopted external's id is just its
+    // transcript's basename, so it is not trusted.
+    if (!isSafeSessionId(agent.sessionId)) return UNSAFE_SESSION_ID_REASON;
     if (!readSessionCwd(agent.jsonlFile)) return 'Its transcript records no folder';
     return undefined;
   }
@@ -660,6 +667,9 @@ export class AgentRuntime {
     if (!agent) return;
     let terminalId: string;
     try {
+      // Defensive: the id may have changed since takeoverRefusal (a /clear
+      // moves the mark to the new session's basename).
+      if (!isSafeSessionId(agent.sessionId)) throw new Error(UNSAFE_SESSION_ID_REASON);
       terminalId = this.openAgentConsole(agent.sessionId, sessionFolder(agent.jsonlFile), {
         resume: true,
       });

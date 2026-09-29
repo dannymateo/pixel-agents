@@ -251,6 +251,29 @@ describe('AgentRuntime: bring an external agent into the office (takeover)', () 
     expect(store.get(AGENT_ID)).toBeUndefined();
   });
 
+  it('refuses a session id that is not safe to put on a command line (cmd.exe /c)', () => {
+    // A scanner-adopted external's id is its transcript's basename: `x&calc.jsonl`
+    // is a legal NTFS name, and `claude --resume x&calc` would run calc.
+    addExternalAgent({ sessionId: 'x&calc' });
+    runtime.requestTakeover(AGENT_ID, { confirmClosed: true });
+    expect(statuses()).toEqual([
+      expect.objectContaining({ state: 'refused', reason: 'Unsupported session id' }),
+    ]);
+    expect(spawned).toEqual([]);
+  });
+
+  it('never resumes an unsafe session id even if it changed after the mark (defensive)', () => {
+    const agent = addExternalAgent();
+    runtime.requestTakeover(AGENT_ID);
+    agent.sessionId = 'x&calc';
+    sessionEnd();
+    expect(spawned).toEqual([]);
+    expect(statuses().at(-1)).toEqual(
+      expect.objectContaining({ id: AGENT_ID, state: 'failed', reason: 'Unsupported session id' }),
+    );
+    expect(runtime.ptyHost!.size).toBe(0);
+  });
+
   it('cancelTakeover drops the mark: a later SessionEnd retires the agent', () => {
     addExternalAgent();
     runtime.requestTakeover(AGENT_ID);

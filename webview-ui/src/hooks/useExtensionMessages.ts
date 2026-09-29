@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
+import type { AttentionEntry } from '../office/attention.js';
+import { AttentionTracker } from '../office/attention.js';
 import type { ConversationDirector } from '../office/engine/conversationScene.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { flushPendingAgents, reconcileExistingAgents } from '../office/engine/existingAgents.js';
@@ -131,6 +133,8 @@ interface ExtensionMessageState {
   consoleCapable: boolean;
   /** Defaults for the launch dialog (launchOptions), or null before the server reports them. */
   launchOptions: { defaultCwd: string; recentDirs: string[] } | null;
+  /** Who is waiting on the user right now, and why (spec §3 "Te esperan"). */
+  attention: AttentionEntry[];
 }
 
 /** A string off the wire, or undefined. */
@@ -214,6 +218,11 @@ export function useExtensionMessages(
     defaultCwd: string;
     recentDirs: string[];
   } | null>(null);
+  // One tracker for the component's lifetime; `attention` mirrors its list()
+  // so React re-renders on every change without re-deriving it from scratch.
+  const attentionTrackerRef = useRef<AttentionTracker | null>(null);
+  if (!attentionTrackerRef.current) attentionTrackerRef.current = new AttentionTracker();
+  const [attention, setAttention] = useState<AttentionEntry[]>([]);
   const applyLivingOfficeTimings = useCallback((msg: Record<string, unknown>) => {
     const t = parseLivingOfficeTimings(msg);
     if (t.idleToLoungeMinutes !== undefined) setIdleToLoungeMinutes(t.idleToLoungeMinutes);
@@ -276,6 +285,15 @@ export function useExtensionMessages(
       // Turn status, running tools and permission wait into the directory the
       // agent screen's header reads (same rules as the character, below).
       applyDirectoryActivity(living.directory, msg);
+
+      // Who is waiting on the user (spec §3). Sub-agent messages carry the
+      // PARENT id, so entries are already keyed by the agent that owns the
+      // console. On reconnect, `existingAgents` carries no attention state of
+      // its own — the server resends permission/waiting via
+      // resendAgentActivity, and the tracker processes those the same way.
+      if (attentionTrackerRef.current!.apply(msg)) {
+        setAttention(attentionTrackerRef.current!.list());
+      }
 
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({
@@ -963,5 +981,6 @@ export function useExtensionMessages(
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
+    attention,
   };
 }

@@ -29,8 +29,11 @@ export class AttentionTracker {
   private readonly questions = new Map<number, Set<string>>();
   /** Maps toolId → parentToolId for sub-agent questions (so we can clean them up on subagentClear). */
   private readonly questionParents = new Map<number, Map<string, string>>();
+  private readonly now: () => number;
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
 
   get size(): number {
     return this.entries.size;

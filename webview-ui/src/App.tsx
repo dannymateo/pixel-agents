@@ -26,6 +26,8 @@ import { useEditorActions } from './hooks/useEditorActions.js';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
 import { useIntroTour } from './hooks/useIntroTour.js';
+import { resolveAttendTarget } from './office/attendTarget.js';
+import { attentionTitle } from './office/attention.js';
 import { ConversationBubble } from './office/components/ConversationBubble.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
@@ -39,6 +41,7 @@ import { migrateLayoutColors } from './office/layout/layoutSerializer.js';
 import { isMonitorType, monitorSeat } from './office/layout/monitorOwner.js';
 import { LivingOfficeController } from './office/living/livingOfficeController.js';
 import { overlayProjection } from './office/projection.js';
+import { treeDisplayName } from './office/scope/treeDisplay.js';
 import { getPetCount } from './office/sprites/petSpriteData.js';
 import { CharacterState, EditTool, type OfficeLayout, TILE_SIZE } from './office/types.js';
 import { isBrowserRuntime, isE2E } from './runtime.js';
@@ -89,6 +92,21 @@ function canOpenAgentScreen(id: number): boolean {
   const ch = getOfficeState().characters.get(id);
   if (!ch || ch.isSubagent) return false;
   return livingOffice.directory.get(id)?.nodeKind !== 'workflow';
+}
+
+/** The name shown for an agent in "Te esperan": the same label the office
+ *  directory carries (teammate name, task label or role), else `Agente #id`. */
+function attentionLabelOf(id: number): string {
+  const node = livingOffice.directory.get(id);
+  const name =
+    node &&
+    treeDisplayName({
+      teammateName: node.agentName,
+      label: node.label,
+      role: node.role,
+      nodeKind: node.nodeKind,
+    });
+  return name || `Agente #${id}`;
 }
 
 function App() {
@@ -144,6 +162,7 @@ function App() {
     loungeToLeaveMinutes,
     consoleCapable,
     launchOptions,
+    attention,
   } = useExtensionMessages(
     getOfficeState,
     editor.setLastSavedLayout,
@@ -205,6 +224,13 @@ function App() {
   useEffect(() => {
     setAlwaysShowOverlay(alwaysShowLabels);
   }, [alwaysShowLabels]);
+
+  // Browser tab title counter (spec §3 "Te esperan"). VS Code owns its own
+  // webview panel title; only the standalone browser tab gets this.
+  useEffect(() => {
+    if (!isBrowserRuntime) return;
+    document.title = attentionTitle(attention.length);
+  }, [attention.length]);
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), []);
   const handleToggleAlwaysShowOverlay = useCallback(() => {
@@ -408,6 +434,26 @@ function App() {
       return;
     }
     transport.send({ type: 'focusAgent', id: focusId });
+  }, []);
+
+  // "Te esperan" clicks (spec §3): the console of the office root (sub-agents
+  // reached through it), else the agent's screen in the browser, else its
+  // VS Code terminal.
+  const handleAttend = useCallback((id: number) => {
+    const os = getOfficeState();
+    const target = resolveAttendTarget(id, {
+      parentOf: (x) =>
+        livingOffice.directory.get(x)?.parentAgentId ?? os.subagentMeta.get(x)?.parentAgentId,
+      terminalOf: (x) => os.characters.get(x)?.terminalId,
+      isBrowser: isBrowserRuntime,
+    });
+    if (target.kind === 'console') {
+      setConsoleTerminal({ id: target.terminalId, title: `Agente #${target.rootId}` });
+    } else if (target.kind === 'screen') {
+      setScreenAgentId(target.id);
+    } else {
+      transport.send({ type: 'focusAgent', id: target.id });
+    }
   }, []);
 
   const officeState = getOfficeState();
@@ -722,6 +768,9 @@ function App() {
         workspaceFolders={workspaceFolders}
         consoleCapable={consoleCapable}
         onOpenLaunchDialog={handleOpenLaunchDialog}
+        attention={attention}
+        onAttend={handleAttend}
+        labelOf={attentionLabelOf}
       />
 
       <VersionIndicator

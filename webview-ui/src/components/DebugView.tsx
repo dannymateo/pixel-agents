@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { closeClickStep } from '../console/closeConfirm.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import type { ToolActivity } from '../office/types.js';
 import { transport } from '../transport/index.js';
@@ -70,6 +71,9 @@ export function DebugView({
   onSelectAgent,
 }: DebugViewProps) {
   const [diagnostics, setDiagnostics] = useState<Record<number, AgentDiagnostics>>({});
+  // The agent whose × asked "close?" (office consoles only) — same two-step
+  // confirmation as ToolOverlay's overlay ×, reusing closeClickStep.
+  const [confirmCloseId, setConfirmCloseId] = useState<number | null>(null);
 
   // Request diagnostics from extension periodically
   useEffect(() => {
@@ -103,6 +107,8 @@ export function DebugView({
     const status = agentStatuses[id];
     const hasActiveTools = tools.some((t) => !t.done);
     const diag = diagnostics[id];
+    const hasConsole = !!officeState.characters.get(id)?.terminalId;
+    const confirming = confirmCloseId === id;
     return (
       <div
         key={id}
@@ -115,17 +121,43 @@ export function DebugView({
           >
             Agent #{id}
           </span>
+          {confirming && (
+            <span className="text-sm text-danger" data-testid="close-confirm">
+              ¿Cerrar? Esto termina la sesión
+            </span>
+          )}
+          {confirming && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmCloseId(null);
+              }}
+              className={`opacity-70 ${isSelected ? 'text-white' : ''}`}
+              title="No cerrar"
+              data-testid="close-cancel"
+            >
+              No
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
             onClick={(e) => {
               e.stopPropagation();
+              if (closeClickStep(hasConsole, confirming) === 'ask') {
+                setConfirmCloseId(id);
+                return;
+              }
+              setConfirmCloseId(null);
               transport.send({ type: 'closeAgent', id });
             }}
-            className={`opacity-70 ${isSelected ? 'text-white' : ''}`}
-            title="Close agent"
+            className={`opacity-70 ${isSelected ? 'text-white' : ''} ${confirming ? 'text-danger' : ''}`}
+            title={confirming ? 'Cerrar y terminar la sesión' : 'Close agent'}
+            data-testid="agent-close"
           >
-            ✕
+            {confirming ? 'Cerrar' : '✕'}
           </Button>
         </span>
         {(tools.length > 0 || status === 'waiting') && (

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js';
+import type { AttentionEntry } from '../office/attention.js';
 import { isBrowserRuntime } from '../runtime.js';
 import { transport } from '../transport/index.js';
+import { AttentionBar } from './AttentionBar.js';
 import { Button } from './ui/Button.js';
 import { Dropdown, DropdownItem } from './ui/Dropdown.js';
 
@@ -18,6 +20,10 @@ interface BottomToolbarProps {
   consoleCapable: boolean;
   /** Opens the launch dialog (standalone browser's "+ Agent" flow). */
   onOpenLaunchDialog: () => void;
+  /** Who is waiting on the user right now (spec §3 "Te esperan"). */
+  attention: AttentionEntry[];
+  onAttend: (id: number) => void;
+  labelOf: (id: number) => string;
 }
 
 export function BottomToolbar({
@@ -29,6 +35,9 @@ export function BottomToolbar({
   workspaceFolders,
   consoleCapable,
   onOpenLaunchDialog,
+  attention,
+  onAttend,
+  labelOf,
 }: BottomToolbarProps) {
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
   const [isBypassMenuOpen, setIsBypassMenuOpen] = useState(false);
@@ -141,6 +150,9 @@ export function BottomToolbar({
             </>
           )}
         </div>
+      )}
+      {(!isBrowserRuntime || consoleCapable) && (
+        <AttentionBar attention={attention} onAttend={onAttend} labelOf={labelOf} />
       )}
       <Button
         variant={isEditMode ? 'active' : 'default'}

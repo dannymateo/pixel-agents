@@ -116,4 +116,29 @@ describe('TerminalHub', () => {
     flush();
     expect(a).toEqual([{ type: 'terminalSnapshot', terminalId: id, data: '', exited: false }]);
   });
+
+  it('forget tells every attached connection the console is gone, after its pending output', () => {
+    const { hub, ptys, id, flush } = setup();
+    const a: Array<Record<string, unknown>> = [];
+    const b: Array<Record<string, unknown>> = [];
+    hub.attach('c1', id, (m) => a.push(m));
+    hub.attach('c2', id, (m) => b.push(m));
+    ptys[0].emit('ultimo');
+    hub.forget(id);
+    expect(a.slice(1)).toEqual([
+      { type: 'terminalOutput', terminalId: id, data: 'ultimo' },
+      { type: 'terminalExit', terminalId: id, exitCode: -1 },
+    ]);
+    expect(b.at(-1)).toEqual({ type: 'terminalExit', terminalId: id, exitCode: -1 });
+    expect(hub.isAttached('c1', id)).toBe(false);
+    flush();
+    ptys[0].emit('tarde');
+    flush();
+    expect(a).toHaveLength(3);
+  });
+
+  it('forget of an unknown console is a no-op', () => {
+    const { hub } = setup();
+    expect(() => hub.forget('nope')).not.toThrow();
+  });
 });

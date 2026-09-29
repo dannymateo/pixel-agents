@@ -23,6 +23,7 @@ import {
   IDLE_TO_LOUNGE_MS_DEFAULT,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
   PALETTE_COUNT,
+  TERMINAL_EXIT_CODE_UNAVAILABLE,
   TERMINAL_INPUT_MAX_CHARS,
 } from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
@@ -192,8 +193,16 @@ export function handleClientMessage(
 
     case 'terminalAttach': {
       const hub = runtime?.terminalHub;
-      if (!hub || !ctx.connId || typeof msg.terminalId !== 'string') break;
-      hub.attach(ctx.connId, msg.terminalId, send);
+      if (!ctx.connId || typeof msg.terminalId !== 'string') break;
+      // Unknown or already closed (e.g. a console reopened after a server
+      // restart): say so, or the client cannot tell refused from slow.
+      if (!hub?.attach(ctx.connId, msg.terminalId, send)) {
+        send({
+          type: 'terminalExit',
+          terminalId: msg.terminalId,
+          exitCode: TERMINAL_EXIT_CODE_UNAVAILABLE,
+        });
+      }
       break;
     }
 
@@ -228,7 +237,10 @@ export function handleClientMessage(
       if (!runtime || typeof msg.terminalId !== 'string') break;
       const agentId = runtime.agentIdForTerminal(msg.terminalId);
       if (agentId !== undefined) runtime.removeAgent(agentId);
-      else runtime.ptyHost?.close(msg.terminalId);
+      else {
+        runtime.ptyHost?.close(msg.terminalId);
+        runtime.terminalHub?.forget(msg.terminalId);
+      }
       break;
     }
 

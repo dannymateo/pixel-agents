@@ -29,7 +29,12 @@ class FakePty implements PtyProcess {
   }
   onExit(cb: (e: { exitCode: number }) => void) {
     this.exitCb = cb;
-    return { dispose() {} };
+    // Like node-pty: a disposed listener hears nothing more.
+    return {
+      dispose: () => {
+        if (this.exitCb === cb) this.exitCb = null;
+      },
+    };
   }
   write() {}
   resize() {}
@@ -137,6 +142,46 @@ describe('AgentRuntime.launchOfficeAgent', () => {
     const canonical = fs.realpathSync.native(workDir);
     expect(spawned[0].cwd).toBe(canonical);
     expect(agent.projectDir).toBe(claudeProvider.getSessionDirs!(canonical)[0]);
+  });
+
+  it('removing the agent kills its console and tells attached viewers it is gone', () => {
+    const { agentId, terminalId } = runtime.launchOfficeAgent({ cwd: workDir });
+    const got: Array<Record<string, unknown>> = [];
+    runtime.terminalHub!.attach('c1', terminalId, (m) => got.push(m));
+    runtime.removeAgent(agentId);
+    expect(ptys[0].killed).toBe(true);
+    expect(got.at(-1)).toEqual({ type: 'terminalExit', terminalId, exitCode: -1 });
+    expect(runtime.terminalHub!.isAttached('c1', terminalId)).toBe(false);
+  });
+
+  it('dispose kills every live console', () => {
+    runtime.launchOfficeAgent({ cwd: workDir });
+    runtime.launchOfficeAgent({ cwd: workDir });
+    runtime.dispose();
+    expect(ptys.map((p) => p.killed)).toEqual([true, true]);
+  });
+
+  it('a failure after the console opened closes it instead of orphaning it', () => {
+    const broken = new AgentRuntime(new AgentStateStore(), {
+      ...claudeProvider,
+      getSessionDirs: () => {
+        throw new Error('boom');
+      },
+    });
+    const brokenPtys: FakePty[] = [];
+    const host = new PtyHost(() => {
+      const p = new FakePty();
+      brokenPtys.push(p);
+      return p;
+    });
+    broken.attachPtyHost(host);
+    try {
+      expect(() => broken.launchOfficeAgent({ cwd: workDir })).toThrow(/boom/);
+      expect(brokenPtys[0].killed).toBe(true);
+      expect(host.size).toBe(0);
+    } finally {
+      broken.dispose();
+    }
   });
 
   it('disposeAndWait kills the consoles and resolves once they exited', async () => {

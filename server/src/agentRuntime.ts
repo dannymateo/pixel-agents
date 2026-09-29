@@ -467,41 +467,49 @@ export class AgentRuntime {
     const stripped = new Set<string>(OFFICE_CONSOLE_STRIPPED_ENV);
     for (const key of Object.keys(env)) if (stripped.has(key.toUpperCase())) delete env[key];
     const terminalId = this.ptyHost.open({ file, args, cwd: canonicalCwd, env });
-
-    const projectDir = this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd;
-    const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
-    this.knownJsonlFiles.add(jsonlFile);
-    const id = this.store.nextAgentId.current++;
-    const agent: AgentState = {
-      id,
-      sessionId,
-      isExternal: false,
-      terminalId,
-      projectDir,
-      jsonlFile,
-      fileOffset: 0,
-      lineBuffer: '',
-      activeToolIds: new Set(),
-      activeToolStatuses: new Map(),
-      activeToolNames: new Map(),
-      activeSubagentToolIds: new Map(),
-      activeSubagentToolNames: new Map(),
-      backgroundAgentToolIds: new Set(),
-      isWaiting: false,
-      permissionSent: false,
-      hadToolsInTurn: false,
-      lastDataAt: 0,
-      linesProcessed: 0,
-      seenUnknownRecordTypes: new Set(),
-      hookDelivered: false,
-      contextTokens: 0,
-      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
-    };
-    assignPaletteIfNeeded(agent, this.store);
-    this.agentByTerminal.set(terminalId, id);
-    this.store.set(id, agent);
-    this.registerAgent(sessionId, id);
-    this.watchWhenTranscriptAppears(id);
+    // Anything failing past this point must not orphan the console just opened.
+    let id: number | undefined;
+    try {
+      const projectDir = this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd;
+      const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
+      this.knownJsonlFiles.add(jsonlFile);
+      id = this.store.nextAgentId.current++;
+      const agent: AgentState = {
+        id,
+        sessionId,
+        isExternal: false,
+        terminalId,
+        projectDir,
+        jsonlFile,
+        fileOffset: 0,
+        lineBuffer: '',
+        activeToolIds: new Set(),
+        activeToolStatuses: new Map(),
+        activeToolNames: new Map(),
+        activeSubagentToolIds: new Map(),
+        activeSubagentToolNames: new Map(),
+        backgroundAgentToolIds: new Set(),
+        isWaiting: false,
+        permissionSent: false,
+        hadToolsInTurn: false,
+        lastDataAt: 0,
+        linesProcessed: 0,
+        seenUnknownRecordTypes: new Set(),
+        hookDelivered: false,
+        contextTokens: 0,
+        maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+      };
+      assignPaletteIfNeeded(agent, this.store);
+      this.agentByTerminal.set(terminalId, id);
+      this.store.set(id, agent);
+      this.registerAgent(sessionId, id);
+      this.watchWhenTranscriptAppears(id);
+    } catch (err) {
+      this.agentByTerminal.delete(terminalId);
+      if (id !== undefined && this.store.has(id)) this.removeAgent(id);
+      this.ptyHost.close(terminalId);
+      throw err;
+    }
     return { agentId: id, terminalId };
   }
 
@@ -567,6 +575,7 @@ export class AgentRuntime {
     if (terminalId) {
       this.agentByTerminal.delete(terminalId);
       this.ptyHost?.close(terminalId);
+      this.terminalHub?.forget(terminalId);
     }
     if (target.parentAgentId === undefined && !this.disposed) {
       this.leaveSubtree(id, false);

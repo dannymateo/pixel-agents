@@ -1054,6 +1054,11 @@ describe('clientMessageHandler: office consoles', () => {
     expect(written).toEqual([]);
   });
 
+  it('attaching to an unknown or closed console answers that it is gone', () => {
+    dispatch({ type: 'terminalAttach', terminalId: 'nope' });
+    expect(sent).toEqual([{ type: 'terminalExit', terminalId: 'nope', exitCode: -1 }]);
+  });
+
   it('terminalClose kills the console and removes its agent', () => {
     dispatch({ type: 'launchAgent', folderPath: workDir });
     const r = sent.find((m) => m.type === 'launchResult')!;

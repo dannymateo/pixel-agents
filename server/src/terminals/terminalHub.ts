@@ -1,4 +1,4 @@
-import { TERMINAL_OUTPUT_FLUSH_MS } from '../constants.js';
+import { TERMINAL_EXIT_CODE_UNAVAILABLE, TERMINAL_OUTPUT_FLUSH_MS } from '../constants.js';
 import type { PtyHost } from './ptyHost.js';
 
 type Send = (m: Record<string, unknown>) => void;
@@ -94,6 +94,24 @@ export class TerminalHub {
     sub.dead = true;
     conns?.delete(connId);
     if (conns && conns.size === 0) this.subs.delete(terminalId);
+  }
+
+  /**
+   * A console closed on purpose (its agent removed): PtyHost fires no exit for
+   * that, so every other connection still attached would keep a dead modal.
+   * Each gets its pending output, then a terminalExit with
+   * TERMINAL_EXIT_CODE_UNAVAILABLE, and the entry is dropped.
+   */
+  forget(terminalId: string): void {
+    const conns = this.subs.get(terminalId);
+    if (!conns) return;
+    this.subs.delete(terminalId);
+    for (const [, sub] of conns) {
+      if (sub.dead) continue;
+      this.flush(terminalId, sub);
+      sub.dead = true;
+      sub.send({ type: 'terminalExit', terminalId, exitCode: TERMINAL_EXIT_CODE_UNAVAILABLE });
+    }
   }
 
   dropConnection(connId: string): void {

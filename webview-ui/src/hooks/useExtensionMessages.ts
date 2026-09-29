@@ -126,6 +126,11 @@ interface ExtensionMessageState {
   idleToLoungeMinutes: number | null;
   /** Minutes an unused agent rests in the lounge before it leaves (same source). */
   loungeToLeaveMinutes: number | null;
+  /** Whether the connected provider can launch real office consoles
+   *  (providerCapabilities.terminals). Gates "+ Agent" in the standalone browser. */
+  consoleCapable: boolean;
+  /** Defaults for the launch dialog (launchOptions), or null before the server reports them. */
+  launchOptions: { defaultCwd: string; recentDirs: string[] } | null;
 }
 
 /** A string off the wire, or undefined. */
@@ -204,6 +209,11 @@ export function useExtensionMessages(
   // local copy that could disagree with what it applies).
   const [idleToLoungeMinutes, setIdleToLoungeMinutes] = useState<number | null>(null);
   const [loungeToLeaveMinutes, setLoungeToLeaveMinutes] = useState<number | null>(null);
+  const [consoleCapable, setConsoleCapable] = useState(false);
+  const [launchOptions, setLaunchOptions] = useState<{
+    defaultCwd: string;
+    recentDirs: string[];
+  } | null>(null);
   const applyLivingOfficeTimings = useCallback((msg: Record<string, unknown>) => {
     const t = parseLivingOfficeTimings(msg);
     if (t.idleToLoungeMinutes !== undefined) setIdleToLoungeMinutes(t.idleToLoungeMinutes);
@@ -272,6 +282,19 @@ export function useExtensionMessages(
           readingTools: msg.readingTools,
           subagentToolNames: msg.subagentToolNames,
         });
+        setConsoleCapable(msg.terminals === true);
+        return;
+      }
+
+      if (msg.type === 'launchOptions') {
+        if (typeof msg.defaultCwd === 'string' && Array.isArray(msg.recentDirs)) {
+          setLaunchOptions({
+            defaultCwd: msg.defaultCwd as string,
+            recentDirs: (msg.recentDirs as unknown[]).filter(
+              (d): d is string => typeof d === 'string',
+            ),
+          });
+        }
         return;
       }
 
@@ -350,6 +373,11 @@ export function useExtensionMessages(
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
             os.setHeadless(id, true);
           }
+        }
+        const terminalId = wireString(msg.terminalId);
+        if (terminalId) {
+          const ch = os.characters.get(id);
+          if (ch) ch.terminalId = terminalId;
         }
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
@@ -460,6 +488,19 @@ export function useExtensionMessages(
         }
         // Agents already on the floor may have come back with a changed tree.
         living.refresh();
+        // Consoles (privileged clients only): applied wherever the character
+        // already exists — roots added directly above, and derived agents just
+        // placed. An agent still buffered (layout not ready yet) picks up no
+        // terminalId; office consoles are a fresh-launch feature, not a
+        // reconnect concern this pass covers.
+        for (const id of incoming) {
+          const terminalId = wireString(
+            (meta[id] as Record<string, unknown> | undefined)?.terminalId,
+          );
+          if (!terminalId) continue;
+          const ch = os.characters.get(id);
+          if (ch) ch.terminalId = terminalId;
+        }
         setAgents((prev) => {
           const ids = new Set(prev);
           const merged = [...prev];
@@ -929,5 +970,7 @@ export function useExtensionMessages(
     setShowAreas,
     idleToLoungeMinutes,
     loungeToLeaveMinutes,
+    consoleCapable,
+    launchOptions,
   };
 }

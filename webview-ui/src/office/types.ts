@@ -236,6 +236,8 @@ export interface Character {
    *  per-consumer guard reads this flag. It exists for the render/e2e snapshot
    *  (testHooks.getCharacters) to tell the greeter from agents. */
   isGreeter?: boolean;
+  /** Office console of this agent (privileged clients only). */
+  terminalId?: string;
 
   // -- Living office (docs/adr/0003) --
   /** Server-owned presence, as last animated. undefined = working. */

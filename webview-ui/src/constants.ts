@@ -417,6 +417,17 @@ export const MODULE_AREA_COLORS = [
   '#5ec4e0',
 ];
 
+// ── Office console (xterm.js) ────────────────────────────────
+export const CONSOLE_THEME = {
+  background: '#1e1e2e',
+  foreground: '#e0def4',
+  cursor: '#f6c177',
+  selectionBackground: '#44415a',
+} as const;
+export const CONSOLE_FONT_FAMILY = 'Consolas, "Cascadia Mono", Menlo, monospace';
+export const CONSOLE_FONT_SIZE = 14;
+export const CONSOLE_SCROLLBACK_LINES = 5000;
+
 // ── Conversations between agents ────────────────────────────
 /** Typewriter speed of a conversation bubble, in characters per second. */
 export const CONVERSATION_TYPE_CPS = 80;

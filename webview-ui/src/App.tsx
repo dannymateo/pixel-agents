@@ -5,9 +5,11 @@ import { AgentScreenModal } from './components/AgentScreenModal.js';
 import { BottomToolbar } from './components/BottomToolbar.js';
 import { ChangelogModal } from './components/ChangelogModal.js';
 import { ConnectionIndicator } from './components/ConnectionIndicator.js';
+import { ConsoleModal } from './components/ConsoleModal.js';
 import { DebugView } from './components/DebugView.js';
 import { EditActionBar } from './components/EditActionBar.js';
 import { IntroBubble } from './components/IntroBubble.js';
+import { LaunchDialog } from './components/LaunchDialog.js';
 import { MigrationNotice } from './components/MigrationNotice.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { Tooltip } from './components/Tooltip.js';
@@ -135,6 +137,8 @@ function App() {
     setShowAreas,
     idleToLoungeMinutes,
     loungeToLeaveMinutes,
+    consoleCapable,
+    launchOptions,
   } = useExtensionMessages(
     getOfficeState,
     editor.setLastSavedLayout,
@@ -166,6 +170,20 @@ function App() {
     [editor.isEditMode],
   );
   const handleCloseScreen = useCallback(() => setScreenAgentId(null), []);
+
+  // The office console (spec §2): a launched-agent's real `claude` terminal,
+  // rendered in xterm.js. Only agents with a `terminalId` (standalone browser,
+  // launched via the dialog below) ever open one.
+  const [consoleTerminal, setConsoleTerminal] = useState<{ id: string; title: string } | null>(
+    null,
+  );
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const handleOpenLaunchDialog = useCallback(() => setLaunchOpen(true), []);
+  const handleLaunched = useCallback((agentId: number, terminalId: string) => {
+    setLaunchOpen(false);
+    setConsoleTerminal({ id: terminalId, title: `Agente #${agentId}` });
+  }, []);
+  const handleCloseConsole = useCallback(() => setConsoleTerminal(null), []);
 
   const currentMajorMinor = toMajorMinor(extensionVersion);
 
@@ -349,6 +367,13 @@ function App() {
     const os = getOfficeState();
     const meta = os.subagentMeta.get(agentId);
     const focusId = meta ? meta.parentAgentId : agentId;
+    // An agent launched from the browser's office console has no VS Code
+    // terminal to focus — clicking it reopens its own console instead.
+    const terminalId = os.characters.get(focusId)?.terminalId;
+    if (terminalId) {
+      setConsoleTerminal({ id: terminalId, title: `Agente #${focusId}` });
+      return;
+    }
     transport.send({ type: 'focusAgent', id: focusId });
   }, []);
 
@@ -662,6 +687,8 @@ function App() {
         isSettingsOpen={isSettingsOpen}
         onToggleSettings={() => setIsSettingsOpen((v) => !v)}
         workspaceFolders={workspaceFolders}
+        consoleCapable={consoleCapable}
+        onOpenLaunchDialog={handleOpenLaunchDialog}
       />
 
       <VersionIndicator
@@ -734,6 +761,25 @@ function App() {
           transport={transport}
           onClose={handleCloseScreen}
           context={screenContext(screenAgentId)}
+        />
+      )}
+
+      {launchOpen && launchOptions && (
+        <LaunchDialog
+          defaultCwd={launchOptions.defaultCwd}
+          recentDirs={launchOptions.recentDirs}
+          transport={transport}
+          onClose={() => setLaunchOpen(false)}
+          onLaunched={handleLaunched}
+        />
+      )}
+
+      {consoleTerminal && (
+        <ConsoleModal
+          terminalId={consoleTerminal.id}
+          title={consoleTerminal.title}
+          transport={transport}
+          onClose={handleCloseConsole}
         />
       )}
 

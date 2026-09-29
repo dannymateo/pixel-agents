@@ -271,3 +271,12 @@ export const SESSION_TAIL_READ_BYTES = 64 * 1024;
 export const SESSION_HEAD_READ_BYTES = 64 * 1024;
 /** Longest session title shown in the resume list. */
 export const SESSION_TITLE_MAX_CHARS = 120;
+/** Machine-wide project folders shown in the launch dialog (server/src/terminals/machineSessions.ts). */
+export const MACHINE_PROJECTS_MAX = 50;
+/** Machine-wide recent sessions shown in the launch dialog's resume list. */
+export const RECENT_SESSIONS_MAX = 20;
+/** A session transcript modified more recently than this is assumed still open
+ *  in some untracked terminal (not tracked by this server) and excluded from
+ *  the resume list -- resuming it would put two `claude` processes on one
+ *  session id. */
+export const RECENT_SESSION_LIVE_WINDOW_MS = 30_000;

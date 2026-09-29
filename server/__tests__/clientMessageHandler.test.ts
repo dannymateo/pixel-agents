@@ -1152,6 +1152,35 @@ describe('clientMessageHandler: office consoles', () => {
     );
   });
 
+  it('webviewReady re-sends a pending takeover to a privileged client, after existingAgents', () => {
+    const sessionId = crypto.randomUUID();
+    const jsonlFile = writeSyntheticSession(sessionId, { cwd: workDir });
+    store.set(
+      5,
+      createTestAgent({
+        id: 5,
+        sessionId,
+        isExternal: true,
+        jsonlFile,
+        projectDir: path.dirname(jsonlFile),
+      }),
+    );
+    runtime.requestTakeover(5);
+    expect(runtime.pendingTakeoverIds()).toEqual([5]);
+
+    // A WS reconnect without a server restart: the mark is still there.
+    dispatch({ type: 'webviewReady' });
+    const types = sent.map((m) => m.type);
+    const statusAt = types.indexOf('takeoverStatus');
+    expect(sent[statusAt]).toEqual({ type: 'takeoverStatus', id: 5, state: 'waitingExit' });
+    expect(statusAt).toBeGreaterThan(types.indexOf('existingAgents'));
+
+    // A viewer gets no such resend (its panel shows no takeover controls).
+    sent = [];
+    dispatch({ type: 'webviewReady' }, ctx(false, 'v1'));
+    expect(sent.some((m) => m.type === 'takeoverStatus')).toBe(false);
+  });
+
   it('a viewer is told consoles are unavailable and gets no launch options', () => {
     // The runtime HAS a pty host here: only the privilege check keeps it hidden.
     expect(runtime.ptyHost).toBeTruthy();

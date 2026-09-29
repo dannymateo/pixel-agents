@@ -618,6 +618,12 @@ export class AgentRuntime {
     this.store.broadcast({ type: 'takeoverStatus', id, state: 'waitingExit' });
   }
 
+  /** Agents waiting for their external session to end before being brought
+   *  in (re-announced to a reconnecting operator on webviewReady). */
+  pendingTakeoverIds(): number[] {
+    return [...this.pendingTakeover];
+  }
+
   /** Stop waiting to bring an agent in: it stays external. */
   cancelTakeover(id: number): void {
     if (!this.pendingTakeover.delete(id)) return;

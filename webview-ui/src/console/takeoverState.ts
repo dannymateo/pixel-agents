@@ -35,7 +35,9 @@ export function applyTakeover(
   // in memory (spec §1) and don't survive a restart, so anything we were
   // still tracking is stale the moment a fresh `existingAgents` snapshot
   // arrives — a lingering `waitingExit`/`failed` panel would otherwise sit
-  // there forever with no message ever going to clear it.
+  // there forever with no message ever going to clear it. A reconnect WITHOUT
+  // a restart keeps its marks: the server re-sends `waitingExit` for each one
+  // right after this snapshot (handleWebviewReady step 9).
   if (m.type === 'existingAgents') {
     return state.size === 0 ? state : new Map();
   }

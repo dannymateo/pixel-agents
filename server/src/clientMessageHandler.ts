@@ -833,4 +833,14 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // exist once the layout flush creates them. Without this a reconnecting
   // client shows bare characters until each agent takes another turn.
   resendAgentActivity(send, store);
+
+  // 9. Pending "Traer a la oficina" marks, point-to-point to an operator. The
+  // client drops its waiting panel on existingAgents (a server restart loses
+  // the marks), so a WS reconnect WITHOUT a restart must hear them again,
+  // after that snapshot, or the operator loses Cancel and the explanation.
+  if (ctx.privileged === true && runtime) {
+    for (const id of runtime.pendingTakeoverIds()) {
+      send({ type: 'takeoverStatus', id, state: 'waitingExit' });
+    }
+  }
 }

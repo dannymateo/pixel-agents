@@ -48,7 +48,7 @@ describe('AgentRuntime.launchOfficeAgent', () => {
   let store: AgentStateStore;
   let runtime: AgentRuntime;
   let ptys: FakePty[];
-  let spawned: Array<{ file: string; args: string[]; cwd: string }>;
+  let spawned: Array<{ file: string; args: string[]; cwd: string; env: Record<string, string> }>;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-launch-'));
@@ -61,7 +61,7 @@ describe('AgentRuntime.launchOfficeAgent', () => {
     ptys = [];
     spawned = [];
     const factory: PtyFactory = (file, args, o) => {
-      spawned.push({ file, args, cwd: o.cwd });
+      spawned.push({ file, args, cwd: o.cwd, env: o.env });
       const p = new FakePty();
       ptys.push(p);
       return p;
@@ -90,6 +90,25 @@ describe('AgentRuntime.launchOfficeAgent', () => {
   it('passes bypassPermissions through to the launch command', () => {
     runtime.launchOfficeAgent({ cwd: workDir, bypassPermissions: true });
     expect(spawned[0].args).toContain('--dangerously-skip-permissions');
+  });
+
+  it('strips only the nested-session markers from the console env', () => {
+    const saved = { ...process.env };
+    process.env.CLAUDECODE = '1';
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'cli';
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    process.env.PIXEL_AGENTS_MOCK_CONSOLE = '1';
+    try {
+      runtime.launchOfficeAgent({ cwd: workDir });
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+    }
+    const env = spawned[0].env;
+    expect(env.CLAUDECODE).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+    expect(env.CLAUDE_CODE_USE_BEDROCK).toBe('1');
+    expect(env.PIXEL_AGENTS_MOCK_CONSOLE).toBe('1');
   });
 
   it('refuses a cwd that is not an existing absolute directory', () => {

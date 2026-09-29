@@ -246,5 +246,18 @@ export const TERMINAL_INPUT_MAX_CHARS = 64 * 1024;
  *  and pasting stay far below; a flood is dropped). */
 export const TERMINAL_MESSAGE_RATE_MAX = 400;
 export const TERMINAL_MESSAGE_RATE_WINDOW_MS = 1_000;
+/** Variables stripped from an office console's environment. A server started
+ *  from inside a Claude Code session inherits these nested-session markers,
+ *  and `claude` refuses to start when it sees them. Only these two: users
+ *  configure claude through other CLAUDE_CODE_* variables (e.g.
+ *  CLAUDE_CODE_USE_BEDROCK), and PIXEL_AGENTS_* must reach the child too. */
+export const OFFICE_CONSOLE_STRIPPED_ENV = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'] as const;
+/** Exit code sent in terminalExit when the console is gone without a real
+ *  process exit: closed on purpose, or unknown to this server (e.g. after a
+ *  restart). The client shows it as "session unavailable". */
+export const TERMINAL_EXIT_CODE_UNAVAILABLE = -1;
+/** How long shutdown waits for killed consoles to report their exit before
+ *  the process exits anyway (Windows conpty's kill is partly async). */
+export const SHUTDOWN_PTY_EXIT_TIMEOUT_MS = 2_000;
 /** Recent launch folders remembered for the launch dialog, newest first. */
 export const RECENT_LAUNCH_DIRS_MAX = 5;

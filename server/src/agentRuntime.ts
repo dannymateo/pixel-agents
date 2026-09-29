@@ -22,6 +22,7 @@ import {
   IDLE_TO_LOUNGE_MS_DEFAULT,
   JSONL_POLL_INTERVAL_MS,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
+  OFFICE_CONSOLE_STRIPPED_ENV,
 } from './constants.js';
 import { ConversationTracker } from './conversations.js';
 import { DismissalTracker } from './dismissalTracker.js';
@@ -459,6 +460,11 @@ export class AgentRuntime {
       process.env[CLAUDE_COMMAND_OVERRIDE_ENV],
     );
     const env = { ...(process.env as Record<string, string>), ...(launch.env ?? {}) };
+    // A server started inside a Claude Code session would hand its nested-session
+    // markers to the new claude, which then refuses to start.
+    // Case-insensitive: Windows env names are, and a spread keeps whatever case it had.
+    const stripped = new Set<string>(OFFICE_CONSOLE_STRIPPED_ENV);
+    for (const key of Object.keys(env)) if (stripped.has(key.toUpperCase())) delete env[key];
     const terminalId = this.ptyHost.open({ file, args, cwd: canonicalCwd, env });
 
     const projectDir = this.provider.getSessionDirs?.(canonicalCwd)[0] ?? canonicalCwd;

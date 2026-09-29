@@ -181,6 +181,37 @@ test('derived agents still count for permissions and questions (answered in thei
   expect(tr.list().map((e) => e.reason)).toEqual(['permission', 'question']);
 });
 
+test('a permission outranks a question: a later question never replaces it', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentToolPermission', id: 1 });
+  expect(
+    tr.apply({
+      type: 'subagentToolStart',
+      id: 1,
+      parentToolId: 'p',
+      toolId: 'q',
+      status: 'Waiting for your answer',
+    }),
+  ).toBe(false);
+  expect(tr.list()[0]).toMatchObject({ id: 1, reason: 'permission' });
+  // Once the permission is answered, the still-open question is what remains.
+  tr.apply({ type: 'agentToolPermissionClear', id: 1 });
+  expect(tr.list()[0]).toMatchObject({ id: 1, reason: 'question' });
+});
+
+test('a question still replaces a plain waiting', () => {
+  const { tr } = tracker();
+  tr.apply({ type: 'agentStatus', id: 1, status: 'waiting' });
+  tr.apply({
+    type: 'agentToolStart',
+    id: 1,
+    toolId: 'q',
+    status: 'Waiting for your answer',
+    toolName: 'AskUserQuestion',
+  });
+  expect(tr.list()[0]).toMatchObject({ id: 1, reason: 'question' });
+});
+
 test('attentionTitle', () => {
   expect(attentionTitle(0)).toBe('Pixel Agents');
   expect(attentionTitle(2)).toBe('(2) Pixel Agents');

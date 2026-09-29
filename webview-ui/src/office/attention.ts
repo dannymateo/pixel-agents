@@ -79,7 +79,10 @@ export class AttentionTracker {
       case 'subagentToolPermission':
         return this.raise(id, 'permission');
       case 'agentToolPermissionClear':
-        return this.drop(id, 'permission');
+        if (!this.drop(id, 'permission')) return false;
+        // A question still open underneath is what the agent waits on now.
+        if (this.questions.get(id)?.size) this.raise(id, 'question');
+        return true;
       case 'agentToolStart':
       case 'subagentToolStart': {
         const isQuestion =
@@ -94,7 +97,8 @@ export class AttentionTracker {
             if (!parents) this.questionParents.set(id, (parents = new Map()));
             parents.set(m.toolId, m.parentToolId);
           }
-          return this.raise(id, 'question', true);
+          // Replaces a `waiting`, never a `permission` (permission > question).
+          return this.raise(id, 'question');
         }
         // Any other tool: the agent is working again.
         return this.dropUnlessQuestion(id);
@@ -188,10 +192,9 @@ export class AttentionTracker {
     return changed;
   }
 
-  private raise(id: number, reason: AttentionReason, force = false): boolean {
+  private raise(id: number, reason: AttentionReason): boolean {
     const current = this.entries.get(id);
-    if (current && !force && RANK[current.reason] >= RANK[reason]) return false;
-    if (current?.reason === reason) return false;
+    if (current && RANK[current.reason] >= RANK[reason]) return false;
     this.entries.set(id, { id, reason, since: current?.since ?? this.now() });
     return true;
   }

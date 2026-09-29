@@ -73,6 +73,13 @@ _Avoid_: spawn point, exit
 Start a new agent from the office.
 _Avoid_: spawn (that's the character-level visual event), create
 
+**Office console**:
+A real terminal the standalone server owns, running `claude` for an agent launched from the office. Shown in the browser with xterm.js; only the operator (token) can see or type into it.
+_Avoid_: shell, tty (implementation words)
+
+**Office session**:
+A session launched from the office, bound to its office console. Its agent is internal (not headless).
+
 **Adopt**:
 Begin tracking a session that was started outside the office. An adopted agent is a full citizen.
 _Avoid_: import, attach

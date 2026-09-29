@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { PtyHost } from '../src/terminals/ptyHost.js';
 import type { PtyFactory, PtyProcess } from '../src/terminals/ptyTypes.js';
@@ -9,6 +9,8 @@ class FakePty implements PtyProcess {
   written: string[] = [];
   size = { cols: 0, rows: 0 };
   killed = false;
+  /** When false, kill() does not report exit (a conpty whose exit arrives later). */
+  exitOnKill = true;
   private dataCbs: Array<(d: string) => void> = [];
   private exitCbs: Array<(e: { exitCode: number }) => void> = [];
   onData(cb: (d: string) => void) {
@@ -27,7 +29,7 @@ class FakePty implements PtyProcess {
   }
   kill() {
     this.killed = true;
-    this.emitExit(1);
+    if (this.exitOnKill) this.emitExit(1);
   }
   emit(d: string) {
     for (const cb of this.dataCbs) cb(d);
@@ -160,5 +162,53 @@ describe('PtyHost', () => {
     // Try to emit more data on the pty (subscription is disposed, so it won't reach listeners).
     ptys[0].emit('orphaned\n');
     expect(out).toEqual([]);
+  });
+
+  describe('closeAllAndWait', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('resolves once every killed console reported its exit, without public exit events', async () => {
+      const { h, ptys } = host();
+      const exits: number[] = [];
+      h.onExit((_id, code) => exits.push(code));
+      h.open(SPEC);
+      h.open(SPEC);
+      for (const p of ptys) p.exitOnKill = false;
+      let done = false;
+      const waiting = h.closeAllAndWait(10_000).then(() => (done = true));
+      expect(ptys.every((p) => p.killed)).toBe(true);
+      expect(h.size).toBe(0);
+      ptys[0].emitExit(0);
+      await Promise.resolve();
+      expect(done).toBe(false);
+      ptys[1].emitExit(0);
+      await waiting;
+      expect(done).toBe(true);
+      expect(exits).toEqual([]);
+    });
+
+    it('resolves after the timeout when a console never reports its exit', async () => {
+      vi.useFakeTimers();
+      const { h, ptys } = host();
+      h.open(SPEC);
+      ptys[0].exitOnKill = false;
+      let done = false;
+      const waiting = h.closeAllAndWait(2_000).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await waiting;
+      expect(done).toBe(true);
+    });
+
+    it('resolves at once with nothing live', async () => {
+      const { h, ptys } = host();
+      h.open(SPEC);
+      ptys[0].emitExit(0);
+      await h.closeAllAndWait(10_000);
+      expect(h.size).toBe(0);
+    });
   });
 });

@@ -139,6 +139,13 @@ describe('AgentRuntime.launchOfficeAgent', () => {
     expect(agent.projectDir).toBe(claudeProvider.getSessionDirs!(canonical)[0]);
   });
 
+  it('disposeAndWait kills the consoles and resolves once they exited', async () => {
+    runtime.launchOfficeAgent({ cwd: workDir });
+    await runtime.disposeAndWait(10_000);
+    expect(ptys[0].killed).toBe(true);
+    expect(store.size).toBe(0);
+  });
+
   it('terminalId reaches only privileged connections', () => {
     const { agentId, terminalId } = runtime.launchOfficeAgent({ cwd: workDir });
     const agent = store.get(agentId)!;

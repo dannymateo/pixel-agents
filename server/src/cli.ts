@@ -25,7 +25,7 @@ import {
   grantHooksConsent,
   readConfig,
 } from './configPersistence.js';
-import { MAX_PORT, MIN_PORT } from './constants.js';
+import { MAX_PORT, MIN_PORT, SHUTDOWN_PTY_EXIT_TIMEOUT_MS } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import { claudeProvider, copyHookScript, hookProviderById } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
@@ -321,11 +321,20 @@ async function main(): Promise<void> {
     );
 
     // ── Graceful shutdown ──
+    let shuttingDown = false;
     function shutdown(): void {
+      if (shuttingDown) return;
+      shuttingDown = true;
       console.log('\nShutting down...');
-      runtime.dispose();
-      server.stop();
-      process.exit(0);
+      // Bounded wait for the office consoles' own exit before process.exit:
+      // Windows conpty's kill is partly async and would orphan claude.
+      void runtime
+        .disposeAndWait(SHUTDOWN_PTY_EXIT_TIMEOUT_MS)
+        .catch(() => undefined)
+        .finally(() => {
+          server.stop();
+          process.exit(0);
+        });
     }
 
     process.on('SIGINT', shutdown);

@@ -23,6 +23,7 @@ import {
   JSONL_POLL_INTERVAL_MS,
   LOUNGE_TO_LEAVE_MS_DEFAULT,
   OFFICE_CONSOLE_STRIPPED_ENV,
+  SHUTDOWN_PTY_EXIT_TIMEOUT_MS,
 } from './constants.js';
 import { ConversationTracker } from './conversations.js';
 import { DismissalTracker } from './dismissalTracker.js';
@@ -1131,6 +1132,17 @@ export class AgentRuntime {
   }
 
   // ── Cleanup ──
+
+  /**
+   * Shutdown: kill the office consoles, dispose, and resolve once every killed
+   * console reported its exit or `timeoutMs` elapsed -- exiting the process
+   * right after dispose() can orphan a child whose kill is still in flight.
+   */
+  async disposeAndWait(timeoutMs = SHUTDOWN_PTY_EXIT_TIMEOUT_MS): Promise<void> {
+    const consolesExited = this.ptyHost?.closeAllAndWait(timeoutMs) ?? Promise.resolve();
+    this.dispose();
+    await consolesExited;
+  }
 
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {

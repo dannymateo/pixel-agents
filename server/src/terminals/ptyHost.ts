@@ -132,6 +132,44 @@ export class PtyHost {
     for (const id of [...this.consoles.keys()]) this.close(id);
   }
 
+  /**
+   * Shutdown: kill every live console and resolve once each reported its own
+   * exit, or after `timeoutMs` (Windows conpty's kill is partly async, so an
+   * immediate process.exit can orphan the child). Like close(), no public exit
+   * or output event fires: only an internal listener waits for the exit.
+   */
+  closeAllAndWait(timeoutMs: number): Promise<void> {
+    const waits: Array<Promise<void>> = [];
+    for (const [id, c] of [...this.consoles]) {
+      this.consoles.delete(id);
+      if (c.exited) continue;
+      c.dataDispose();
+      c.exitDispose();
+      waits.push(
+        new Promise<void>((resolve) => {
+          try {
+            c.pty.onExit(() => resolve());
+          } catch {
+            resolve();
+          }
+          try {
+            c.pty.kill();
+          } catch {
+            resolve(); /* already gone */
+          }
+        }),
+      );
+    }
+    if (waits.length === 0) return Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    return Promise.race([Promise.all(waits).then(() => undefined), timeout]).finally(() =>
+      clearTimeout(timer),
+    );
+  }
+
   onOutput(cb: (id: string, data: string) => void): () => void {
     this.outputCbs.add(cb);
     return () => this.outputCbs.delete(cb);

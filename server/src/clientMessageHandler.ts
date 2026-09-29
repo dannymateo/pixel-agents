@@ -38,6 +38,7 @@ import {
   cwdDedupeKey,
   listMachineProjects,
   listRecentSessions,
+  safeIsDirectory,
 } from './terminals/machineSessions.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
@@ -606,6 +607,11 @@ function buildLaunchOptions(ctx: ClientMessageContext): {
 
   const byCwd = new Map<string, MachineProject>();
   for (const cwd of readRecentLaunchDirs()) {
+    // "si existen" (brief): a recent launch dir that was since deleted must
+    // not surface as projects[0] -- the dialog would default to it and
+    // launching would fail. Same existence check listMachineProjects applies
+    // to its own candidates.
+    if (!safeIsDirectory(cwd)) continue;
     byCwd.set(cwdDedupeKey(cwd), { cwd, name: path.basename(cwd), lastUsed: 0 });
   }
   for (const project of listMachineProjects(roots)) {

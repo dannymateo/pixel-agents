@@ -11,7 +11,12 @@ import {
   type ClientMessageContext,
   handleClientMessage,
 } from '../src/clientMessageHandler.js';
-import { getHooksEnabled, readConfig, setHooksEnabled } from '../src/configPersistence.js';
+import {
+  addRecentLaunchDir,
+  getHooksEnabled,
+  readConfig,
+  setHooksEnabled,
+} from '../src/configPersistence.js';
 import {
   IDLE_TO_LOUNGE_MINUTES_MAX,
   IDLE_TO_LOUNGE_MINUTES_MIN,
@@ -1184,5 +1189,36 @@ describe('clientMessageHandler: office consoles', () => {
         (s) => s.sessionId === liveSessionId,
       ),
     ).toBe(false);
+  });
+
+  it('a recent launch dir that was deleted is absent from launchOptions.projects', () => {
+    const deletedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-deleted-'));
+    addRecentLaunchDir(deletedDir);
+    addRecentLaunchDir(workDir);
+    fs.rmSync(deletedDir, { recursive: true, force: true });
+
+    dispatch({ type: 'requestLaunchOptions' });
+
+    const launchOptions = sent.find((m) => m.type === 'launchOptions');
+    const cwds = (launchOptions?.projects as Array<{ cwd: string }>).map((p) => p.cwd);
+    expect(cwds).not.toContain(deletedDir);
+    expect(cwds).toContain(workDir);
+  });
+
+  it('requestLaunchOptions from a privileged connection with no PtyHost sends nothing', () => {
+    const runtimeNoPty = new AgentRuntime(store, claudeProvider);
+    try {
+      expect(runtimeNoPty.ptyHost).toBeNull();
+      handleClientMessage({ type: 'requestLaunchOptions' }, (m) => sent.push(m), {
+        store,
+        runtime: runtimeNoPty,
+        cache: null,
+        privileged: true,
+        connId: 'c1',
+      });
+      expect(sent).toEqual([]);
+    } finally {
+      runtimeNoPty.dispose();
+    }
   });
 });

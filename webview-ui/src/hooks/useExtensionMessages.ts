@@ -330,7 +330,8 @@ export function useExtensionMessages(
               typeof o.sessionId === 'string' &&
               typeof o.cwd === 'string' &&
               typeof o.name === 'string' &&
-              typeof o.lastUsed === 'number'
+              typeof o.lastUsed === 'number' &&
+              (o.title === undefined || typeof o.title === 'string')
             );
           };
           setLaunchOptions({

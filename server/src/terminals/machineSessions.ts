@@ -109,7 +109,12 @@ function safeStat(file: string): fs.Stats | undefined {
   }
 }
 
-function safeIsDirectory(dir: string): boolean {
+/** True when `dir` exists and is a directory right now. Exported so callers
+ *  merging their own cwd list (the launch dialog's recent-launch-dirs,
+ *  clientMessageHandler.ts) apply the same existence check this module uses
+ *  for `listMachineProjects` -- a deleted folder must not surface as a
+ *  launch option. */
+export function safeIsDirectory(dir: string): boolean {
   try {
     return fs.statSync(dir).isDirectory();
   } catch {
